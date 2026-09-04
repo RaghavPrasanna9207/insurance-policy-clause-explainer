@@ -58,10 +58,21 @@ An HTTP surface over the pipeline: upload, poll, read ranked results.
 - **Failure 7: the bug tests could not catch** - `create_all` never alters an existing table, so the dev database went stale. Every fixture starts with `drop_all`, so the suite was structurally blind to it. A suite that rebuilds the world before each test cannot see bugs that need a world which has been running for a while.
 - **Two kinds of test** - fast tests against a seeded database vs. end-to-end runs through the model. Tests check that it works; evals check how well.
 
+### M4 - The interface, and designing against a default
+Four screens, built to a written design system rather than to defaults.
+
+- **Find the metaphor already in your data** - this product is a document arguing with another document, which is a critical edition. The API already pairs verbatim source with character offsets; the design makes that visible.
+- **Typography can carry meaning** - a document serif for the policy's words, a sans for the app's, so the side-by-side needs no labels.
+- **Colour must never be the only signal** - two semantic hues rather than a traffic light, always paired with a numeral and a text label.
+- **Failure 8: a rule enforced everywhere except where it mattered** - the severity numeral vanished below the `sm` breakpoint, breaking a rule from this project's own DESIGN.md.
+- **Failure 9: module resolution follows the file, not the shell** - the same bug as M0's `ModuleNotFoundError`, in a different language.
+- **You cannot review a design you have not looked at** - a committed Playwright script drives the real UI and captures every screen; it found bugs no typecheck or unit test could.
+
 ---
 
 ## Related documents
 
+- **[../DESIGN.md](../DESIGN.md)** - the design system: aesthetic direction, the four-face typography with its semantic rule, the colour tokens, and the list of forbidden anti-patterns.
 - **[../CLAUDE.md](../CLAUDE.md)** — the architecture, the deliberate omissions (no vector DB, no task queue, no LLM in the scoring path), and the conventions this project follows.
 - **[../evals/](../evals/)** — the evaluation harness. Model and prompt changes in this project are justified by measurements, not by impressions.
 

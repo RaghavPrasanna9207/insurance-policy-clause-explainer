@@ -178,6 +178,10 @@ def _persist_analyses(doc_id: str, segments, analyses, scored) -> None:
                     buriedness=sc.buriedness,
                     impact_score=sc.impact_score,
                     reading_grade=sc.reading_grade,
+                    position_signal=sc.position_signal,
+                    reading_signal=sc.reading_signal,
+                    crossref_signal=sc.crossref_signal,
+                    jargon_signal=sc.jargon_signal,
                     # Recorded per row so a document analysed under an older
                     # prompt is identifiable without guesswork.
                     model=settings.model,

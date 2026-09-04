@@ -1,0 +1,167 @@
+@import "tailwindcss";
+
+/* Class-based dark mode. Tailwind 4 defaults to the OS media query; we want an
+   explicit toggle so a reader can override their system setting, which matters
+   for a document app people may deliberately want on paper-white at night. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* ---------------------------------------------------------------------------
+   Design tokens. See DESIGN.md for the reasoning behind every value here.
+
+   Defined as plain CSS variables on :root and overridden on .dark, then mapped
+   into Tailwind with `@theme inline`. The `inline` keyword matters: it makes
+   utilities compile to `var(--paper)` rather than copying the literal hex, so
+   one class works in both themes and switching is a single class on <html>.
+   --------------------------------------------------------------------------- */
+:root {
+  /* Light: warm archival paper, never clinical white. */
+  --paper: #f7f4ee;
+  --surface: #fffdf8;
+  --surface-sunk: #f1ede4;
+  --ink: #1a1815;
+  --muted: #6b6459;
+  --rule: #ddd6c8;
+  --rule-strong: #c4b9a4;
+
+  /* Two semantic hues, not a traffic light. "Reduces your payout" is a
+     different KIND of harm from "denies your claim", not a middle state. */
+  --oxide: #a8321e; /* can deny or void your claim */
+  --oxide-soft: #f2e3de;
+  --ochre: #946a22; /* reduces what you are paid */
+  --ochre-soft: #f3ebda;
+}
+
+.dark {
+  /* Dark is ink, not grey: a warm near-black ground with paper-coloured text,
+     so the document metaphor survives the inversion. */
+  --paper: #14130f;
+  --surface: #1c1a15;
+  --surface-sunk: #100f0c;
+  --ink: #ece6da;
+  --muted: #9a9184;
+  --rule: #33302a;
+  --rule-strong: #4a4640;
+
+  /* Lightened and slightly desaturated for a dark ground; same hue family, so
+     severity reads identically in both themes. */
+  --oxide: #e06a52;
+  --oxide-soft: #33201c;
+  --ochre: #d3a24b;
+  --ochre-soft: #2c2519;
+}
+
+@theme inline {
+  --color-paper: var(--paper);
+  --color-surface: var(--surface);
+  --color-sunk: var(--surface-sunk);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-rule: var(--rule);
+  --color-rule-strong: var(--rule-strong);
+  --color-oxide: var(--oxide);
+  --color-oxide-soft: var(--oxide-soft);
+  --color-ochre: var(--ochre);
+  --color-ochre-soft: var(--ochre-soft);
+
+  /* Four faces, each with a semantic job. `--font-source` is reserved for the
+     policy's own words and must never be used for interface text. */
+  --font-display: "Instrument Serif", Georgia, serif;
+  --font-sans: "Instrument Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-source: "Source Serif 4", Georgia, "Times New Roman", serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", monospace;
+
+  /* Documents have square corners. Uniform bubble-radius is the single
+     loudest AI-generated tell, so the scale tops out at 3px. */
+  --radius-xs: 1px;
+  --radius-sm: 2px;
+  --radius-md: 3px;
+}
+
+@layer base {
+  html {
+    background-color: var(--paper);
+    color-scheme: light;
+  }
+  html.dark {
+    color-scheme: dark;
+  }
+
+  body {
+    background-color: var(--paper);
+    color: var(--ink);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* Every interactive element gets a visible, high-contrast focus ring. A
+     trust product that cannot be driven from the keyboard is not trustworthy. */
+  :focus-visible {
+    outline: 2px solid var(--ink);
+    outline-offset: 2px;
+  }
+
+  /* Mono numerals must line up in columns; impact scores are read by
+     comparison, and proportional figures make that harder than it needs to be. */
+  .tnum {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum";
+  }
+
+  /* Motion is minimal-functional by policy. This honours the OS setting and
+     removes even the small transitions we do use. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+@layer components {
+  /* Small-caps section label. Used for structural signposting instead of
+     oversized headings, which keeps the page reading like a document. */
+  .label {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  /* The masthead's double rule: a thick line over a hairline, the way a
+     printed report separates its title block from its contents. */
+  .double-rule {
+    border-bottom: 3px solid var(--ink);
+    box-shadow: 0 4px 0 -3px var(--rule);
+  }
+
+  /* The policy's own words. Applying this class is what marks text as the
+     source document rather than our commentary. */
+  .verbatim {
+    font-family: var(--font-source);
+    font-size: 15px;
+    line-height: 1.65;
+  }
+}
+
+/* A single short fade for lists on first render. No stagger, no spring, no
+   scroll choreography: this is an anxiety product and motion that draws
+   attention to the interface works against it. */
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.rise {
+  animation: rise 160ms ease-out both;
+}

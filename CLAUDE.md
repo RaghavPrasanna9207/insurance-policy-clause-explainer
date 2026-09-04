@@ -110,3 +110,14 @@ That last row is load-bearing for the whole grounding design. **Every categorica
 ## Non-negotiable: this is not advice
 
 Every user-facing surface carries a clear "not legal or financial advice" disclaimer. `insufficient_information` is a first-class verdict — the system must be able to say *"your document doesn't address this"* rather than guessing. A confident wrong answer here costs someone a real claim.
+
+## Design System
+
+Always read [DESIGN.md](DESIGN.md) before making any visual or UI decision. Fonts, colours, spacing, radius, motion, and the aesthetic direction are defined there. Do not deviate without explicit approval.
+
+The two rules most easily broken by accident:
+
+1. **The policy's own words are always set in Source Serif 4; everything the app says is always set in Instrument Sans.** The typeface encodes which voice is speaking. Never mix them.
+2. **Severity is never carried by colour alone.** Every severity indicator pairs its hue with a numeral and a text label.
+
+DESIGN.md also lists forbidden anti-patterns (gradients, glassmorphism, centered heroes, bubble radius, Inter). Treat that list as hard constraints, and flag any code that violates it.

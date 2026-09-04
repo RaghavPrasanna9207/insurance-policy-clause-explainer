@@ -22,3 +22,6 @@ web/dist/
 
 # Env
 .env
+
+# Screenshot output from `npm run shots`
+web/.screenshots/

@@ -44,6 +44,11 @@ def _summary(clause: Clause, analysis: ClauseAnalysis) -> ClauseSummary:
         what_it_means=analysis.what_it_means,
         impact_score=analysis.impact_score,
         buriedness=analysis.buriedness,
+        position_signal=analysis.position_signal,
+        reading_signal=analysis.reading_signal,
+        crossref_signal=analysis.crossref_signal,
+        jargon_signal=analysis.jargon_signal,
+        reading_grade=analysis.reading_grade,
         triggers=json.loads(analysis.triggers_json),
         monetary_limits=json.loads(analysis.limits_json),
         time_windows=json.loads(analysis.time_windows_json),
@@ -199,5 +204,4 @@ def get_clause(clause_id: str, session: Session = Depends(get_session)):
         page_end=clause.page_end,
         likelihood=analysis.likelihood,
         severity=analysis.severity,
-        reading_grade=analysis.reading_grade,
     )

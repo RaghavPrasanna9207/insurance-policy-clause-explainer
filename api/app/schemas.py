@@ -51,6 +51,15 @@ class ClauseSummary(BaseModel):
     what_it_means: str
     impact_score: float
     buriedness: float
+    # Why this clause is easy to miss, component by component (each 0-1).
+    # Surfaced on the risk card, not just stored: the product's whole promise
+    # is showing the reader what the document obscured, so the reasons have to
+    # be visible rather than compressed into one opaque number.
+    position_signal: float = 0.0
+    reading_signal: float = 0.0
+    crossref_signal: float = 0.0
+    jargon_signal: float = 0.0
+    reading_grade: float = 0.0
 
     triggers: list[str] = []
     monetary_limits: list[str] = []
@@ -74,7 +83,6 @@ class ClauseDetail(ClauseSummary):
 
     likelihood: int
     severity: int
-    reading_grade: float
 
 
 class TypeCount(BaseModel):

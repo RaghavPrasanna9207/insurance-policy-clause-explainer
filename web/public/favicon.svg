@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- A page with one clause struck through in oxide red. The whole product
+       in 32 pixels: a document, and the line in it that costs you money. -->
+  <rect width="32" height="32" fill="#F7F4EE"/>
+  <g stroke="#1A1815" stroke-width="2" stroke-linecap="square">
+    <path d="M7 9h18M7 15h18M7 27h11"/>
+  </g>
+  <path d="M7 21h18" stroke="#A8321E" stroke-width="2" stroke-linecap="square"/>
+</svg>

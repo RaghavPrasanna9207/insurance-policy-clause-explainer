@@ -89,6 +89,16 @@ class ClauseAnalysis(SQLModel, table=True):
     # Flesch-Kincaid grade of the ORIGINAL clause text. Stored so the UI can
     # justify a ranking ("reads at university level") without recomputing it.
     reading_grade: float = 0.0
+    # The four buriedness components, stored separately rather than only as
+    # their blended total. The UI's "Why you'd miss this" line names the actual
+    # reasons a clause is easy to overlook - buried on page 34, reads at grade
+    # 17, points at three other clauses - and a single combined number cannot
+    # say which of those applied. Keeping the parts is what makes the score
+    # explainable instead of an oracle.
+    position_signal: float = 0.0
+    reading_signal: float = 0.0
+    crossref_signal: float = 0.0
+    jargon_signal: float = 0.0
 
     model: str
     prompt_version: str

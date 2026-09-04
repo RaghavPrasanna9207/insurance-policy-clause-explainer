@@ -2,7 +2,7 @@
 
 Upload an Indian health insurance policy PDF. Find out what could get your claim denied — before you file one.
 
-> **Status: in development.** The full pipeline and REST API work end to end — upload a policy PDF and get back a ranked list of the clauses that could cost you money. Clause classification scores macro-F1 **1.000** on the golden set. The web UI and scenario simulator are still to come. See [Roadmap](#roadmap).
+> **Status: in development.** End to end and usable: upload a policy PDF in the browser and get back a ranked list of the clauses that could cost you money, each in plain English beside the policy's own wording. Clause classification scores macro-F1 **1.000** on the golden set. The scenario simulator is still to come. See [Roadmap](#roadmap).
 
 ---
 
@@ -71,6 +71,16 @@ python -m venv .venv
 
 Then open <http://localhost:8000/health> to confirm Ollama is reachable and the model is present, or <http://localhost:8000/docs> for the API.
 
+**The web interface** runs alongside it:
+
+```bash
+cd web
+npm install
+npm run dev          # http://localhost:5173
+```
+
+Upload a policy and it will show you, in order, the clauses most likely to cost you money - each in plain English, with the policy's own wording and page number beside it, and a line explaining why you would have missed it.
+
 ### Tests
 
 ```bash
@@ -95,7 +105,7 @@ No real insurer policy wordings are committed to this repository.
 
 **[`docs/LEARNING-LOG.md`](docs/LEARNING-LOG.md)** explains what each part of the system does, why it is built that way, and every non-obvious failure hit along the way — written to be read cold, without any other context. [`docs/README.md`](docs/README.md) is the reading-order index.
 
-[`CLAUDE.md`](CLAUDE.md) records the architecture and conventions.
+[`DESIGN.md`](DESIGN.md) is the design system — aesthetic direction, the four-face typography and its semantic rule, colour tokens, and a list of forbidden anti-patterns. [`CLAUDE.md`](CLAUDE.md) records the architecture and conventions.
 
 ---
 
@@ -107,7 +117,7 @@ No real insurer policy wordings are committed to this repository.
 | M1 | Ingest + segment — offsets and clause boundaries, no LLM | ✅ |
 | M2 | Analyze + score — classification, deterministic impact formula | ✅ macro-F1 1.000 |
 | M3 | REST API — upload, poll, ranked clauses | ✅ |
-| M4 | Web UI — risk dashboard, clause explorer | |
+| M4 | Web UI — risk dashboard, clause explorer | ✅ |
 | M5 | Scenario simulator | |
 | M6 | Eval report | |
 

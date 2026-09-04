@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <title>Policy Reader — what could get your claim denied</title>
+    <meta
+      name="description"
+      content="Reads an Indian health insurance policy and ranks the clauses that could reduce or deny a claim."
+    />
+
+    <!-- Four faces, each with a semantic job (see DESIGN.md):
+         Instrument Serif  display and masthead
+         Instrument Sans   interface and plain-language text
+         Source Serif 4    the policy's own words, and nothing else
+         JetBrains Mono    scores, clause numbers, page references -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Instrument+Sans:ital,wght@0,400..700;1,400..600&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500;600&family=Source+Serif+4:ital,opsz,wght@0,8..60,400..600;1,8..60,400&display=swap"
+      rel="stylesheet"
+    />
+
+    <!-- Applied before first paint so a dark-mode reader never gets a flash of
+         paper-white. Reads the saved choice, falling back to the OS setting. -->
+    <script>
+      (function () {
+        try {
+          var saved = localStorage.getItem('theme')
+          var dark = saved
+            ? saved === 'dark'
+            : window.matchMedia('(prefers-color-scheme: dark)').matches
+          if (dark) document.documentElement.classList.add('dark')
+        } catch (e) {}
+      })()
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

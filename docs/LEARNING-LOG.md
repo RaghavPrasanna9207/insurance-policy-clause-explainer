@@ -771,3 +771,213 @@ Two reasons, one immediate and one structural.
 
 There is a third, quieter reason: they make the invariant **testable at the boundary**. Because the API exposes the offsets, the end-to-end test can assert `raw_text[char_start:char_end] == source_text` on data that has travelled through the database and out over HTTP. An invariant you cannot observe from outside is one you cannot verify has survived the trip.
 </details>
+
+---
+
+# M4 — The interface, and designing against a default
+
+## What M4 had to produce
+
+A web UI over the API: upload a policy, watch it process, read the ranked results, open any clause beside the policy's own wording.
+
+The explicit brief was that it **must not look AI-generated**. That is a real and specific failure mode, not a vague aesthetic worry, and it is worth naming precisely because it has a recognisable signature: purple or violet gradients, glassmorphism, a centered hero with a big heading and a subtitle beneath, three-column feature grids with icons in coloured circles, uniform bubbly border-radius, gradient buttons, and Inter (or its stand-in, Space Grotesk) doing all the typographic work.
+
+Those choices are what a model reaches for by default. Avoiding them requires having an actual idea instead.
+
+---
+
+## Concept 10: Find the metaphor already in your data
+
+The idea came from asking what this product structurally *is*, rather than what category it belongs to.
+
+It is not a dashboard, and it is not a marketing site. **It is a document that argues with another document.** That has an established form: the **critical edition** — a source text on one side, an editor's gloss on the other, with an apparatus of notes and references.
+
+That metaphor was already latent in the data model. The API returns, for every clause, `source_text` alongside `char_start` and `char_end` — the original wording and its exact position. The design's job was to make that structural fact visible, rather than inventing a decorative theme and laying it on top.
+
+Everything else followed:
+
+| Decision | Because |
+|---|---|
+| Warm archival paper `#F7F4EE`, not white | Documents are printed on paper; clinical white is the SaaS default |
+| **2px** border radius | Documents have square corners, and uniform bubble-radius is the loudest generated-design tell |
+| Left-aligned masthead with a double rule | A report leads with its identity and metadata; a centered hero is a pitch |
+| Borders, never decorative shadows | Structure in a document is drawn with rules |
+| Minimal-functional motion only | This is an anxiety product; playful easing would be actively wrong |
+
+The full system is in `DESIGN.md`, including a list of forbidden anti-patterns that `CLAUDE.md` points at.
+
+---
+
+## Concept 11: Typography can carry meaning, not just style
+
+This is the part of the system worth stealing for other projects.
+
+The app has two voices: **the policy's** and **its own**. Rather than labelling them, the design gives them different typefaces:
+
+```css
+--font-sans:   "Instrument Sans"  /* everything the app says */
+--font-source: "Source Serif 4"   /* the policy's own words, and nothing else */
+```
+
+A document serif for the source, a neutral sans for the translation. In `ClausePanel.tsx` the verbatim quotation carries a single `.verbatim` class, and the result is that the side-by-side needs **no "original wording" caption** — a reader can see which is which before reading a word.
+
+That is typography doing semantic work instead of decorating. Two more faces complete the set, each with a job rather than a mood: Instrument Serif for display, JetBrains Mono for anything numeric (clause numbers, page references, impact scores, with tabular figures so columns of numbers line up for comparison).
+
+The rule is written into `CLAUDE.md` because it is the sort of thing that erodes silently: *the policy's words are always Source Serif 4; everything the app says is always Instrument Sans; never mix them.*
+
+---
+
+## Concept 12: Colour must never be the only signal
+
+Severity uses exactly two hues:
+
+- **Oxide red `#A8321E`** — can deny or void your claim
+- **Ochre `#946A22`** — reduces what you are paid
+
+Deliberately **not** a red/amber/green traffic light. A traffic light implies a scale from bad to good, but "reduces your payout" is not a midpoint between "denied" and "covered" — it is a **different kind of harm**. Encoding it as a middle state would misrepresent it.
+
+And the hard rule, from `DESIGN.md`:
+
+> **Severity is never carried by colour alone.** Every severity indicator pairs its hue with a numeral (the impact score) and a text label ("Can void your claim").
+
+A risk product that fails a colourblind reader is a broken risk product. This rule caught a real bug in my own implementation, below.
+
+---
+
+## The design decision that changed the product
+
+Asked what one thing a person should remember after using this, the answer chosen was:
+
+> **"I can see what they were hiding."**
+
+That is a design answer with an engineering consequence. `buriedness` had been a number computed in the backend, used to sort a list and otherwise invisible. If the whole promise is showing the reader what was obscured, then **hiding the reasons wastes the project's most distinctive idea.**
+
+So M4 changed the backend. `ClauseAnalysis` now stores the four buriedness components separately rather than only their blended total, and the API exposes them, because `buriedness: 0.47` tells a reader nothing while its parts tell them exactly what happened. `clauseMeta.ts` turns them into sentences:
+
+```
+WHY YOU'D MISS THIS  buried on page 3, deep in the document ·
+                     written at grade 16 reading level ·
+                     sends you to other clauses to understand it
+```
+
+Thresholds are set so a typical clause produces one or two reasons rather than four. **A note that fires on everything stops being information.**
+
+---
+
+## Failure 8: enforcing a rule everywhere except where it mattered
+
+The impact score lived in a right-hand rail, which was hidden below the `sm` breakpoint to make room on narrow screens:
+
+```tsx
+<div className="hidden w-[132px] shrink-0 pt-0.5 sm:block">
+```
+
+Reasonable-looking, and wrong. On a phone the severity colour and its text label survived, but **the numeral disappeared entirely** — which is precisely the rule `DESIGN.md` states as non-negotiable, violated by the same person who wrote it, in the same week.
+
+It was invisible in code review and obvious in a screenshot at 430px wide.
+
+The fix keeps the rail hidden but moves the number inline at that width, so the numeral always travels with the hue:
+
+```tsx
+<span className="tnum font-mono opacity-70 sm:hidden">
+  · impact {clause.impact_score.toFixed(0)}
+</span>
+```
+
+> A design rule you have written down is not a design rule you have enforced. Responsive breakpoints are where they quietly break, because a rule holds at the width you happen to be developing at.
+
+**A second bug from the same screenshot pass:** the impact bar used `bg-current` inside a container whose text colour was never set, so it inherited plain ink instead of the severity hue, and its track was nearly invisible against the page. The bar was drawn but carried no information. Moving the band colour onto the rail container fixed both — the bar now reads as a proportional oxide-red measure, and 85 versus 82 is visibly different.
+
+---
+
+## Concept 13: You cannot review a design you have not looked at
+
+Both bugs above were found the same way: by driving a real browser against a real policy and **looking at the result**.
+
+`web/scripts/screenshots.mjs` is committed rather than thrown away. It launches Playwright, uploads the 39-clause golden policy through the actual UI, waits for the pipeline, and captures every screen in light and dark at retina density:
+
+```bash
+npm run shots
+```
+
+This matters more than it sounds. `DESIGN.md` forbids a specific list of visual patterns, and there is no way to check a built interface against that list except by seeing it. A typecheck passes on a page with an invisible progress bar. A unit test passes on a layout with 500px of dead space. Neither can tell you the severity numeral vanished on a phone.
+
+Three things the screenshots caught that no other check could:
+1. The score disappearing at narrow widths (a stated rule, broken).
+2. The impact bar carrying no colour and no visible track.
+3. A large empty lower half on the upload page, which reads as unfinished. Filled with a "What it looks for" strip that names the four costly clause types — content that sets expectations rather than padding that fills space.
+
+---
+
+## Failure 9: module resolution follows the file, not the shell
+
+The screenshot script was first written to a scratch directory and run from the project:
+
+```
+Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'playwright'
+```
+
+Node resolves imports by walking up from **the importing file's own location** looking for `node_modules`, not from the shell's working directory. A script in a temp folder has no `node_modules` above it, so nothing resolves however you invoke it.
+
+This is the same failure that appeared in M0 with `ModuleNotFoundError: No module named 'app'` for a Python script in a temp directory. Two languages, one rule: **module resolution follows the file, not the shell.**
+
+The fix was also the better outcome — the script moved into `web/scripts/` and became a committed, repeatable tool instead of a throwaway.
+
+---
+
+## A smaller failure worth knowing
+
+The Vite React-TS template enables `erasableSyntaxOnly` in `tsconfig`, which forbids TypeScript syntax with no plain-JavaScript equivalent. Constructor parameter properties are one:
+
+```ts
+constructor(message: string, readonly status: number) {}   // rejected
+```
+
+`tsc --noEmit` passed; `npm run build` failed. They run different configurations, and the build is the one that tells the truth. Declaring and assigning the field explicitly fixes it.
+
+---
+
+## Where M4 ended up
+
+Four screens, in light and dark: upload, processing, the ranked report, and the clause reading panel. Verified against a real 39-clause policy through a real browser.
+
+```
+23 clauses in this policy could reduce or deny a claim.
+
+01  4.7  Non-Medical Expenses          Will not be paid        IMPACT 85
+    WHY YOU'D MISS THIS  buried on page 3, deep in the document ·
+                         written at grade 16 reading level ·
+                         sends you to other clauses to understand it
+```
+
+Files added: `web/src/index.css` (design tokens), `clauseMeta.ts`, `api.ts`, `types.ts`, `components/Chrome.tsx`, `components/RiskCard.tsx`, `components/ClausePanel.tsx`, `routes/Upload.tsx`, `routes/Policy.tsx`, `scripts/screenshots.mjs`, plus `DESIGN.md` at the repo root.
+
+---
+
+## Check it yourself
+
+```bash
+# terminal 1
+cd api && .venv/Scripts/python.exe -m uvicorn app.main:app --port 8000
+# terminal 2
+cd web && npm run dev          # http://localhost:5173
+
+# with both running, recapture every screen
+cd web && npm run shots        # writes web/.screenshots/
+```
+
+Toggle the theme with the button marked **Ink** / **Paper** in the masthead.
+
+**Question to sit with before M5:** the clause panel shows the policy's exact wording and, beneath it, a line in mono reading `characters 6,757–7,013 of the extracted document`. Nobody asked for a character range, and no ordinary reader will ever use it. Why is it on screen?
+
+<details>
+<summary>Answer</summary>
+
+Because it is the difference between **showing evidence and asking to be believed.**
+
+Everything else on that panel is the app's claim about the policy: a plain-language rewrite, a clause type, an impact score. All of it is generated, and all of it could be wrong. The quotation plus its exact position is the one element a reader can check *independently of anything the app says* — that text is at that offset in the document, or it is not.
+
+Most readers will never verify it. That is not the point. The point is that verification is **possible and visible**, which is what separates a tool that shows its working from one that asks for trust. In a domain where a confident wrong answer costs someone a real claim, a system that cannot be checked should not be believed — including by the person who built it.
+
+There is a practical reason too: those offsets are what the future PDF highlighter needs, and displaying them keeps them honest. A number on screen that stopped matching the document would be noticed. A number only used internally would not.
+</details>
