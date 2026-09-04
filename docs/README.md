@@ -50,6 +50,14 @@ Classifying every clause, then ranking them by how much they could cost.
 - **Measuring the right thing** - macro-F1 1.000 on classification, while the ranking buried the room-rent cap at 14. Two different metrics; only one is the product.
 - **Knowing when to stop tuning** - why 6/9 with a reason beats 9/9 by fitting.
 
+### M3 - The API, and a bug tests could not see
+An HTTP surface over the pipeline: upload, poll, read ranked results.
+
+- **Why upload returns 202, not 200** - the work is queued, not completed; and why progress is weighted by time rather than by stage count.
+- **Committing status writes** - the poller reads from a different connection and can only see committed changes.
+- **Failure 7: the bug tests could not catch** - `create_all` never alters an existing table, so the dev database went stale. Every fixture starts with `drop_all`, so the suite was structurally blind to it. A suite that rebuilds the world before each test cannot see bugs that need a world which has been running for a while.
+- **Two kinds of test** - fast tests against a seeded database vs. end-to-end runs through the model. Tests check that it works; evals check how well.
+
 ---
 
 ## Related documents

@@ -6,11 +6,23 @@ file that describes it - both come from the same generator script.
 """
 
 import json
+import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
-import pytest
+# MUST run before anything imports app.config: pydantic-settings reads the
+# environment once, when Settings() is constructed at import time. Setting
+# these here points the whole test suite at a throwaway database and upload
+# directory, so running tests can never touch real uploaded policies or the
+# development database. conftest.py is imported before any test module, which
+# is what makes this early enough to work.
+_TMP = Path(tempfile.mkdtemp(prefix="ipce-tests-"))
+os.environ.setdefault("DB_PATH", str(_TMP / "test.db"))
+os.environ.setdefault("UPLOAD_DIR", str(_TMP / "uploads"))
+
+import pytest  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 GOLDEN_DIR = REPO_ROOT / "evals" / "golden"
@@ -45,3 +57,100 @@ def hostile_pdf() -> Path:
     if not HOSTILE_PDF.exists():
         subprocess.run([sys.executable, str(BUILDER)], check=True, cwd=REPO_ROOT)
     return HOSTILE_PDF
+
+
+MINI_PDF = GOLDEN_DIR / "synthetic-mini-policy.pdf"
+
+
+@pytest.fixture(scope="session")
+def mini_pdf() -> Path:
+    """A 4-clause policy for tests that run the whole pipeline.
+
+    Analysis costs ~3s per clause on a local model, so the 39-clause golden
+    policy would make one end-to-end test take two minutes - long enough that
+    people stop running the suite.
+    """
+    if not MINI_PDF.exists():
+        subprocess.run([sys.executable, str(BUILDER)], check=True, cwd=REPO_ROOT)
+    return MINI_PDF
+
+
+@pytest.fixture
+def api_client():
+    """A TestClient over a fresh, empty database.
+
+    Constructed WITHOUT `with TestClient(app)`, deliberately: the context
+    manager form runs the app's lifespan, which loads the model into VRAM and
+    costs ~27 seconds. Tests that never call the model do not need it.
+    """
+    from fastapi.testclient import TestClient
+    from sqlmodel import SQLModel
+
+    from app.db import engine, init_db
+    from app.main import app
+
+    # Dropping and recreating gives each test a clean slate, so ordering
+    # between tests can never matter.
+    SQLModel.metadata.drop_all(engine)
+    init_db()
+
+    yield TestClient(app)
+
+    SQLModel.metadata.drop_all(engine)
+
+
+@pytest.fixture
+def seeded_document(api_client):
+    """A finished document with four clauses, inserted directly.
+
+    Most API tests are about routing, filtering, sorting and error handling -
+    none of which involve the model. Seeding the database directly tests those
+    in milliseconds instead of minutes, and keeps the results deterministic:
+    the assertions here are about the API's behaviour, not the model's.
+    """
+    from app.models import Clause, ClauseAnalysis, Document
+    from app.db import engine
+    from sqlmodel import Session
+    from app.taxonomy import ClauseType, DocStatus
+
+    doc_id = "testdoc0001"
+    rows = [
+        # (idx, number, heading, type, impact, text)
+        (0, "2.1", "In-patient Hospitalisation", ClauseType.COVERAGE, 18.0,
+         "The Company shall indemnify the Medical Expenses incurred."),
+        (1, "3.2", "Pre-existing Disease Waiting Period", ClauseType.WAITING_PERIOD, 51.9,
+         "Expenses related to a Pre-existing Disease shall be excluded for thirty six months."),
+        (2, "4.1", "Cosmetic Surgery", ClauseType.EXCLUSION, 66.4,
+         "The Company shall not be liable for cosmetic or plastic surgery."),
+        (3, "5.1", "Room Rent Limit", ClauseType.SUB_LIMIT, 57.1,
+         "Room rent shall be limited to one percent of the Sum Insured per day."),
+    ]
+
+    with Session(engine) as session:
+        session.add(Document(
+            id=doc_id, filename="seed.pdf", stored_path="/dev/null",
+            status=DocStatus.READY, stage_detail="Analysed 4 of 4 clauses",
+            progress=1.0, page_count=2, clause_count=len(rows),
+            raw_text="\n".join(r[5] for r in rows),
+        ))
+        for idx, number, heading, ctype, impact, text in rows:
+            cid = f"{doc_id}:{idx}"
+            session.add(Clause(
+                id=cid, doc_id=doc_id, order_idx=idx, number=number,
+                heading=f"{number} {heading}", section_path="SECTION 1 - TERMS",
+                text=text, page_start=0, page_end=0,
+                char_start=0, char_end=len(text),
+            ))
+            session.add(ClauseAnalysis(
+                clause_id=cid, doc_id=doc_id, clause_type=ctype,
+                plain_language=f"Plain language for {number}.",
+                what_it_means=f"What {number} means for you.",
+                triggers_json='["a trigger"]', limits_json="[]",
+                time_windows_json="[]",
+                likelihood=3, severity=4, buriedness=0.4,
+                impact_score=impact, reading_grade=15.0,
+                model="test-model", prompt_version="test",
+            ))
+        session.commit()
+
+    return doc_id

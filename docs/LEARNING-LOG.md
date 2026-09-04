@@ -600,3 +600,174 @@ A third, worth knowing: **39 clauses is a small sample.** A single misclassifica
 
 This is why M2 ends with "the ranking needs a real eval set" rather than with a victory lap.
 </details>
+
+---
+
+# M3 — The API, and a bug tests could not see
+
+## What M3 had to produce
+
+An HTTP surface over the pipeline: upload a PDF, watch it being processed, read the ranked results.
+
+| Method | Route | Purpose |
+|---|---|---|
+| `POST` | `/documents` | Upload a policy PDF; returns `202 Accepted` |
+| `GET` | `/documents/{id}/status` | Stage and progress, for polling |
+| `GET` | `/documents/{id}/summary` | The risk dashboard |
+| `GET` | `/documents/{id}/clauses` | All clauses, filterable and sortable |
+| `GET` | `/clauses/{id}` | One clause, with verbatim source text |
+
+---
+
+## Concept 8: Why the upload returns 202, not 200
+
+Analysis takes about two minutes on a local model. An HTTP request cannot politely stay open that long — browsers, proxies and load balancers all time out — and even if it could, the user would be staring at a blank tab.
+
+So `POST /documents` returns **`202 Accepted`**, whose specific meaning is *"the work has been queued, not completed."* Its body deliberately contains no results. The client then polls `/status`.
+
+The work runs in FastAPI's `BackgroundTasks`, which the plan chose over Celery or a job queue: this is a single-user local app, and a queue would be infrastructure with no reader.
+
+**Progress is weighted by time, not by stage count.** Ingest and segment finish in milliseconds; analysis is essentially all of the wall time. Giving each of four stages 25% would produce a bar that leaps to 50% instantly and then appears frozen for two minutes. Instead analysis owns 10%→95%, and the live run reports genuinely smooth movement:
+
+```
+[10.0%] analyzing   Reading 40 clauses
+[12.1%] analyzing   Read 1 of 40 clauses
+...
+[92.9%] analyzing   Read 39 of 40 clauses
+[100.0%] ready      Analysed 40 of 40 clauses
+```
+
+### One detail that is easy to get wrong
+
+`_update()` in `api/app/pipeline/run.py` opens its **own short-lived session** for each status write, rather than reusing one session held across the whole run:
+
+```python
+def _update(doc_id: str, **fields) -> None:
+    with Session(engine) as session:
+        ...
+        session.commit()
+```
+
+The polling endpoint reads that row from a *different* connection, and it can only observe changes that have actually been **committed**. Held open in one long transaction, the writes would be invisible to the poller and the progress bar would sit at 0% until the very end.
+
+### Failing without a listener
+
+`process_document` never raises. It runs as a background task with nobody awaiting it, so an escaping exception would vanish into the event loop and leave the document reporting "analyzing" forever. Failures are written to the row instead, where the polling UI can surface them — verified by `test_a_corrupt_pdf_fails_the_document_not_the_server`.
+
+---
+
+## Failure 7: the bug the test suite could not have caught
+
+All 57 tests passed. The API worked under `TestClient`. So as a last check I ran a **live uvicorn server** and drove it over real HTTP.
+
+```
+POST /documents -> 202 in 0.23s  id=c04963489b6f
+polling /status:
+  [ 0.0%] failed      Processing failed
+```
+
+```
+OperationalError: table clause has no column named number
+```
+
+**Root cause.** `init_db()` calls SQLAlchemy's `create_all`, which creates tables that do not exist. **It never alters one that does.** The development database had been created back in M0, before `Clause.number` was added in M3. `create_all` looked at it, saw the `clause` table already present, and did nothing.
+
+**Why no test caught it.** The test fixture starts like this:
+
+```python
+SQLModel.metadata.drop_all(engine)
+init_db()
+```
+
+Every test runs against a schema built moments earlier from the current models. **They never run against a schema that has aged.** The tests were not merely failing to catch this bug — they were structurally incapable of it.
+
+> A test suite that rebuilds the world before every test is blind to every bug that only appears in a world which has been running for a while. Schema drift, stale caches, accumulated data, migrations — none of it is reachable from a fixture that starts by deleting everything.
+
+**The fix, and what it deliberately does not do.** `check_schema()` in `api/app/db.py` now compares the live database's columns against the model metadata at startup and raises with the specifics:
+
+```
+The database schema is out of date:
+  table 'clause' is missing: number
+  table 'clauseanalysis' is missing: reading_grade
+
+There are no migrations in v1. Delete data/app.db and re-upload your documents.
+The LLM cache is a separate file, so re-analysis will still be served from cache
+and take seconds.
+```
+
+It **raises rather than dropping the tables itself.** There is no migration path in v1 — that was a deliberate scope decision — but silently discarding someone's uploaded policies is not this function's call to make. It reports exactly what is wrong and exactly how to fix it, and leaves the decision with the person who owns the data.
+
+Note the last line of that message. Because the LLM cache lives in a *separate* SQLite file (a decision made back in M0 for a different reason), deleting the application database costs seconds rather than minutes — every model response is still cached. A small early decision paying off somewhere unrelated.
+
+`test_schema_drift_is_detected` builds a deliberately stale database and asserts the error names both the missing column and the remedy.
+
+---
+
+## Concept 9: Two kinds of test, and why they are separated
+
+`tests/test_api.py` splits along a hard line:
+
+| Kind | What it covers | Cost |
+|---|---|---|
+| **Fast** (18 tests) | Routing, filtering, sorting, validation, error handling — against a directly seeded database | ~3 seconds |
+| **End-to-end** (2 tests, marked `llm`) | One real upload through all four stages, on a 4-clause policy | ~23 seconds |
+
+The seeded fixture inserts a finished document straight into the database. That is not a shortcut — it is the correct scope. A test asserting *"filtering by `clause_type=exclusion` returns only exclusions"* is a test about the API. Routing it through a language model would make it slow, non-deterministic, and liable to fail because the model's opinion of a clause changed.
+
+The end-to-end tests use a purpose-built **4-clause** policy rather than the 39-clause golden set, because analysis costs roughly three seconds per clause and a two-minute test is a test people stop running.
+
+> **Tests check that it works. Evals check how well.** Keeping those separate is what lets both be honest: the tests stay fast and deterministic, and the eval is free to be slow and to report an uncomfortable number.
+
+The end-to-end test also re-verifies the **M1 offset invariant through the entire stack** — for every clause returned over HTTP, `raw_text[char_start:char_end] == source_text`. The grounding guarantee is not something the pipeline has internally and then loses at the API boundary.
+
+---
+
+## Where M3 ended up
+
+Live run against a real server, full 39-clause policy:
+
+```
+POST /documents -> 202 in 0.23s
+pages=5 clauses=40 unanalysed=0
+types: exclusion 8, procedural 6, coverage 6, condition 6,
+       definition 5, sub_limit 5, waiting_period 4
+
+top risks:
+  1. [85.0] exclusion  4.7 Non-Medical Expenses
+     "The policy will never pay for things like phone, TV, internet..."
+  2. [84.7] condition  6.1 Notice of Claim
+     "If you do not notify the company within 24 hours for emergencies..."
+  5. [65.3] sub_limit  5.2 Proportionate Deduction
+     "If you are admitted to a room that costs more than the allowed amount,
+      the company will reduce the cost of your whole treatment..."
+```
+
+**58 tests passing.** Files added: `app/schemas.py`, `app/pipeline/run.py`, `app/routers/documents.py`, `tests/test_api.py`.
+
+---
+
+## Check it yourself
+
+```bash
+cd api
+.venv/Scripts/python.exe -m pytest -q                  # everything
+.venv/Scripts/python.exe -m pytest -q -m "not llm"     # fast only, ~3s
+
+.venv/Scripts/python.exe -m uvicorn app.main:app --reload
+```
+
+Then open <http://localhost:8000/docs> — FastAPI generates interactive documentation from the route signatures and response models, so you can upload a policy and watch the status endpoint from a browser with no frontend at all.
+
+**Question to sit with before M4:** the `/clauses/{id}` endpoint returns `source_text`, `char_start` and `char_end` — the verbatim wording and its exact position in the document. Serving the offsets costs bytes and the UI does not currently draw anything with them. Why send them at all?
+
+<details>
+<summary>Answer</summary>
+
+Two reasons, one immediate and one structural.
+
+**They make the claim checkable by a third party.** `source_text` alone is *our copy* of the wording — a reader has to trust that it matches the PDF. The offsets say precisely where in the extracted document those characters live, so anyone can verify the quote against the document independently of anything this app says about it. That is the difference between showing evidence and asking to be believed.
+
+**They are what the PDF highlighter will need.** M4 renders the plain-language and original text side by side, but the roadmap has a real PDF viewer that highlights the exact clause. Offsets and the stored bounding boxes are what make that a later drop-in rather than a data migration — the decision made in M1 to capture `bboxes` before anything used them, for the same reason.
+
+There is a third, quieter reason: they make the invariant **testable at the boundary**. Because the API exposes the offsets, the end-to-end test can assert `raw_text[char_start:char_end] == source_text` on data that has travelled through the database and out over HTTP. An invariant you cannot observe from outside is one you cannot verify has survived the trip.
+</details>

@@ -33,6 +33,7 @@ OUT_DIR = Path(__file__).parent
 PDF_PATH = OUT_DIR / "synthetic-health-policy.pdf"
 LABELS_PATH = OUT_DIR / "synthetic-health-policy.labels.json"
 HOSTILE_PATH = OUT_DIR / "synthetic-hostile-policy.pdf"
+MINI_PATH = OUT_DIR / "synthetic-mini-policy.pdf"
 
 # --- Page layout constants -------------------------------------------------
 PAGE_W, PAGE_H = fitz.paper_size("a4")
@@ -395,6 +396,35 @@ class _Writer:
         raise RuntimeError("block too large for a single page: " + text[:60])
 
 
+def build_mini() -> None:
+    """A 4-clause policy, for tests that must run the whole pipeline.
+
+    The API tests need a real upload-to-results round trip, but analysis costs
+    roughly three seconds per clause on a local model. Using the 39-clause
+    golden policy would make a single test take two minutes, which is long
+    enough that people stop running the suite.
+
+    Four clauses covering four different types is enough to prove the pipeline
+    wires together end to end. Measuring how WELL it classifies is the eval
+    harness's job, on the full document - a distinction worth keeping: tests
+    check that it works, evals check how well.
+    """
+    doc = fitz.open()
+    w = _Writer(doc)
+
+    w.write("MINI HEALTH POLICY", FONT_BOLD, 14, 8)
+    w.write("SECTION 1 - COVER AND EXCLUSIONS", FONT_BOLD, SIZE_HEAD, 6)
+
+    picks = [c for c in CLAUSES if c[0] in ("2.1", "3.2", "4.1", "5.1")]
+    for number, heading, text, _ in picks:
+        w.write(f"{number} {heading}", FONT_BOLD, SIZE_SUBHEAD, 2)
+        w.write(text, FONT_BODY, SIZE_BODY, 10)
+
+    doc.save(MINI_PATH)
+    doc.close()
+    print(f"wrote {MINI_PATH.name} ({len(picks)} clauses, for fast API tests)")
+
+
 def build_hostile() -> None:
     """The same policy, typeset with NO structural signal whatsoever.
 
@@ -500,3 +530,4 @@ def build() -> None:
 if __name__ == "__main__":
     build()
     build_hostile()
+    build_mini()

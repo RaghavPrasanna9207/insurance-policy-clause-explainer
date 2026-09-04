@@ -2,7 +2,7 @@
 
 Upload an Indian health insurance policy PDF. Find out what could get your claim denied — before you file one.
 
-> **Status: in development.** All four pipeline stages (ingest, segment, analyze, score) are complete and tested — clause classification scores macro-F1 **1.000** on the golden set. The REST API, web UI and scenario simulator are still to come. See [Roadmap](#roadmap).
+> **Status: in development.** The full pipeline and REST API work end to end — upload a policy PDF and get back a ranked list of the clauses that could cost you money. Clause classification scores macro-F1 **1.000** on the golden set. The web UI and scenario simulator are still to come. See [Roadmap](#roadmap).
 
 ---
 
@@ -106,7 +106,7 @@ No real insurer policy wordings are committed to this repository.
 | M0 | Ollama client: constrained JSON, retries, content-addressed cache | ✅ |
 | M1 | Ingest + segment — offsets and clause boundaries, no LLM | ✅ |
 | M2 | Analyze + score — classification, deterministic impact formula | ✅ macro-F1 1.000 |
-| M3 | REST API — upload, poll, ranked clauses | |
+| M3 | REST API — upload, poll, ranked clauses | ✅ |
 | M4 | Web UI — risk dashboard, clause explorer | |
 | M5 | Scenario simulator | |
 | M6 | Eval report | |

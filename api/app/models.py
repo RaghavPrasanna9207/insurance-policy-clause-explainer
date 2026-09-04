@@ -52,6 +52,9 @@ class Clause(SQLModel, table=True):
     # e.g. "4 Exclusions > 4.2 Permanent Exclusions" - powers breadcrumbs and
     # gives the model useful context about where a clause sits.
     section_path: str = ""
+    # The clause's own number ("4.2"). This is the stable human-facing
+    # identifier; `heading` is optional decoration many policies omit entirely.
+    number: str = ""
     heading: str = ""
     text: str
 
@@ -83,6 +86,9 @@ class ClauseAnalysis(SQLModel, table=True):
     # Computed, never guessed - see pipeline/score.py.
     buriedness: float = 0.0
     impact_score: float = Field(default=0.0, index=True)
+    # Flesch-Kincaid grade of the ORIGINAL clause text. Stored so the UI can
+    # justify a ranking ("reads at university level") without recomputing it.
+    reading_grade: float = 0.0
 
     model: str
     prompt_version: str
