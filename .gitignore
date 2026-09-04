@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+api/.venv/
+.pytest_cache/
+
+# Data: uploaded PDFs, SQLite databases, LLM cache
+api/data/
+data/
+
+# Real insurer policy wordings are never committed (licensing).
+# The synthetic test PDFs are generated build artefacts, reproducible from
+# build_synthetic_policy.py; tests/conftest.py rebuilds them if absent. The
+# labels JSON IS committed: it is small, diffable, and readable as documentation
+# of what the golden set contains.
+samples/*.pdf
+*.pdf
+
+# Node
+web/node_modules/
+web/dist/
+
+# Env
+.env

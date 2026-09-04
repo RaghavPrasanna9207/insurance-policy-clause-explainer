@@ -1,0 +1,318 @@
+{
+  "source": "synthetic, authored for this repository",
+  "clause_count": 39,
+  "clauses": [
+    {
+      "number": "1.1",
+      "heading": "Hospital",
+      "expected_type": "definition",
+      "section": "SECTION 1 - DEFINITIONS",
+      "page": 1,
+      "text": "Hospital means any institution established for in-patient care and day care treatment of illness or injuries which has been registered as a hospital with the local authorities, and which has at least ten in-patient beds in towns having a population of less than ten lakhs and fifteen in-patient beds in all other places, qualified nursing staff under its employment round the clock, a fully equipped operation theatre of its own where surgical procedures are carried out, and which maintains daily records of patients accessible to the Company's authorised personnel."
+    },
+    {
+      "number": "1.2",
+      "heading": "Pre-existing Disease",
+      "expected_type": "definition",
+      "section": "SECTION 1 - DEFINITIONS",
+      "page": 1,
+      "text": "Pre-existing Disease means any condition, ailment, injury or disease that is diagnosed by a physician within forty eight months prior to the effective date of the policy issued by the Insurer, or for which medical advice or treatment was recommended by, or received from, a physician within forty eight months prior to the effective date of the policy."
+    },
+    {
+      "number": "1.3",
+      "heading": "Sum Insured",
+      "expected_type": "definition",
+      "section": "SECTION 1 - DEFINITIONS",
+      "page": 1,
+      "text": "Sum Insured means the pre-defined limit specified in the Policy Schedule which represents the maximum aggregate liability of the Company for any and all claims arising during the Policy Year in respect of each Insured Person."
+    },
+    {
+      "number": "1.4",
+      "heading": "Day Care Treatment",
+      "expected_type": "definition",
+      "section": "SECTION 1 - DEFINITIONS",
+      "page": 1,
+      "text": "Day Care Treatment means medical treatment or surgical procedure which is undertaken under general or local anaesthesia in a Hospital or day care centre in less than twenty four hours because of technological advancement, and which would otherwise have required hospitalisation of more than twenty four hours."
+    },
+    {
+      "number": "1.5",
+      "heading": "Reasonable and Customary Charges",
+      "expected_type": "definition",
+      "section": "SECTION 1 - DEFINITIONS",
+      "page": 1,
+      "text": "Reasonable and Customary Charges means the charges for services or supplies which are the standard charges for the specific provider and consistent with the prevailing charges in the geographical area for identical or similar services, taking into account the nature of the illness or injury involved."
+    },
+    {
+      "number": "2.1",
+      "heading": "In-patient Hospitalisation",
+      "expected_type": "coverage",
+      "section": "SECTION 2 - SCOPE OF COVER",
+      "page": 1,
+      "text": "The Company shall indemnify the Medical Expenses incurred by the Insured Person towards hospitalisation exceeding twenty four consecutive hours during the Policy Year for medically necessary treatment of an Illness or Injury contracted or sustained during the Policy Period, up to the Sum Insured specified in the Policy Schedule."
+    },
+    {
+      "number": "2.2",
+      "heading": "Pre-hospitalisation Medical Expenses",
+      "expected_type": "coverage",
+      "section": "SECTION 2 - SCOPE OF COVER",
+      "page": 1,
+      "text": "The Company shall indemnify Medical Expenses incurred during the sixty days immediately preceding the date of admission, provided that such expenses relate to the same condition for which the Insured Person's hospitalisation was required and the in-patient claim has been accepted by the Company."
+    },
+    {
+      "number": "2.3",
+      "heading": "Post-hospitalisation Medical Expenses",
+      "expected_type": "coverage",
+      "section": "SECTION 2 - SCOPE OF COVER",
+      "page": 2,
+      "text": "The Company shall indemnify Medical Expenses incurred during the ninety days immediately following the date of discharge, provided that such expenses relate to the same condition for which the Insured Person was hospitalised and the in-patient claim has been accepted."
+    },
+    {
+      "number": "2.4",
+      "heading": "Day Care Procedures",
+      "expected_type": "coverage",
+      "section": "SECTION 2 - SCOPE OF COVER",
+      "page": 2,
+      "text": "The Company shall indemnify Medical Expenses incurred for Day Care Treatment listed in Annexure II which does not require twenty four hours of hospitalisation, provided such treatment is undertaken in a Hospital or a registered day care centre."
+    },
+    {
+      "number": "2.5",
+      "heading": "Road Ambulance",
+      "expected_type": "coverage",
+      "section": "SECTION 2 - SCOPE OF COVER",
+      "page": 2,
+      "text": "The Company shall reimburse expenses incurred on transportation of the Insured Person by road ambulance to a Hospital for treatment following an Emergency, provided the in-patient claim is admissible under Clause 2.1."
+    },
+    {
+      "number": "2.6",
+      "heading": "AYUSH Treatment",
+      "expected_type": "coverage",
+      "section": "SECTION 2 - SCOPE OF COVER",
+      "page": 2,
+      "text": "The Company shall indemnify Medical Expenses incurred for in-patient treatment taken under Ayurveda, Yoga, Naturopathy, Unani, Siddha and Homeopathy systems of medicine in a government hospital or in an institute accredited by the Quality Council of India."
+    },
+    {
+      "number": "3.1",
+      "heading": "Initial Waiting Period",
+      "expected_type": "waiting_period",
+      "section": "SECTION 3 - WAITING PERIODS",
+      "page": 2,
+      "text": "No claim shall be payable in respect of any Illness contracted during the first thirty days from the commencement date of the first policy with the Company, except claims arising out of an Accident. This exclusion shall not apply on subsequent continuous renewal of the policy without a break."
+    },
+    {
+      "number": "3.2",
+      "heading": "Pre-existing Disease Waiting Period",
+      "expected_type": "waiting_period",
+      "section": "SECTION 3 - WAITING PERIODS",
+      "page": 2,
+      "text": "Expenses related to the treatment of a Pre-existing Disease and its direct complications shall be excluded until the expiry of thirty six months of continuous coverage after the date of inception of the first policy with the Company."
+    },
+    {
+      "number": "3.3",
+      "heading": "Specified Disease Waiting Period",
+      "expected_type": "waiting_period",
+      "section": "SECTION 3 - WAITING PERIODS",
+      "page": 2,
+      "text": "Expenses related to the treatment of cataract, hernia, hysterectomy, benign prostatic hypertrophy, joint replacement surgery, and diseases of the ear, nose and throat shall be excluded until the expiry of twenty four months of continuous coverage from the date of inception of the first policy."
+    },
+    {
+      "number": "3.4",
+      "heading": "Maternity Waiting Period",
+      "expected_type": "waiting_period",
+      "section": "SECTION 3 - WAITING PERIODS",
+      "page": 2,
+      "text": "Expenses related to maternity, childbirth and lawful medical termination of pregnancy shall be covered only after the Insured Person has been continuously covered for a period of thirty six months under this policy, and shall be limited to two deliveries during the lifetime of the Insured Person."
+    },
+    {
+      "number": "4.1",
+      "heading": "Cosmetic and Plastic Surgery",
+      "expected_type": "exclusion",
+      "section": "SECTION 4 - PERMANENT EXCLUSIONS",
+      "page": 2,
+      "text": "The Company shall not be liable to make any payment in respect of expenses incurred in connection with cosmetic or plastic surgery or any treatment to change appearance, unless such surgery is necessitated by an Accident, Burn or Cancer, and is certified by the attending Medical Practitioner to be medically necessary."
+    },
+    {
+      "number": "4.2",
+      "heading": "Intentional Self-Injury",
+      "expected_type": "exclusion",
+      "section": "SECTION 4 - PERMANENT EXCLUSIONS",
+      "page": 2,
+      "text": "The Company shall not be liable for expenses arising out of or attributable to any intentional self-injury, attempted suicide, or the use of intoxicating substances, alcohol or drugs not prescribed by a registered Medical Practitioner."
+    },
+    {
+      "number": "4.3",
+      "heading": "Hazardous Activities",
+      "expected_type": "exclusion",
+      "section": "SECTION 4 - PERMANENT EXCLUSIONS",
+      "page": 3,
+      "text": "Expenses related to any treatment necessitated due to participation in hazardous or adventure sports, including but not limited to para-jumping, rock climbing, mountaineering, scuba diving and bungee jumping, shall not be admissible under this policy."
+    },
+    {
+      "number": "4.4",
+      "heading": "Breach of Law",
+      "expected_type": "exclusion",
+      "section": "SECTION 4 - PERMANENT EXCLUSIONS",
+      "page": 3,
+      "text": "Expenses for treatment directly arising from or consequent upon any Insured Person committing or attempting to commit a breach of law with criminal intent shall be excluded."
+    },
+    {
+      "number": "4.5",
+      "heading": "Infertility and Sterility",
+      "expected_type": "exclusion",
+      "section": "SECTION 4 - PERMANENT EXCLUSIONS",
+      "page": 3,
+      "text": "Expenses related to sterility and infertility, including assisted reproduction services, gestational surrogacy, reversal of sterilisation and any form of contraception, are excluded under this policy."
+    },
+    {
+      "number": "4.6",
+      "heading": "Dental Treatment",
+      "expected_type": "exclusion",
+      "section": "SECTION 4 - PERMANENT EXCLUSIONS",
+      "page": 3,
+      "text": "Dental treatment or surgery of any kind unless necessitated by an Accident and requiring hospitalisation shall not be covered under this policy."
+    },
+    {
+      "number": "4.7",
+      "heading": "Non-Medical Expenses",
+      "expected_type": "exclusion",
+      "section": "SECTION 4 - PERMANENT EXCLUSIONS",
+      "page": 3,
+      "text": "The Company shall not pay for items of personal comfort and convenience including telephone, television, internet charges, attendant charges, admission or registration fees, and any other item listed in Annexure III to this policy."
+    },
+    {
+      "number": "4.8",
+      "heading": "War and Nuclear Perils",
+      "expected_type": "exclusion",
+      "section": "SECTION 4 - PERMANENT EXCLUSIONS",
+      "page": 3,
+      "text": "Any expense arising from war, invasion, act of foreign enemy, warlike operations, or from nuclear weapons material or ionising radiation, whether war be declared or not, is excluded."
+    },
+    {
+      "number": "5.1",
+      "heading": "Room Rent Limit",
+      "expected_type": "sub_limit",
+      "section": "SECTION 5 - LIMITS AND CO-PAYMENT",
+      "page": 3,
+      "text": "Expenses towards room rent, boarding and nursing charges shall be limited to one percent of the Sum Insured per day, and expenses towards Intensive Care Unit charges shall be limited to two percent of the Sum Insured per day, subject to the Reasonable and Customary Charges."
+    },
+    {
+      "number": "5.2",
+      "heading": "Proportionate Deduction",
+      "expected_type": "sub_limit",
+      "section": "SECTION 5 - LIMITS AND CO-PAYMENT",
+      "page": 3,
+      "text": "Where the Insured Person is admitted to a room category whose rent exceeds the limit specified in Clause 5.1, all associated medical expenses including surgeon fees, anaesthetist fees and operation theatre charges shall be reduced in the same proportion as the eligible room rent bears to the actual room rent charged."
+    },
+    {
+      "number": "5.3",
+      "heading": "Co-payment for Senior Citizens",
+      "expected_type": "sub_limit",
+      "section": "SECTION 5 - LIMITS AND CO-PAYMENT",
+      "page": 3,
+      "text": "All admissible claims in respect of an Insured Person who has completed sixty years of age at the time of first inception of the policy shall be subject to a co-payment of twenty percent of the admissible claim amount, to be borne by the Insured Person."
+    },
+    {
+      "number": "5.4",
+      "heading": "Cataract Sub-limit",
+      "expected_type": "sub_limit",
+      "section": "SECTION 5 - LIMITS AND CO-PAYMENT",
+      "page": 3,
+      "text": "Expenses in respect of treatment of cataract shall be limited to twenty five thousand rupees per eye, or ten percent of the Sum Insured, whichever is lower, per Policy Year."
+    },
+    {
+      "number": "5.5",
+      "heading": "Modern Treatment Limit",
+      "expected_type": "sub_limit",
+      "section": "SECTION 5 - LIMITS AND CO-PAYMENT",
+      "page": 3,
+      "text": "Expenses incurred on advanced treatment methods including robotic surgery, stem cell therapy, oral chemotherapy and deep brain stimulation shall be restricted to fifty percent of the Sum Insured per Policy Year."
+    },
+    {
+      "number": "6.1",
+      "heading": "Notice of Claim",
+      "expected_type": "condition",
+      "section": "SECTION 6 - CONDITIONS PRECEDENT TO LIABILITY",
+      "page": 4,
+      "text": "Written notice of any claim must be given to the Company or its authorised Third Party Administrator within twenty four hours of admission in the case of Emergency hospitalisation, and at least forty eight hours prior to admission in the case of Planned hospitalisation, failing which the Company may at its discretion repudiate the claim."
+    },
+    {
+      "number": "6.2",
+      "heading": "Submission of Documents",
+      "expected_type": "condition",
+      "section": "SECTION 6 - CONDITIONS PRECEDENT TO LIABILITY",
+      "page": 4,
+      "text": "All supporting documents relating to a claim, including original bills, discharge summary, investigation reports and prescriptions, must be submitted to the Company within fifteen days of the date of discharge from the Hospital. Failure to furnish such documents within the stipulated period may result in rejection of the claim."
+    },
+    {
+      "number": "6.3",
+      "heading": "Disclosure of Material Facts",
+      "expected_type": "condition",
+      "section": "SECTION 6 - CONDITIONS PRECEDENT TO LIABILITY",
+      "page": 4,
+      "text": "The policy shall be void and all premium paid shall be forfeited to the Company in the event of misrepresentation, mis-description or non-disclosure of any material fact by the Insured Person at the time of proposal or at any time thereafter."
+    },
+    {
+      "number": "6.4",
+      "heading": "Pre-authorisation for Cashless",
+      "expected_type": "condition",
+      "section": "SECTION 6 - CONDITIONS PRECEDENT TO LIABILITY",
+      "page": 4,
+      "text": "Cashless facility shall be available only at Network Providers and only where the Company or its Third Party Administrator has issued a written pre-authorisation prior to the commencement of treatment. Denial of pre-authorisation does not by itself constitute denial of the claim."
+    },
+    {
+      "number": "6.5",
+      "heading": "Medical Examination",
+      "expected_type": "condition",
+      "section": "SECTION 6 - CONDITIONS PRECEDENT TO LIABILITY",
+      "page": 4,
+      "text": "The Company shall be entitled to require the Insured Person to undergo a medical examination by a Medical Practitioner nominated by the Company, at the Company's expense, as often as may be reasonably required in connection with any claim under this policy."
+    },
+    {
+      "number": "6.6",
+      "heading": "Contribution",
+      "expected_type": "condition",
+      "section": "SECTION 6 - CONDITIONS PRECEDENT TO LIABILITY",
+      "page": 4,
+      "text": "If at the time of a claim the Insured Person holds any other policy of indemnity covering the same risk, the Company shall not be liable to pay more than its rateable proportion of the claim, and the Insured Person shall disclose particulars of such other policy to the Company."
+    },
+    {
+      "number": "7.1",
+      "heading": "Free Look Period",
+      "expected_type": "procedural",
+      "section": "SECTION 7 - GENERAL PROVISIONS",
+      "page": 4,
+      "text": "The Insured Person may cancel this policy within fifteen days of receipt of the policy document by giving written notice to the Company, and shall be refunded the premium paid less any proportionate risk premium for the period of cover and the expenses incurred on medical examination and stamp duty."
+    },
+    {
+      "number": "7.2",
+      "heading": "Renewal",
+      "expected_type": "procedural",
+      "section": "SECTION 7 - GENERAL PROVISIONS",
+      "page": 4,
+      "text": "This policy shall ordinarily be renewable for life, provided the policy is renewed within the Grace Period of thirty days from the date of expiry and the Company has not discontinued the product. Renewal shall not be denied on the ground of an adverse claims history alone."
+    },
+    {
+      "number": "7.3",
+      "heading": "Portability",
+      "expected_type": "procedural",
+      "section": "SECTION 7 - GENERAL PROVISIONS",
+      "page": 4,
+      "text": "The Insured Person may port this policy to another insurer at the time of renewal by making an application to the new insurer at least forty five days before the renewal date, and shall be given credit for waiting periods already served under this policy."
+    },
+    {
+      "number": "7.4",
+      "heading": "Grievance Redressal",
+      "expected_type": "procedural",
+      "section": "SECTION 7 - GENERAL PROVISIONS",
+      "page": 5,
+      "text": "Any grievance in connection with this policy may be addressed to the Grievance Redressal Officer of the Company. If the grievance remains unresolved for a period exceeding thirty days, the Insured Person may approach the Insurance Ombudsman appointed under the Insurance Ombudsman Rules."
+    },
+    {
+      "number": "7.5",
+      "heading": "Cancellation by the Company",
+      "expected_type": "procedural",
+      "section": "SECTION 7 - GENERAL PROVISIONS",
+      "page": 5,
+      "text": "The Company may cancel this policy on grounds of established fraud by giving fifteen days written notice to the Insured Person at the address last recorded, and no premium shall be refunded in such an event."
+    }
+  ]
+}

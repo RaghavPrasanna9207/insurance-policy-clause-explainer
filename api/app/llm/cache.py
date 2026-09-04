@@ -1,0 +1,104 @@
+"""Content-addressed cache for LLM responses.
+
+Analysing a 200-clause policy takes 2-5 minutes. Without a cache, every prompt
+tweak means re-running all 200 clauses to see the effect on the handful you
+actually changed. With one, only genuinely-new work costs time.
+
+The cache is keyed by a hash of *everything that could change the answer*:
+model, prompt version, messages, and the JSON schema. That makes stale reuse
+impossible by construction - if any input differs, the key differs, so there is
+no manual "remember to clear the cache" step to forget.
+
+It lives in its own SQLite file rather than the app database so that
+`rm data/llm_cache.db` resets model outputs without touching uploaded documents.
+Plain sqlite3 (not SQLModel) keeps it usable from tests and scripts that never
+start the app.
+"""
+
+import hashlib
+import json
+import sqlite3
+import threading
+from pathlib import Path
+from typing import Any
+
+_CACHE_PATH = Path("data/llm_cache.db")
+_lock = threading.Lock()
+_conn: sqlite3.Connection | None = None
+
+
+def _connect() -> sqlite3.Connection:
+    global _conn
+    if _conn is None:
+        _CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        # check_same_thread=False: the analyze stage runs batches concurrently,
+        # so the connection is touched from more than one thread. Every access
+        # is serialised by _lock below, which keeps that safe.
+        _conn = sqlite3.connect(_CACHE_PATH, check_same_thread=False)
+        _conn.execute(
+            "CREATE TABLE IF NOT EXISTS llm_cache ("
+            "  key TEXT PRIMARY KEY,"
+            "  model TEXT NOT NULL,"
+            "  response TEXT NOT NULL,"
+            "  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP"
+            ")"
+        )
+        _conn.commit()
+    return _conn
+
+
+def make_key(
+    model: str,
+    prompt_version: str,
+    messages: list[dict[str, str]],
+    schema: dict[str, Any] | None,
+) -> str:
+    """Hash every input that could change the response.
+
+    sort_keys=True matters: Python preserves dict insertion order, so two
+    logically identical schemas built in a different field order would otherwise
+    hash differently and silently miss the cache.
+    """
+    payload = json.dumps(
+        {
+            "model": model,
+            "prompt_version": prompt_version,
+            "messages": messages,
+            "schema": schema,
+        },
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def get(key: str) -> dict[str, Any] | None:
+    with _lock:
+        row = _connect().execute(
+            "SELECT response FROM llm_cache WHERE key = ?", (key,)
+        ).fetchone()
+    return json.loads(row[0]) if row else None
+
+
+def put(key: str, model: str, response: dict[str, Any]) -> None:
+    with _lock:
+        conn = _connect()
+        # INSERT OR REPLACE: a concurrent duplicate request is harmless, since
+        # identical keys mean identical content.
+        conn.execute(
+            "INSERT OR REPLACE INTO llm_cache (key, model, response) VALUES (?, ?, ?)",
+            (key, model, json.dumps(response)),
+        )
+        conn.commit()
+
+
+def stats() -> dict[str, int]:
+    with _lock:
+        (count,) = _connect().execute("SELECT COUNT(*) FROM llm_cache").fetchone()
+    return {"entries": count}
+
+
+def clear() -> None:
+    with _lock:
+        conn = _connect()
+        conn.execute("DELETE FROM llm_cache")
+        conn.commit()
