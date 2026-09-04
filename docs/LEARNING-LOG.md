@@ -387,3 +387,216 @@ Now consider *which* clause. If the one lost happens to be an exclusion or a not
 
 That asymmetry is why `_numbering()` leans toward accepting a boundary, and why the hostile-document tests are all about recall.
 </details>
+
+---
+
+# M2 — Analysis and scoring: measuring instead of guessing
+
+## What M2 had to produce
+
+Two stages, and one habit.
+
+**Stage 3 (`api/app/pipeline/analyze.py`)** asks the model, for each clause: what type is it, what does it mean in plain English, and two judgments — how **likely** is it to affect a typical policyholder, and how **severe** is the consequence.
+
+**Stage 4 (`api/app/pipeline/score.py`)** combines those two judgments with signals it computes itself into a single impact score, and ranks the clauses.
+
+The habit is the important part: **from here on, decisions in this project are settled by measurement.** `evals/run_eval.py` exists so that a prompt edit, a model swap, or a batch-size change is judged by a number rather than by looking at a few outputs and forming an impression. Impressions are formed on exactly the sample where a plausible-sounding wrong answer is most convincing.
+
+---
+
+## Concept 6: Splitting judgment from arithmetic
+
+The impact score has two halves, and which half does what is the whole design:
+
+| | Source | Why there |
+|---|---|---|
+| `likelihood`, `severity` | The model | Judging that a 20% senior co-payment is financially significant needs language understanding |
+| `buriedness` | Computed | Knowing a clause sits 78% through a document, references three others, and reads at grade 17 is arithmetic |
+
+A 7B model asked to do the second would produce numbers that look plausible, vary between runs, and cannot be checked. Arithmetic done by a language model is arithmetic you cannot trust or reproduce.
+
+The formula:
+
+```
+impact = 100 * type_weight * blend * (1 + BURIEDNESS_BOOST * buriedness)
+                                   / (1 + BURIEDNESS_BOOST)
+
+blend = 0.5*norm(likelihood) + 0.5*norm(severity),  norm(x) = (x-1)/4
+```
+
+Two deliberate choices:
+
+**Buriedness multiplies, never adds.** A clearly written, prominently placed exclusion is still an exclusion. Being buried should make a *consequential* clause worse; it must not make a trivial clause important. Multiplication preserves that ordering, addition would not.
+
+**Dividing by `(1 + BURIEDNESS_BOOST)` rather than clamping at 100.** Clamping would collapse several genuinely different clauses onto exactly 100, destroying the ordering at the very top of the list — which is the only part anyone reads.
+
+### Measuring "obscuring"
+
+The problem statement says policies *obscure* the clauses that decide claims. `buriedness` makes that a number, from four computed signals:
+
+| Signal | Weight | What it captures |
+|---|---|---|
+| Position in document | 0.20 | Readers give up; drafters put unwelcome parts after appealing ones |
+| Flesch–Kincaid grade | 0.35 | Long sentences built from Latinate words — "indemnify", "repudiate" |
+| Cross-references | 0.25 | Every "as defined in Annexure III" is a hop, and a chance to give up |
+| Defined-term dependence | 0.20 | A clause you cannot understand where it sits |
+
+Flesch–Kincaid is `0.39*(words/sentence) + 11.8*(syllables/word) - 15.59`. Legal drafting scores high on *both* terms at once, which is why difficulty carries the heaviest weight. Syllables are counted by a vowel-group heuristic — wrong on individual words, but averaged across a clause, and used only to rank clauses against each other, so a consistent small bias changes no ordering.
+
+The defined-term signal is derived **per document**, from that policy's own definition clauses, not from a fixed word list. Which terms are load-bearing depends on what *this* policy chose to define.
+
+---
+
+## Failure 4: a silent empty array
+
+The first full eval run reported `39/40 clauses analysed` and logged `UNANALYSED CLAUSES: [0]`.
+
+Clause 0 is the document's front matter — title, UIN, disclaimer. Investigating, the individual retry did not throw an error. It **succeeded**, returning `{}`.
+
+The model had replied `{"clauses": []}` — an empty array. Faced with text that is not a clause, it declined to produce an entry.
+
+**That response is completely valid under the schema.** The schema constrained the *shape of each element*; it said nothing about *how many elements* the array must contain. Constrained decoding had done exactly what was asked, and a clause vanished from the pipeline with no error anywhere.
+
+The fix is to make cardinality part of the grammar too:
+
+```python
+"clauses": {
+    "type": "array",
+    "minItems": len(ids),
+    "maxItems": len(ids),
+    ...
+}
+```
+
+Verified enforced: given a prompt insisting there were no clauses at all, the model still emitted exactly three entries.
+
+Forcing an entry for genuinely non-clause text is the right trade. It lands as `procedural` with low ratings and scores near zero — harmless. A silently dropped clause is invisible for the rest of the pipeline's life, which is precisely the failure this project exists to prevent.
+
+> **The refinement of Concept 1:** constrained decoding guarantees exactly what you encode in the schema, and *nothing you forgot to encode*. "Every element is well-formed" and "the right number of elements exist" are separate guarantees, and you get only the ones you ask for.
+
+---
+
+## Failure 5: a performance optimisation that was never measured
+
+The module was written to send clauses in **batches of 5**, with a confident docstring explaining that batching amortises the long system prompt across several clauses and is therefore faster.
+
+That reasoning sounded obvious. It was wrong.
+
+| Batch size | Macro-F1 | Wall time |
+|---|---|---|
+| 5 | 0.973 | 121.9s |
+| **1** | **1.000** | 128.5s |
+
+Batching bought about 5% wall time and cost a clause.
+
+**Why the speed argument failed:** Ollama already caches the repeated system-prompt prefix between calls, so re-sending it is nearly free. The saving being optimised for did not exist.
+
+**Why the accuracy loss is the more interesting half:** the clause batching got wrong — 5.2 "Proportionate Deduction", a `sub_limit` read as a `condition` — classifies **correctly when sent on its own**. Nothing about the clause was hard. It was the company it kept. Sharing a generation lets the model's reading of one clause bleed into the next, and clauses in a policy sit next to each other precisely *because* they are related, which makes the interference worse rather than better.
+
+The default is now 1. Batching is still supported, because the wall-time picture changes for a much larger document.
+
+> **A performance argument that has not been measured is a guess, however obvious it sounds.** This is the entire reason `evals/` exists.
+
+---
+
+## Failure 6: the test that caught unbounded arithmetic
+
+A unit test asserting scores stay within 0–100 failed with `impact_score=462.44` and `position_signal=99.0`.
+
+Position was computed as `seg.order_idx / len(segments)`. That silently assumed `order_idx` values always span `0..len-1`. Scoring any *subset* — as a unit test does, or as a re-scoring pass would — produced ratios above 1 and impact scores in the hundreds.
+
+The fix computes position from the clause's **rank within the list actually passed in**, which is bounded by construction:
+
+```python
+for rank, seg in enumerate(segments):
+    position = rank / max(total - 1, 1)
+```
+
+Worth noticing: the full pipeline would never have exposed this, because there `order_idx` and list position always coincide. The bug was only reachable through a test that used the function differently than production does — which is a large part of what unit tests are *for*.
+
+---
+
+## Concept 7: Measuring the right thing
+
+The classification eval came out at **macro-F1 1.000** — every one of the 39 clauses correctly typed, across all seven types.
+
+Macro-F1 rather than accuracy, deliberately: the golden policy has 8 exclusions but only 4 waiting periods, and accuracy lets a model coast on the common types. Macro-F1 weights every type equally, because a missed waiting period misleads a policyholder just as badly as a missed exclusion.
+
+A perfect score is a good moment to be suspicious. So: **what does this number not cover?**
+
+It measures *labelling*. The product is a *ranking*. Those are different, and only the first was being measured.
+
+Inspecting the actual top 10 confirmed the gap. The room-rent cap sat at rank 14 and the senior-citizen co-payment at rank 22 — the two most notorious causes of unexpected shortfalls in Indian health insurance, both below the fold. Meanwhile rank 3 was "Medical Examination": a clause letting the insurer require an examination **at its own expense**, which costs the policyholder nothing.
+
+Classification F1 reported all of this as flawless, because every one of those clauses was labelled correctly.
+
+### Measuring it
+
+`evals/golden/ranking-expectations.json` names five clauses that must appear in the top 10 and four that must not, each with a written justification, authored from how claims actually go wrong — and written *before* looking at any ranking, so the metric tests the system rather than rationalising its output.
+
+Baseline: **5/9**.
+
+### Two fixes, both principled
+
+**1. Severity anchors (prompt).** The model had rated "Medical Examination" severity **5** — the same as a claim being refused outright. The severity scale was being read as a measure of a clause's *tone* rather than its cost. Added explicit anchors: *a power the Company exercises at its own expense is severity 1, however formally written*; *a cap that cascades across the whole bill is 4–5, not 3*.
+
+→ 5/9 to **6/9**. Classification held at 1.000.
+
+**2. Sub-limit weight (formula).** `TYPE_WEIGHT[sub_limit]` was 0.70 against `condition` at 0.95, so a sub-limit could never outrank a condition with equal ratings.
+
+The original weighting reflected the *worst case*. But conditions and exclusions are **contingent** — a notice deadline costs everything, but only if you miss it. A sub-limit is **certain**: a room-rent cap applies to every claim, automatically, forever. On expected loss rather than worst case, sub-limits were systematically understated. Raised to 0.85, staying below `condition` because total repudiation is still the worse tail, and tail risk is what people are least able to absorb.
+
+→ still **6/9**, but a *different* 6/9. Room rent and proportionate deduction moved to ranks 7 and 5; the pre-existing disease waiting period slipped to 11.
+
+### Knowing when to stop
+
+That last result is the useful one. The score held while the composition shifted, meaning changes had started **trading one expectation against another**. That is the signature of overfitting to 9 hand-authored expectations on a single synthetic document.
+
+So tuning stopped. The ranking is materially better than at baseline — both room-rent clauses now surface, which is what a real policyholder most needs — and the honest position is that further progress needs a **larger, more diverse eval set with real policies**, not more knob-turning against this one.
+
+> Ending at 6/9 with a documented reason is worth more than 9/9 reached by fitting the metric. The second number would not survive contact with a real policy, and there would be no way to know.
+
+---
+
+## Where M2 ended up
+
+| Metric | Result |
+|---|---|
+| Classification macro-F1 | **1.000** (39/39, all 7 types) |
+| Ranking expectations | **6/9** (from 5/9 baseline) |
+| Clauses analysed | 40/40 |
+| Analysis time | ~128s for 40 clauses, local 7B |
+| Tests | **38 passing** |
+
+Files added: `app/pipeline/analyze.py`, `app/pipeline/score.py`, `evals/run_eval.py`, `evals/golden/ranking-expectations.json`, `tests/test_score.py`.
+
+---
+
+## Check it yourself
+
+```bash
+cd api && .venv/Scripts/python.exe -m pytest -v
+
+# Full eval; writes evals/report.md
+python evals/run_eval.py
+
+# Reproduce the batching finding for yourself
+python evals/run_eval.py --batch-size 5 --no-report
+python evals/run_eval.py --batch-size 1 --no-report
+```
+
+The second run of any eval takes almost no time — the content-addressed cache from M0 serves every response. Edit a prompt and bump `PROMPT_VERSION`, and it recomputes; forget to bump it, and you would silently measure the old prompt. That is why the version is part of the cache key.
+
+**Question to sit with before M3:** the classification eval scores 1.000 on a 39-clause policy that this repository generated. Name two distinct reasons that number will not hold on a real insurer's policy wording.
+
+<details>
+<summary>Answer</summary>
+
+**1. The clauses were authored to be classifiable.** Each one was written as a clean example of a single type, with the boundaries the taxonomy assumes. Real policy clauses are frequently hybrids — a coverage grant with an embedded cap, a proviso, and a cross-reference to an annexure, all in one sentence. The tie-breaker list decides those cases, but "which label is *most* right" is a genuinely harder judgment than the golden set ever asks for.
+
+**2. The labels and the document share an author.** Both come from the same `CLAUSES` list, so the label reflects the intent the text was written to express. On a real policy, someone must read ambiguous legal language and decide what it *means* — and two insurance lawyers would not always agree. A benchmark where the ground truth was inferred, rather than declared, is inherently noisier.
+
+A third, worth knowing: **39 clauses is a small sample.** A single misclassification moves macro-F1 by roughly 0.03, so the difference between 1.000 and 0.97 is one clause and well inside run-to-run noise.
+
+This is why M2 ends with "the ranking needs a real eval set" rather than with a victory lap.
+</details>

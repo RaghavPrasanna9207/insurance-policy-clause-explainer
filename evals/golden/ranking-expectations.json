@@ -1,0 +1,63 @@
+{
+  "_why": [
+    "Classification F1 says whether a clause was labelled correctly. It says nothing",
+    "about whether the RANKING is useful - and the ranking is the actual product.",
+    "A system can label all 39 clauses perfectly and still put the room-rent cap at",
+    "number 14, below a clause that merely lets the insurer request a medical exam.",
+    "",
+    "These expectations are hand-authored from how Indian health insurance claims",
+    "actually go wrong, not from what the model happened to output. They are",
+    "deliberately written BEFORE looking at a ranking, so they measure the system",
+    "rather than rationalise it.",
+    "",
+    "'must_rank_top' clauses are the ones a policyholder most needs to see. Room-rent",
+    "capping combined with proportionate deduction is the single most common cause of",
+    "a large unexpected shortfall in an Indian cashless claim; the 24-hour notice",
+    "requirement is the most common technical repudiation.",
+    "",
+    "'must_not_rank_top' clauses are consequential-sounding but low-impact: powers the",
+    "insurer must exercise at its own expense, administrative machinery, or",
+    "definitions that carry no direct claim consequence on their own."
+  ],
+  "top_n": 10,
+  "must_rank_top": [
+    {
+      "number": "5.1",
+      "reason": "Room rent cap. Combined with 5.2, breaching it reduces the entire bill proportionately - the most common cause of a large unexpected shortfall."
+    },
+    {
+      "number": "5.2",
+      "reason": "Proportionate deduction. Turns a room-category choice into an across-the-board cut on surgeon, anaesthetist and theatre charges."
+    },
+    {
+      "number": "6.1",
+      "reason": "24-hour notice requirement. The most common technical ground for repudiating an otherwise valid claim."
+    },
+    {
+      "number": "3.2",
+      "reason": "36-month pre-existing disease waiting period. Affects most buyers over 40, and is what people most often assume they are covered for."
+    },
+    {
+      "number": "5.3",
+      "reason": "20% senior-citizen co-payment. Applies to every claim for a large class of policyholder, permanently."
+    }
+  ],
+  "must_not_rank_top": [
+    {
+      "number": "6.5",
+      "reason": "The Company may require a medical examination AT ITS OWN EXPENSE. A power the insurer must pay to exercise is not a financial risk to the policyholder."
+    },
+    {
+      "number": "7.4",
+      "reason": "Grievance redressal. Administrative, and exists to help the policyholder."
+    },
+    {
+      "number": "1.3",
+      "reason": "Definition of Sum Insured. Carries no claim consequence on its own."
+    },
+    {
+      "number": "7.1",
+      "reason": "Free-look period. A consumer protection, not a risk."
+    }
+  ]
+}

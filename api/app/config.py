@@ -24,10 +24,13 @@ class Settings(BaseSettings):
     temperature: float = 0.0
 
     # --- Pipeline ---
-    # 5 clauses per call is a deliberate tradeoff: large enough to amortise the
-    # prompt overhead, small enough that one confusing clause can't derail the
-    # whole batch's output.
-    analyze_batch_size: int = 5
+    # One clause per call. This is measured, not assumed: on the golden policy,
+    # batch=1 scored macro-F1 1.000 in 128.5s against batch=5's 0.973 in 121.9s.
+    # Batching saved ~5% wall time and misclassified a clause that is correct
+    # when analysed alone - neighbouring clauses in a policy are related, so
+    # sharing a generation lets the model's reading of one bleed into the next.
+    # Raise it for very large documents, where the time trade shifts.
+    analyze_batch_size: int = 1
     # Ollama serves requests concurrently, but each still competes for the same
     # GPU. 2 measured better than 4 on an 8GB card.
     analyze_concurrency: int = 2

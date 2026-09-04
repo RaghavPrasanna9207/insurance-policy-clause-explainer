@@ -39,6 +39,17 @@ Turning a policy PDF into ~40 individually addressable clauses.
 - **Failure 2: a data model that hid the fix** — a clause's number is its identity; the heading is optional.
 - **Failure 3: a bug you cannot see** — a literal backspace byte inside a regex, and a passing test suite concealing entirely dead code.
 
+### M2 - Analysis and scoring: measuring instead of guessing
+Classifying every clause, then ranking them by how much they could cost.
+
+- **Splitting judgment from arithmetic** - the model rates likelihood and severity; buriedness is computed. Why arithmetic done by a language model cannot be trusted or reproduced.
+- **Measuring "obscuring"** - position, Flesch-Kincaid grade, cross-references and defined-term dependence, and why buriedness multiplies rather than adds.
+- **Failure 4: a silent empty array** - `{"clauses": []}` is valid under a schema that only constrains element shape. Constrained decoding guarantees what you encode, and nothing you forgot to encode.
+- **Failure 5: an unmeasured optimisation** - batching was assumed faster, measured slower AND less accurate.
+- **Failure 6: unbounded arithmetic** - a bug only reachable through a test that used the code differently than production does.
+- **Measuring the right thing** - macro-F1 1.000 on classification, while the ranking buried the room-rent cap at 14. Two different metrics; only one is the product.
+- **Knowing when to stop tuning** - why 6/9 with a reason beats 9/9 by fitting.
+
 ---
 
 ## Related documents
