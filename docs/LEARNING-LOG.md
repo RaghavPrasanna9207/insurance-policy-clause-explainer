@@ -981,3 +981,78 @@ Most readers will never verify it. That is not the point. The point is that veri
 
 There is a practical reason too: those offsets are what the future PDF highlighter needs, and displaying them keeps them honest. A number on screen that stopped matching the document would be noticed. A number only used internally would not.
 </details>
+
+---
+
+# Interlude — Why a local model, when hosted models are better
+
+## The question this answers
+
+This project runs `qwen2.5:7b-instruct-q4_K_M` through Ollama, on a laptop GPU. Most production LLM products do not do that — they call a hosted frontier API. So the obvious question, and one worth answering honestly rather than defensively: **was local a compromise?**
+
+Partly yes, and partly no. The distinction matters more than the answer.
+
+## What production systems actually use
+
+| Tier | Examples | Typically used for |
+|---|---|---|
+| Frontier hosted | Claude (`claude-opus-5`, `claude-sonnet-5`), GPT, Gemini | Most production reasoning work |
+| Small hosted | `claude-haiku-4-5-20251001`, mini / flash tiers | High-volume classification and routing |
+| Local, open-weight | Qwen, Llama, Mistral, via Ollama or vLLM | Privacy, offline use, regulated data, very high volume |
+
+On hard reasoning, a frontier hosted model beats a 7B local model **badly**, not marginally. Nobody builds a serious legal-reasoning product on a 7B model because it is the strongest thing available. Any claim otherwise should be treated with suspicion.
+
+## Cost is not the reason here
+
+It is worth doing the arithmetic rather than assuming, because the assumption is usually wrong in both directions.
+
+One policy in this project is about 40 clauses. Each clause costs roughly 500 input tokens (the long system prompt with the taxonomy, plus the clause) and about 200 output tokens. That is **~28,000 tokens per document**.
+
+At frontier API prices, that is a few cents per policy. For a personal tool analysing one document at a time, **API cost is not a meaningful constraint.** Anyone claiming a local model here saved them money is optimising something that was never expensive.
+
+## The reason that does hold up
+
+The upload screen says it plainly: *"Your policy is never uploaded to anyone."*
+
+An insurance policy is a personal health and financial document. It names conditions, ages, sums insured. For this specific product, running locally is not the budget option — it is a **product property that cannot be bought back later by switching to an API.** Once the document leaves the machine, that promise is gone.
+
+That is the honest justification. Not cost, not capability. Privacy.
+
+## The counterintuitive part
+
+The project's strongest correctness claim exists **partly because** it is local.
+
+`llama.cpp`, which runs under Ollama, does grammar-level token masking: at each decoding step the sampler is prevented from emitting any token that could not continue a valid document under the supplied JSON Schema. That is what makes a fabricated citation *unrepresentable* rather than merely unlikely — the guarantee this whole project's grounding design rests on.
+
+Hosted providers differ here, and the difference is worth checking rather than assuming:
+
+- OpenAI's structured outputs with `strict: true` are also grammar-constrained, giving a comparable guarantee.
+- Anthropic's tool `input_schema` is validated — highly reliable, but validation after generation is a different mechanism from masking during it.
+
+So "switch to a bigger model" is **not automatically a free upgrade** for the citation guarantee. A larger model reasons better; whether it can still make an invalid citation impossible depends on the provider's mechanism, not on its size. That is exactly the kind of thing to verify before assuming bigger is strictly better.
+
+## Why this is a decision and not a lock-in
+
+Nothing here has to be guessed at, which is the real payoff of the eval harness:
+
+- `settings.model` in `api/app/config.py` is a one-line change.
+- Every model call funnels through a single `_post_chat` in `api/app/llm/client.py`, so another provider is a small adapter, not a rewrite.
+- `evals/run_eval.py` already reports classification macro-F1 and ranking quality, so a swap can be **measured** rather than argued about.
+
+## What separates a real project from a wrapper
+
+Not the model. The model is the most replaceable part of the system — a config line.
+
+What is not replaceable is the surrounding engineering: deterministic stages where determinism is possible (segmentation, scoring), verifiable grounding (character offsets, enum-constrained citation IDs), and an eval harness that turns "which model" into a measurement instead of an opinion.
+
+That is worth internalising beyond this project. **Model choice is a parameter. The system around it is the work.**
+
+## The plan from here
+
+Keep local as the default, for the privacy reason above.
+
+Then, once the scenario simulator exists, run the same eval against a hosted frontier model and publish the difference. The scenario simulator is precisely where a 7B model is expected to struggle: multi-hop reasoning where a waiting period, an exclusion and a notice condition all bear on a single question. Single-clause classification already scores macro-F1 1.000 locally; combining three interacting rules is a different task.
+
+If a hosted model scores materially higher there, the defensible architecture is a **hybrid**: local for the 40 bulk classifications, which are private, effectively free, and already perfect on the golden set; hosted for the one hard reasoning call, where capability actually shows up.
+
+A table reading *"local 7B: 0.72 · frontier: 0.91 · here is the trade we chose and why"* is worth more than either number alone, because it shows the choice was made rather than defaulted into.

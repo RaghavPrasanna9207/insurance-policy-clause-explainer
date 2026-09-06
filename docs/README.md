@@ -68,6 +68,15 @@ Four screens, built to a written design system rather than to defaults.
 - **Failure 9: module resolution follows the file, not the shell** - the same bug as M0's `ModuleNotFoundError`, in a different language.
 - **You cannot review a design you have not looked at** - a committed Playwright script drives the real UI and captures every screen; it found bugs no typecheck or unit test could.
 
+### Interlude - Why a local model, when hosted models are better
+Answers the obvious question this project invites, without being defensive about it.
+
+- **What production systems actually use** - hosted frontier APIs, and by how much they beat a 7B model on hard reasoning.
+- **Cost is not the reason** - a whole policy is ~28k tokens, a few cents at API prices. Do the arithmetic rather than assuming.
+- **The reason that holds up** - a policy is a personal health and financial document. Local is a product property, not a budget choice.
+- **The counterintuitive part** - the strongest correctness guarantee exists partly BECAUSE of local grammar-level token masking. A bigger model is not automatically a free upgrade for it.
+- **Model choice is a parameter; the system around it is the work.**
+
 ---
 
 ## Related documents
