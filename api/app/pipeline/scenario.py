@@ -47,6 +47,7 @@ from app.llm.prompts import (
     render_reasoning_request,
     render_scenario,
 )
+from app.pipeline import waiting
 from app.taxonomy import Verdict
 
 log = logging.getLogger(__name__)
@@ -69,6 +70,26 @@ MAX_CITATIONS = 4
 # that decides the case.
 CHARS_PER_TOKEN = 3.5
 
+# Days per unit, for normalising whatever the person happened to say.
+# Approximate on purpose: no real policy turns on a day either side of a
+# 36-month bar, and precision here would imply a certainty the source
+# sentence ("about five years ago") never had.
+_DAYS_PER_UNIT = {"days": 1, "weeks": 7, "months": 30, "years": 365}
+
+
+def policy_age_days(facts: dict[str, Any]) -> int | None:
+    """How long the policy has been held, in days, or None if unstated.
+
+    None is a real answer and must not be replaced with a default. Every
+    waiting period then comes back UNKNOWN, which is what lets the verdict
+    be insufficient_information rather than a guess.
+    """
+    value = facts.get("policy_age_value")
+    unit = facts.get("policy_age_unit")
+    if not value or value <= 0 or unit not in _DAYS_PER_UNIT:
+        return None
+    return value * _DAYS_PER_UNIT[unit]
+
 # Facts that can actually decide an outcome under an Indian health policy.
 #
 # Defined once and imported by the prompt renderer, because these were briefly
@@ -78,7 +99,7 @@ CHARS_PER_TOKEN = 3.5
 # lists that must agree should not be two lists - the same rule that applies to
 # the context window and its token budget.
 DECISIVE_FACTS = (
-    "months_since_policy_start",
+    "policy_age_value",
     "age",
     "pre_existing_condition",
     "hospitalised",
@@ -112,6 +133,10 @@ class ShortlistClause:
     clause_type: str
     text: str
     impact_score: float
+    # Structured facts extracted at analysis time, so stage 5 can reason over
+    # them arithmetically instead of asking the model to re-read the prose.
+    waiting_period_days: int | None = None
+    exceptions: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -148,7 +173,23 @@ FACTS_SCHEMA: dict[str, Any] = {
         # decoding emits a real null for these: the extractor must be able to
         # say "not stated" rather than invent 0, because zero months since
         # inception changes which waiting periods apply.
-        "months_since_policy_start": {"type": ["integer", "null"]},
+        # HOW LONG THE POLICY HAS BEEN HELD, as a value and a unit.
+        #
+        # Not "months_since_policy_start", which is what this was, and
+        # which produced 2 for "two weeks after my policy started" - the
+        # number read correctly and the unit dropped. A fortnight-old
+        # policy then counted as two months old and cleared a 30-day
+        # waiting period it should have failed.
+        #
+        # This is the same fix already applied to clause durations, on the
+        # other side of the same comparison. Converting units is arithmetic
+        # and belongs to Python; reporting what the sentence said is
+        # reading, and belongs to the model.
+        "policy_age_value": {"type": ["integer", "null"]},
+        "policy_age_unit": {
+            "type": ["string", "null"],
+            "enum": ["days", "weeks", "months", "years", None],
+        },
         "age": {"type": ["integer", "null"]},
         "hospitalised": {"type": ["boolean", "null"]},
         "hours_since_admission": {"type": ["integer", "null"]},
@@ -160,7 +201,8 @@ FACTS_SCHEMA: dict[str, Any] = {
         "notes": {"type": "string"},
     },
     "required": [
-        "procedure", "condition", "body_system", "months_since_policy_start",
+        "procedure", "condition", "body_system",
+        "policy_age_value", "policy_age_unit",
         "age", "hospitalised", "hours_since_admission", "estimated_cost_inr",
         "pre_existing_condition", "notes",
     ],
@@ -276,9 +318,20 @@ async def reason(
     nudge_citations: bool = False,
 ) -> dict[str, Any]:
     ids = [c.clause_id for c in clauses]
+    # Every waiting period compared against the stated policy age, in Python,
+    # before the model sees anything. The result is handed over as settled fact.
+    # Prefer days when stated, else convert months. Neither is guessed: if
+    # the person said nothing, both stay None and every waiting period comes
+    # back UNKNOWN rather than being compared against an invented figure.
+    checks = waiting.evaluate(clauses, policy_age_days(facts))
     messages = [
         {"role": "system", "content": REASON_SYSTEM},
-        {"role": "user", "content": render_reasoning_request(scenario, facts, clauses)},
+        {
+            "role": "user",
+            "content": render_reasoning_request(
+                scenario, facts, clauses, waiting.render(checks)
+            ),
+        },
     ]
     if nudge_citations:
         # Appended as a second user turn rather than edited into the first, so

@@ -173,6 +173,8 @@ def _persist_analyses(doc_id: str, segments, analyses, scored) -> None:
                     triggers_json=json.dumps(analysis.triggers),
                     limits_json=json.dumps(analysis.monetary_limits),
                     time_windows_json=json.dumps(analysis.time_windows),
+                    waiting_period_days=analysis.waiting_period_days,
+                    exceptions_json=json.dumps(analysis.exceptions),
                     likelihood=analysis.likelihood,
                     severity=analysis.severity,
                     buriedness=sc.buriedness,

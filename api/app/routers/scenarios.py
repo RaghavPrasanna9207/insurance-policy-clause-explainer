@@ -65,6 +65,8 @@ async def create_scenario(
                 clause_type=analysis.clause_type,
                 text=clause.text,
                 impact_score=analysis.impact_score,
+                waiting_period_days=analysis.waiting_period_days,
+                exceptions=json.loads(analysis.exceptions_json or "[]"),
             )
         )
         meta[citation_id] = (clause.id, clause.number, clause.heading, clause.page_start + 1)

@@ -79,8 +79,29 @@ class ClauseAnalysis:
     triggers: list[str] = field(default_factory=list)
     monetary_limits: list[str] = field(default_factory=list)
     time_windows: list[str] = field(default_factory=list)
+    # A waiting period exactly as the clause states it: "thirty days" is
+    # (30, "days"), "thirty six months" is (36, "months"). Normalised to days
+    # by `waiting_period_days`, never by the model.
+    waiting_period_value: int | None = None
+    waiting_period_unit: str | None = None
+    # Conditions under which the clause does NOT apply.
+    exceptions: list[str] = field(default_factory=list)
     likelihood: int = 3
     severity: int = 3
+
+    @property
+    def waiting_period_days(self) -> int | None:
+        """The waiting period in days, or None if this clause imposes none.
+
+        Conversion lives here rather than in the prompt because it is
+        arithmetic. 30-day months and 365-day years are close enough: the
+        comparison decides whether a bar has lifted, and no real policy turns
+        on a day either side.
+        """
+        if not self.waiting_period_value or self.waiting_period_value <= 0:
+            return None
+        per = {"days": 1, "months": 30, "years": 365}.get(self.waiting_period_unit or "")
+        return self.waiting_period_value * per if per else None
 
 
 def _batch_schema(ids: list[str]) -> dict[str, Any]:
@@ -126,6 +147,40 @@ def _batch_schema(ids: list[str]) -> dict[str, Any]:
                         "triggers": {"type": "array", "items": {"type": "string"}},
                         "monetary_limits": {"type": "array", "items": {"type": "string"}},
                         "time_windows": {"type": "array", "items": {"type": "string"}},
+                        # STRUCTURED, not prose. A waiting period's length as a
+                        # number of months, so stage 5 can COMPARE it instead of
+                        # asking the model whether 5 years exceeds 36 months.
+                        #
+                        # This split is the project's governing principle applied
+                        # where it had been forgotten: reading "thirty six months"
+                        # out of legal prose is language understanding and belongs
+                        # to the model; deciding 60 >= 36 is arithmetic and does
+                        # not. Three of five scenario failures were the model
+                        # getting that arithmetic wrong.
+                        # VALUE AND UNIT, not a bare number of months.
+                        #
+                        # A first version asked only for "waiting_period_months",
+                        # and clause 3.1 - "the first thirty days" - came back as
+                        # 30. The comparison then read that as thirty MONTHS. It
+                        # happened to give the right answer on the test case, for
+                        # entirely the wrong reason, which is the worst kind of
+                        # passing test.
+                        #
+                        # Policies mix days, months and years freely. Asking the
+                        # model to normalise them is asking it to do arithmetic
+                        # again; asking it to report what the clause SAYS is
+                        # reading, which is its job. Python converts.
+                        "waiting_period_value": {"type": ["integer", "null"]},
+                        "waiting_period_unit": {
+                            "type": ["string", "null"],
+                            "enum": ["days", "months", "years", None],
+                        },
+                        # Carve-outs: "unless necessitated by an Accident".
+                        # Extracted as their own field because an exclusion with
+                        # an exception was read as an unconditional bar, and a
+                        # clause's escape hatch is exactly what a policyholder
+                        # needs to see.
+                        "exceptions": {"type": "array", "items": {"type": "string"}},
                         # Integer enums, not bare integers: a 1-5 scale that can
                         # return 7 is not a 1-5 scale, and stage 4 normalises
                         # these assuming the stated range.
@@ -135,6 +190,7 @@ def _batch_schema(ids: list[str]) -> dict[str, Any]:
                     "required": [
                         "id", "clause_type", "plain_language", "what_it_means",
                         "triggers", "monetary_limits", "time_windows",
+                        "waiting_period_value", "waiting_period_unit", "exceptions",
                         "likelihood", "severity",
                     ],
                 },
@@ -155,6 +211,9 @@ def _parse(payload: dict[str, Any]) -> dict[str, ClauseAnalysis]:
             triggers=[t.strip() for t in item.get("triggers", []) if t.strip()],
             monetary_limits=[t.strip() for t in item.get("monetary_limits", []) if t.strip()],
             time_windows=[t.strip() for t in item.get("time_windows", []) if t.strip()],
+            waiting_period_value=item.get("waiting_period_value"),
+            waiting_period_unit=item.get("waiting_period_unit"),
+            exceptions=[e.strip() for e in item.get("exceptions", []) if e.strip()],
             likelihood=item["likelihood"],
             severity=item["severity"],
         )

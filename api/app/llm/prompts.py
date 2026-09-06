@@ -36,7 +36,7 @@ coverage, it just happens to be describing its ceiling.
 
 from app.taxonomy import ClauseType
 
-PROMPT_VERSION = "v6-verdict-rules"
+PROMPT_VERSION = "v11-prominence"
 
 CLASSIFY_SYSTEM = """\
 You are an expert on Indian (IRDAI-regulated) health insurance policy wordings.
@@ -97,6 +97,19 @@ EXTRACTED DETAILS:
   (e.g. "1% of Sum Insured per day", "20% co-payment"). Empty if none.
 - time_windows: every duration or deadline, as written
   (e.g. "36 months", "24 hours of admission"). Empty if none.
+- waiting_period_value / waiting_period_unit: if this clause bars cover for a
+  period, the number and its unit exactly as the clause states them. "the first
+  thirty days" is 30 + days. "thirty six months" is 36 + months. Do NOT convert
+  between units. Both null for any clause that is not a waiting period.
+- exceptions: the cases where this clause does NOT apply. Look for "unless",
+  "except", "other than", "save for", "provided that", "shall not apply".
+  An exclusion with a carve-out is not an absolute bar, and the carve-out is
+  the part a policyholder most needs to see:
+    "cosmetic surgery ... unless necessitated by an Accident, Burn or Cancer"
+       -> ["necessitated by an Accident, Burn or Cancer"]
+    "no claim ... except claims arising out of an Accident"
+       -> ["claims arising out of an Accident"]
+  Empty list only when the clause genuinely admits no exception.
 
 LIKELIHOOD (1-5) - how many policyholders this clause will actually touch:
   1  Almost nobody. War, nuclear perils, adventure sports.
@@ -188,8 +201,14 @@ policy can answer at all - and it can only do that if it knows what was never
 said.
 
 Examples of the distinction:
-- "I had knee surgery"                     -> months_since_policy_start: null
-- "8 months after buying the policy"       -> months_since_policy_start: 8
+- "I had knee surgery"                -> policy_age_value: null, unit: null
+- "8 months after buying the policy"  -> policy_age_value: 8, unit: months
+- "two weeks after my policy started" -> policy_age_value: 2, unit: weeks
+- "I have held it five years"         -> policy_age_value: 5, unit: years
+
+NEVER convert between units. "Two weeks" is 2 + weeks, not 2 + months and
+not 14 + days. Report the number and the word the person actually used;
+converting is done afterwards, in code.
 - "I'm 67"                                 -> age: 67
 - no age mentioned                         -> age: null
 
@@ -247,15 +266,43 @@ reduced. That is **conditional**, never not_covered.
 Ask: does the policy pay ZERO for this, or does it pay a smaller amount?
 Only zero is not_covered.
 
-CHECK THE ARITHMETIC BEFORE REFUSING.
-A waiting period that HAS elapsed is not a reason to deny. If someone held the
-policy 5 years and the bar is 36 months, it has been served - that is 60 months
-against 36. Convert years to months and compare before citing a waiting period.
+DO NOT DO THE WAITING-PERIOD ARITHMETIC YOURSELF.
+Every waiting period has already been compared against how long the policy has
+been held, and the results are given to you above under "WAITING PERIODS,
+ALREADY CALCULATED FOR YOU". Those results are computed and correct.
+
+  - A period marked "no longer applies" removes that ONE clause from
+    consideration. It is not a reason to refuse, and it is not a reason to
+    answer "covered" either - exclusions, payout caps, co-payments and notice
+    conditions are all still live and must be checked separately.
+  - A period marked "still applies" blocks treatment covered by that clause.
+  - A period that cannot be determined means the person did not say how long
+    they have held the policy. If the answer turns on that, the verdict is
+    insufficient_information.
+
+Waiting periods are ONE of five things that can decide a claim. Before
+answering, ask which of these five actually governs the situation described:
+
+  waiting_period  cover has not started yet
+  exclusion       never paid, permanently
+  condition       a duty on the policyholder - notice deadlines, documents
+  sub_limit       a cap or co-payment that reduces the amount paid
+  coverage        the benefit itself
+
+A question about a notice deadline is decided by a condition. A question about
+a room-rent cap or a co-payment is decided by a sub_limit. A question about a
+hazardous sport is decided by an exclusion. In none of those does a waiting
+period decide anything, and citing one instead of the governing clause is a
+wrong answer even when the verdict happens to land correctly.
+
+Never contradict those results and never recompute them.
 
 READ THE EXCEPTIONS.
-Exclusions frequently carve out cases: "unless necessitated by an Accident",
-"except claims arising out of an Accident". If the situation falls inside the
-carve-out, the exclusion does NOT apply and you should not cite it as a denial.
+Where a clause has carve-outs they are listed under it as "EXCEPTIONS - this
+clause does NOT apply when: ...". If the situation falls inside one, the clause
+does not apply and must not be cited as a denial. A burn treated with
+reconstructive surgery falls inside "unless necessitated by an Accident, Burn
+or Cancer"; that claim is covered, not refused.
 
 A FACT BEING UNSTATED ONLY MATTERS IF YOU ACTUALLY NEED IT.
 The situation will always leave things unsaid - an age, a cost, an exact hour.
@@ -300,7 +347,9 @@ refusal, and never promise cover the clauses do not give.
 """
 
 
-def render_reasoning_request(scenario: str, facts: dict, clauses) -> str:
+def render_reasoning_request(
+    scenario: str, facts: dict, clauses, waiting_block: str = ""
+) -> str:
     """Build the reasoning prompt.
 
     The clause ids embedded here are the same ids used to build the schema's
@@ -333,6 +382,9 @@ def render_reasoning_request(scenario: str, facts: dict, clauses) -> str:
             "\n".join(f"- {k}" for k in missing),
         ]
 
+    if waiting_block:
+        lines += ["", waiting_block]
+
     lines += ["", "POLICY CLAUSES AVAILABLE TO YOU:", ""]
     for clause in clauses:
         header = f"### clause_id={clause.clause_id}"
@@ -341,6 +393,14 @@ def render_reasoning_request(scenario: str, facts: dict, clauses) -> str:
         header += f"  [{clause.clause_type}]"
         lines.append(header)
         lines.append(clause.text.strip())
+        # Surfaced separately from the body text. An exclusion carrying a
+        # carve-out was being read as an unconditional bar, because the escape
+        # hatch sits at the end of a long sentence.
+        if getattr(clause, "exceptions", None):
+            lines.append(
+                "EXCEPTIONS - this clause does NOT apply when: "
+                + "; ".join(clause.exceptions)
+            )
         lines.append("")
 
     return "\n".join(lines)

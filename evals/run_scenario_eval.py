@@ -79,6 +79,8 @@ async def build_clauses() -> list[ShortlistClause]:
                 clause_type=analysis.clause_type,
                 text=seg.text,
                 impact_score=sc.impact_score,
+                waiting_period_days=analysis.waiting_period_days,
+                exceptions=analysis.exceptions,
             )
         )
     return clauses

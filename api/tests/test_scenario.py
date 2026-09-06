@@ -139,7 +139,7 @@ def test_only_decisive_facts_are_reported_as_missing():
     assert "body_system" not in DECISIVE_FACTS
     assert "estimated_cost_inr" not in DECISIVE_FACTS
     assert "notes" not in DECISIVE_FACTS
-    assert "months_since_policy_start" in DECISIVE_FACTS
+    assert "policy_age_value" in DECISIVE_FACTS
 
     # The prompt renderer must use the same source, not a copy of it.
     from app.llm.prompts import render_reasoning_request
@@ -147,4 +147,41 @@ def test_only_decisive_facts_are_reported_as_missing():
     facts = {k: None for k in DECISIVE_FACTS} | {"body_system": None, "notes": ""}
     rendered = render_reasoning_request("x", facts, [])
     assert "body_system" not in rendered
-    assert "months_since_policy_start" in rendered
+    assert "policy_age_value" in rendered
+
+
+def test_policy_age_keeps_its_unit():
+    """Regression test for a units bug on the SCENARIO side of the comparison.
+
+    "two weeks after my policy started" was extracted as
+    months_since_policy_start = 2 - the number read correctly and the unit
+    dropped. A fortnight-old policy then counted as two months old and cleared
+    a 30-day initial waiting period it should have failed.
+
+    The identical bug had already been fixed on the clause side ("thirty days"
+    read as 30 months). Fixing one operand of a comparison and leaving the
+    other is not fixing the comparison.
+    """
+    from app.pipeline.scenario import policy_age_days
+
+    assert policy_age_days({"policy_age_value": 2, "policy_age_unit": "weeks"}) == 14
+    assert policy_age_days({"policy_age_value": 2, "policy_age_unit": "months"}) == 60
+    assert policy_age_days({"policy_age_value": 5, "policy_age_unit": "years"}) == 1825
+    assert policy_age_days({"policy_age_value": 30, "policy_age_unit": "days"}) == 30
+
+    # A fortnight must NOT clear a 30-day bar.
+    assert policy_age_days({"policy_age_value": 2, "policy_age_unit": "weeks"}) < 30
+
+
+def test_unstated_policy_age_stays_none():
+    """None is a real answer and must never be defaulted.
+
+    Every waiting period then evaluates to UNKNOWN, which is what allows an
+    honest insufficient_information rather than a verdict built on a guess.
+    """
+    from app.pipeline.scenario import policy_age_days
+
+    assert policy_age_days({}) is None
+    assert policy_age_days({"policy_age_value": None, "policy_age_unit": None}) is None
+    assert policy_age_days({"policy_age_value": 5, "policy_age_unit": "fortnights"}) is None
+    assert policy_age_days({"policy_age_value": 0, "policy_age_unit": "months"}) is None

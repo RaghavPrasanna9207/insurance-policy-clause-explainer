@@ -79,6 +79,9 @@ class ClauseAnalysis(SQLModel, table=True):
     triggers_json: str = "[]"
     limits_json: str = "{}"
     time_windows_json: str = "{}"
+    # Structured, so the scenario simulator can compare rather than re-read.
+    waiting_period_days: int | None = None
+    exceptions_json: str = "[]"
 
     # The model's two judgments (1-5), the only LLM input to the score.
     likelihood: int
