@@ -112,7 +112,16 @@ class ScenarioRun(SQLModel, table=True):
     facts_json: str = "{}"
     verdict: str
     rationale: str
-    cited_clause_ids_json: str = "[]"
+    # Full citations, not just clause ids: each carries the quoted text, how the
+    # clause bears on the outcome, and whether the quote passed the verbatim
+    # check. An id-only column would lose exactly the evidence that makes the
+    # answer checkable.
+    citations_json: str = "[]"
+    # Facts the person never stated. Shown in the UI so an
+    # insufficient_information verdict can say WHAT it would need, rather than
+    # being a dead end.
+    missing_facts_json: str = "[]"
+    clauses_considered: int = 0
     # False when a quoted span failed the verbatim check. The UI must show such
     # an answer as unverified rather than presenting it as established fact.
     verified: bool = True

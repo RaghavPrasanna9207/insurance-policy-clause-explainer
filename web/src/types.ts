@@ -88,3 +88,31 @@ export interface DocumentSummary {
   top_risks: ClauseSummary[]
   unanalysed_count: number
 }
+
+export type Verdict = 'covered' | 'not_covered' | 'conditional' | 'insufficient_information'
+
+export interface Citation {
+  clause_id: string
+  clause_db_id: string | null
+  number: string
+  heading: string
+  page: number
+  effect: string
+  quote: string
+  /** False when the quoted text could not be found in the cited clause. */
+  verified: boolean
+  unverified_reason: string
+}
+
+export interface ScenarioResponse {
+  id: string
+  scenario: string
+  verdict: Verdict
+  reasoning: string
+  citations: Citation[]
+  missing_facts: string[]
+  facts: Record<string, unknown>
+  /** False if ANY citation failed verification. */
+  verified: boolean
+  clauses_considered: number
+}

@@ -104,3 +104,40 @@ class DocumentSummary(BaseModel):
     # Surfaced rather than hidden. If a clause could not be analysed the user
     # is seeing an incomplete picture, and has a right to know that.
     unanalysed_count: int
+
+
+class ScenarioRequest(BaseModel):
+    scenario: str = Field(min_length=8, max_length=2000)
+
+
+class CitationOut(BaseModel):
+    """One clause the answer rests on."""
+
+    clause_id: str
+    clause_db_id: str | None = None
+    number: str = ""
+    heading: str = ""
+    page: int = 0
+    effect: str
+    quote: str
+    # False when the quoted text could not be found in the cited clause. The UI
+    # must show such a citation as unverified rather than as evidence.
+    verified: bool = True
+    unverified_reason: str = ""
+
+
+class ScenarioResponse(BaseModel):
+    id: str
+    scenario: str
+    verdict: str
+    reasoning: str
+    citations: list[CitationOut] = []
+    # Facts the description never supplied, so an insufficient_information
+    # answer can say what it would need instead of just refusing.
+    missing_facts: list[str] = []
+    facts: dict = {}
+    # False if ANY citation failed verification. The whole answer is presented
+    # as unverified in that case: a reader cannot be expected to work out which
+    # half of an explanation was the sound one.
+    verified: bool = True
+    clauses_considered: int = 0

@@ -18,7 +18,9 @@ So this tool inverts the interaction. **It reads the policy and tells you what w
 
 **1. A risk-ranked clause map.** Every clause typed (coverage / exclusion / condition / sub-limit / waiting period / definition / procedural), rewritten in plain English, and scored for claim-denial impact.
 
-**2. A scenario simulator.** *"I had knee surgery 8 months after buying this"* → covered / not covered / conditional, with the exact clauses that decide it.
+**2. A scenario simulator.** *"I had knee surgery 8 months after buying this"* → covered / not covered / conditional / **your policy doesn't settle this**, with the exact clauses that decide it and the policy's own wording quoted from each.
+
+That fourth verdict is deliberate. A system that cannot say *"your document does not answer this"* will guess instead, and a confident guess about a claim is the specific harm this tool exists to prevent.
 
 ---
 
@@ -118,7 +120,7 @@ No real insurer policy wordings are committed to this repository.
 | M2 | Analyze + score — classification, deterministic impact formula | ✅ macro-F1 1.000 |
 | M3 | REST API — upload, poll, ranked clauses | ✅ |
 | M4 | Web UI — risk dashboard, clause explorer | ✅ |
-| M5 | Scenario simulator | |
+| M5 | Scenario simulator | ✅ |
 | M6 | Eval report | |
 
 Evaluation is the point, not an afterthought: model and prompt changes in this project are justified by measured numbers on the golden set, never by impressions.

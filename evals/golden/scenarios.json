@@ -1,0 +1,133 @@
+{
+  "_why": [
+    "Scenario cases for the simulator, hand-authored against the synthetic policy",
+    "in synthetic-health-policy.labels.json. Each names the verdict a competent",
+    "human reader of THAT policy would give, and the clause numbers that decide it.",
+    "",
+    "Written before measuring anything, so the set tests the system rather than",
+    "rationalising whatever it happened to produce - the same discipline as the",
+    "ranking expectations, and for the same reason.",
+    "",
+    "must_cite lists clauses the answer CANNOT be right without. It deliberately",
+    "does not list every clause that could reasonably be mentioned; citing extra",
+    "relevant clauses is not an error, missing the deciding one is.",
+    "",
+    "The insufficient_information cases carry the most weight. A system that",
+    "cannot say 'your document does not settle this' will guess, and a confident",
+    "guess about a claim is the specific harm this project exists to prevent."
+  ],
+  "cases": [
+    {
+      "id": "ped-waiting-not-served",
+      "scenario": "I have had diabetes for years and was hospitalised for it 8 months after buying this policy.",
+      "expected_verdict": "not_covered",
+      "must_cite": ["3.2"],
+      "why": "36-month pre-existing disease waiting period, only 8 months served. Refused today."
+    },
+    {
+      "id": "ped-waiting-served",
+      "scenario": "I have had high blood pressure since before I bought the policy. I was hospitalised for it 5 years after taking the policy out.",
+      "expected_verdict": "covered",
+      "must_cite": [],
+      "why": "60 months elapsed against a 36-month pre-existing disease waiting period, so it has been served."
+    },
+    {
+      "id": "cosmetic-exclusion",
+      "scenario": "I had a nose job because I didn't like how it looked. Will you pay?",
+      "expected_verdict": "not_covered",
+      "must_cite": ["4.1"],
+      "why": "Cosmetic surgery for appearance is permanently excluded."
+    },
+    {
+      "id": "cosmetic-after-accident",
+      "scenario": "My face was burned in a kitchen fire and I needed reconstructive plastic surgery, which my doctor certified as medically necessary. I have held the policy for six years.",
+      "expected_verdict": "covered",
+      "must_cite": ["4.1"],
+      "why": "The cosmetic exclusion carves out surgery necessitated by an Accident or Burn with certification."
+    },
+    {
+      "id": "no-timing-given",
+      "scenario": "I had knee surgery.",
+      "expected_verdict": "insufficient_information",
+      "must_cite": [],
+      "why": "Nothing said about when, or about pre-existing status. Joint replacement carries a 24-month bar, so the answer turns on facts not given."
+    },
+    {
+      "id": "late-notice",
+      "scenario": "I was admitted in an emergency and only told the insurer four days later. I have had the policy for three years and it was not a pre-existing condition.",
+      "expected_verdict": "conditional",
+      "must_cite": ["6.1"],
+      "why": "Notice was due within 24 hours; the clause says the Company MAY repudiate, so the outcome is discretionary rather than automatic."
+    },
+    {
+      "id": "room-rent-breach",
+      "scenario": "I have had the policy four years. My sum insured is 5 lakh and I stayed in a room costing 9,000 rupees a night for surgery.",
+      "expected_verdict": "conditional",
+      "must_cite": ["5.1"],
+      "why": "1% of 5 lakh is 5,000/day, so the room exceeds the cap and proportionate deduction applies. Paid, but reduced."
+    },
+    {
+      "id": "senior-copay",
+      "scenario": "I bought this policy at 67 and I am claiming for a hospitalisation three years later for something new.",
+      "expected_verdict": "conditional",
+      "must_cite": ["5.3"],
+      "why": "Over 60 at inception, so a 20% co-payment applies to every admissible claim."
+    },
+    {
+      "id": "adventure-sport",
+      "scenario": "I broke my leg bungee jumping on holiday and needed surgery. I have held the policy for eight years.",
+      "expected_verdict": "not_covered",
+      "must_cite": ["4.3"],
+      "why": "Hazardous and adventure sports, bungee jumping named explicitly."
+    },
+    {
+      "id": "initial-waiting-period",
+      "scenario": "I got a bad chest infection two weeks after my policy started and was admitted to hospital.",
+      "expected_verdict": "not_covered",
+      "must_cite": ["3.1"],
+      "why": "30-day initial waiting period for illness; only an accident is carved out."
+    },
+    {
+      "id": "accident-in-initial-period",
+      "scenario": "I was hit by a car ten days after my policy started and was hospitalised.",
+      "expected_verdict": "covered",
+      "must_cite": ["3.1"],
+      "why": "The 30-day initial waiting period expressly excepts claims arising from an accident."
+    },
+    {
+      "id": "maternity-too-early",
+      "scenario": "I gave birth 14 months after buying the policy. Will the delivery be paid for?",
+      "expected_verdict": "not_covered",
+      "must_cite": ["3.4"],
+      "why": "Maternity requires 36 months of continuous cover; 14 months is short of it."
+    },
+    {
+      "id": "dental-no-accident",
+      "scenario": "I had two teeth crowned at the dentist last week. I've had the policy for years.",
+      "expected_verdict": "not_covered",
+      "must_cite": ["4.6"],
+      "why": "Dental treatment is excluded unless caused by an accident and requiring hospitalisation."
+    },
+    {
+      "id": "non-medical-items",
+      "scenario": "My hospital bill included 4,000 rupees of telephone and television charges. I have held the policy six years and the treatment itself was covered.",
+      "expected_verdict": "not_covered",
+      "must_cite": ["4.7"],
+      "why": "Personal comfort items are excluded even when the underlying treatment is paid."
+    },
+    {
+      "id": "not-in-document",
+      "scenario": "Does this policy cover my car being stolen from the hospital car park?",
+      "expected_verdict": "insufficient_information",
+      "must_cite": [],
+      "why": "A health policy does not address motor theft at all. The honest answer is that the document is silent, not 'no'."
+    },
+    {
+      "id": "cataract-served",
+      "scenario": "I had a cataract operation as day care 4 years after buying the policy, and I am 40.",
+      "expected_verdict": "covered",
+      "must_cite": [],
+      "why": "24-month specified-disease waiting period served; day care is covered; under 60 so no co-payment. A sub-limit caps the amount but does not deny the claim."
+    }
+  ]
+}

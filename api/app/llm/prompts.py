@@ -36,7 +36,7 @@ coverage, it just happens to be describing its ceiling.
 
 from app.taxonomy import ClauseType
 
-PROMPT_VERSION = "v4-severity-anchors"
+PROMPT_VERSION = "v5-scenarios"
 
 CLASSIFY_SYSTEM = """\
 You are an expert on Indian (IRDAI-regulated) health insurance policy wordings.
@@ -169,3 +169,161 @@ def render_clause_batch(segments) -> str:
         "Analyse each clause below. Return one entry per clause, using the id "
         "given for each.\n\n" + "\n\n".join(parts)
     )
+
+
+# ---------------------------------------------------------------------------
+# Scenario simulator (stage 5)
+# ---------------------------------------------------------------------------
+
+FACTS_SYSTEM = """\
+You extract the facts from a description of a medical situation, so that an
+insurance policy can be checked against it.
+
+Extract ONLY what the description actually says. This is the whole job.
+
+If the person did not mention something, the field is null. Do not guess, do
+not infer a typical value, and do not fill a gap with something plausible. A
+missing fact must stay missing, because the next stage decides whether the
+policy can answer at all - and it can only do that if it knows what was never
+said.
+
+Examples of the distinction:
+- "I had knee surgery"                     -> months_since_policy_start: null
+- "8 months after buying the policy"       -> months_since_policy_start: 8
+- "I'm 67"                                 -> age: 67
+- no age mentioned                         -> age: null
+
+For pre_existing_condition, answer "unknown" unless the description makes it
+clear either way. "Unknown" is the honest answer far more often than not.
+"""
+
+
+def render_scenario(scenario: str) -> str:
+    return f"Extract the facts from this description:\n\n{scenario.strip()}"
+
+
+REASON_SYSTEM = """\
+You decide what an Indian health insurance policy says about one person's
+situation, using ONLY the clauses given to you.
+
+VERDICTS - choose exactly one:
+
+- not_covered: a clause clearly excludes this, or a waiting period has not yet
+  been served. The person will not be paid for this.
+- covered: the policy pays, and no exclusion, waiting period or cap applies to
+  what was described.
+- conditional: the answer depends on something the clauses require and the
+  description does not settle - a notice deadline, a document, a room category,
+  a co-payment. Cover is possible but not assured.
+- insufficient_information: the clauses provided do not address this situation
+  at all, OR a fact needed to decide is missing from the description.
+
+TELLING THE VERDICTS APART - these were measured getting confused:
+
+- A waiting period that has NOT yet elapsed is **not_covered**, not
+  conditional. If someone claims 8 months into a 36-month pre-existing disease
+  waiting period, the claim is refused today. "Covered in another 28 months" is
+  worth saying in the reasoning, but the answer to "will you pay for this" is
+  no. Never soften a refusal into "conditional" because cover arrives later.
+
+- A clause that clearly applies but leaves the Company a discretion
+  ("may repudiate", "at its sole discretion") is **conditional**, not
+  insufficient_information. The document DOES address the situation; the
+  outcome is simply not automatic.
+
+- Use **insufficient_information** when the clauses genuinely do not speak to
+  the situation, or when a fact you would need is missing from the description.
+  Not when the answer is merely unwelcome.
+
+A FACT BEING UNSTATED ONLY MATTERS IF YOU ACTUALLY NEED IT.
+The situation will always leave things unsaid - an age, a cost, an exact hour.
+That is normal and is not by itself a reason to abstain. Ask only: do I need
+THIS fact to answer THIS question?
+
+If a clause plainly excludes what happened, the verdict is **not_covered**,
+however much else went unmentioned. Cosmetic surgery for appearance is excluded
+whether or not the person gave their age. Abstaining there is not caution, it
+is a non-answer to a question the document plainly settles.
+
+CHOOSING insufficient_information IS OFTEN THE CORRECT ANSWER.
+It is not a failure and it is not a fallback. If the person did not say how
+long they have held the policy, you cannot know whether a 36-month waiting
+period has been served, and saying "covered" would be a guess presented as a
+fact. Someone may make a financial decision on this. Say what the document
+supports and nothing more.
+
+CITING CLAUSES:
+- Every clause you rely on MUST appear in deciding_clauses. Naming a clause in
+  your reasoning while leaving deciding_clauses empty makes the answer
+  unusable, because then nothing can be checked against the document.
+- Cite every clause that decides the answer, and no others.
+- For each, quote the words from that clause that do the deciding. Copy them
+  EXACTLY from the clause text as given. Do not paraphrase, tidy, shorten or
+  correct the wording. The quote is checked character by character against the
+  policy, and an inexact quote is discarded.
+- Quote at least a full phrase, not two or three words.
+- Put ONLY the clause's own words inside the quote. Do not append a clause
+  number, a bracketed reference or any note of your own - the quote is compared
+  against the policy character by character, and anything you add to it is a
+  difference.
+- A waiting period that has been SERVED is not a reason to deny. Check the
+  elapsed time before citing one.
+
+REASONING:
+Two or three sentences, addressed to the person as "you". State the outcome
+first, then why. Name the deadline or amount that decides it. Never soften a
+refusal, and never promise cover the clauses do not give.
+"""
+
+
+def render_reasoning_request(scenario: str, facts: dict, clauses) -> str:
+    """Build the reasoning prompt.
+
+    The clause ids embedded here are the same ids used to build the schema's
+    `clause_id` enum, so the model can only cite something present in this
+    text. That correspondence is the grounding guarantee, and it breaks
+    silently if the two are ever built from different lists - which is why they
+    are built from one list, in one place, in `pipeline/scenario.py`.
+    """
+    known = {k: v for k, v in facts.items() if v not in (None, "", [], "unknown")}
+    # Only facts that can actually decide an outcome under an Indian health
+    # policy. An earlier version listed every null field, including cost and
+    # body system, and nine "not stated" bullets pushed the model to answer
+    # insufficient_information for situations the clauses plainly settled.
+    decisive = (
+        "months_since_policy_start",
+        "age",
+        "pre_existing_condition",
+        "hospitalised",
+        "hours_since_admission",
+    )
+    missing = [k for k in decisive if facts.get(k) in (None, "", "unknown")]
+
+    lines = [
+        "SITUATION (in the person's own words):",
+        scenario.strip(),
+        "",
+        "FACTS UNDERSTOOD:",
+        "\n".join(f"- {k}: {v}" for k, v in known.items()) or "- (none stated)",
+    ]
+    if missing:
+        # Stated explicitly rather than left implicit. The model has to be able
+        # to tell "the policy is silent" apart from "the person didn't say",
+        # and those lead to different verdicts.
+        lines += [
+            "",
+            "NOT STATED by the person (do not assume values for these):",
+            "\n".join(f"- {k}" for k in missing),
+        ]
+
+    lines += ["", "POLICY CLAUSES AVAILABLE TO YOU:", ""]
+    for clause in clauses:
+        header = f"### clause_id={clause.clause_id}"
+        if clause.number:
+            header += f"  ({clause.number})"
+        header += f"  [{clause.clause_type}]"
+        lines.append(header)
+        lines.append(clause.text.strip())
+        lines.append("")
+
+    return "\n".join(lines)

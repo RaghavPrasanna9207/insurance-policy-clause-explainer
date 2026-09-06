@@ -5,6 +5,7 @@ import type {
   DocumentCreated,
   DocumentStatus,
   DocumentSummary,
+  ScenarioResponse,
 } from './types'
 
 /** Requests go to /api and Vite proxies them to the backend (vite.config.ts),
@@ -69,6 +70,18 @@ export const api = {
   },
 
   clause: (clauseId: string) => get<ClauseDetail>(`/clauses/${clauseId}`),
+
+  async scenario(docId: string, scenario: string): Promise<ScenarioResponse> {
+    // Synchronous, unlike upload: two model calls over a policy-sized prompt is
+    // tens of seconds, not minutes, so the client waits rather than polling.
+    const response = await fetch(`${BASE}/documents/${docId}/scenarios`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scenario }),
+    })
+    if (!response.ok) throw await toError(response)
+    return response.json()
+  },
 }
 
 export { ApiError }

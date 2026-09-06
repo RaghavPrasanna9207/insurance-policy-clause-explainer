@@ -101,7 +101,14 @@ async def _post_chat(
                 "stream": False,
                 # The whole point: this is a grammar constraint, not a hint.
                 "format": schema,
-                "options": {"temperature": settings.temperature},
+                "options": {
+                    "temperature": settings.temperature,
+                    # Sent on every call. Without it Ollama silently truncates
+                    # any prompt over its 4,096-token default, which would mean
+                    # reasoning over a policy with its opening clauses missing
+                    # and no error to say so.
+                    "num_ctx": settings.num_ctx,
+                },
             },
         )
         resp.raise_for_status()

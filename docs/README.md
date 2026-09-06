@@ -77,6 +77,17 @@ Answers the obvious question this project invites, without being defensive about
 - **The counterintuitive part** - the strongest correctness guarantee exists partly BECAUSE of local grammar-level token masking. A bigger model is not automatically a free upgrade for it.
 - **Model choice is a parameter; the system around it is the work.**
 
+### M5 - The scenario simulator, and making a citation impossible to fake
+"I had knee surgery 8 months after buying this" -> a verdict, with the clauses that decide it.
+
+- **Two mechanisms, not one** - an enum locks the citation's ADDRESS to a real clause; a verbatim quote check proves its CONTENT. The first alone permits a real clause id attached to invented wording, which was observed happening.
+- **Why there is no retrieval** - the whole policy is ~3,100 tokens and the context holds far more. Top-k could only drop the clause that decides the case.
+- **Abstention has to be built into the vocabulary** - constrained decoding cannot say "I don't know" unless that is an enum member.
+- **Failure 10: a silent context-window default** - the design assumed 32k; Ollama was applying 4,096, and a larger policy would have been truncated with no error.
+- **Failure 11: over-provisioning has a cost** - raising the window to 16k to "be safe" left 2GB free of 15.7GB and got the eval killed by the OS.
+- **Failure 12: two numbers that must agree should not be two numbers** - a clause budget set independently of the context window can exceed it.
+- **A check that cries wolf gets ignored** - a quotation 233 of 245 characters perfect was reported as if fabricated.
+
 ---
 
 ## Related documents

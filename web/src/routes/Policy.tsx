@@ -6,6 +6,7 @@ import { CLAUSE_META, RISKY_TYPES } from '../clauseMeta'
 import { ClausePanel } from '../components/ClausePanel'
 import { Disclaimer, Masthead, MetaStrip, Page } from '../components/Chrome'
 import { RiskCard } from '../components/RiskCard'
+import { ScenarioPanel } from '../components/ScenarioPanel'
 import type { ClauseSummary, ClauseType, DocumentStatus, DocumentSummary } from '../types'
 
 const POLL_MS = 1200
@@ -175,7 +176,9 @@ export function Policy() {
           {!clauses && <p className="label py-8">Loading clauses…</p>}
         </div>
 
-        <Disclaimer className="mt-10 max-w-[70ch]" />
+        <ScenarioPanel docId={id} />
+
+        <Disclaimer className="mt-14 max-w-[70ch]" />
       </Page>
 
       {openClause && <ClausePanel clauseId={openClause} onClose={closePanel} />}

@@ -316,3 +316,95 @@ def test_schema_drift_is_detected(tmp_path, monkeypatch):
     assert "clause" in message
     # The message has to tell the reader what to actually do about it.
     assert "Delete" in message
+
+
+# --- scenario endpoint ------------------------------------------------------
+
+
+def test_scenario_404_for_unknown_document(api_client):
+    response = api_client.post(
+        "/documents/nosuchdoc/scenarios", json={"scenario": "I had knee surgery last year."}
+    )
+    assert response.status_code == 404
+
+
+def test_scenario_rejects_a_document_still_being_analysed(api_client, seeded_document):
+    """409, not a partial answer.
+
+    Reasoning over a half-analysed policy would consider a subset of the
+    clauses while appearing to consider all of them - the same silent-omission
+    failure the whole shortlist design exists to avoid.
+    """
+    from sqlmodel import Session
+
+    from app.db import engine
+    from app.models import Document
+    from app.taxonomy import DocStatus
+
+    with Session(engine) as session:
+        doc = session.get(Document, seeded_document)
+        doc.status = DocStatus.ANALYZING
+        session.add(doc)
+        session.commit()
+
+    response = api_client.post(
+        f"/documents/{seeded_document}/scenarios",
+        json={"scenario": "I had knee surgery last year."},
+    )
+    assert response.status_code == 409
+
+
+def test_scenario_rejects_an_empty_question(api_client, seeded_document):
+    """Validated at the boundary by the request model's min_length."""
+    response = api_client.post(
+        f"/documents/{seeded_document}/scenarios", json={"scenario": "hi"}
+    )
+    assert response.status_code == 422
+
+
+@pytest.mark.llm
+def test_scenario_end_to_end_is_grounded(api_client, mini_pdf: Path):
+    """One real question, all the way through, on the 4-clause policy.
+
+    The assertion that matters is the last one: every quotation the answer
+    relies on must be findable in the clause it was attributed to. That is a
+    correctness property, not a quality one - an answer quoting text that is
+    not in the policy is fabricated, however sensible it reads.
+    """
+    from app.grounding import verify_quote
+    from app.taxonomy import Verdict
+
+    upload = api_client.post(
+        "/documents",
+        files={"file": ("mini.pdf", mini_pdf.read_bytes(), "application/pdf")},
+    )
+    doc_id = upload.json()["id"]
+    assert api_client.get(f"/documents/{doc_id}/status").json()["status"] == "ready"
+
+    response = api_client.post(
+        f"/documents/{doc_id}/scenarios",
+        json={
+            "scenario": "I had a nose job because I did not like how it looked. "
+            "I have held the policy for six years."
+        },
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+
+    assert body["verdict"] in Verdict.values()
+    assert body["reasoning"].strip()
+    assert body["clauses_considered"] >= 4
+
+    # Every citation must point at a clause of this document and quote it
+    # accurately. Verified independently here rather than trusting the
+    # `verified` flag the API set.
+    clauses = api_client.get(f"/documents/{doc_id}/clauses").json()
+    text_by_number = {c["number"]: c for c in clauses if c["number"]}
+
+    for citation in body["citations"]:
+        assert citation["clause_id"] in text_by_number, "cited a clause not in this policy"
+        detail = api_client.get(f"/clauses/{text_by_number[citation['clause_id']]['id']}").json()
+        verified, reason = verify_quote(citation["quote"], detail["source_text"])
+        assert verified == citation["verified"], (
+            f"API said verified={citation['verified']} but re-checking says {verified}: {reason}"
+        )
