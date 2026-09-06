@@ -96,6 +96,16 @@ Consolidating the evals, and the fresh-clone gate.
 - **Failure 16: misreading my own test failure** - "it failed" and "it failed for the reason I assumed" are different claims. A collection error that looked like a broken repo was a race with a background `pip install`.
 - **What a fresh clone actually gets** - 881KB, no PDF ever committed, all golden fixtures rebuilt from their generator.
 
+### M7 - Fixing 0.688, and four bugs hiding behind each other
+Verdict accuracy was not acceptable. Four of the five failures turned out to be this project's bugs, not the model's.
+
+- **I broke this project's own rule** - stage 5 was asking a 7B model whether 5 years exceeds 36 months, while stages 2 and 4 carefully kept arithmetic away from it. A capability limit and an architectural mistake look identical from outside.
+- **Failure 17: a green test that passed for the wrong reason** - "thirty days" read as 30 MONTHS, and the eval case still passed because a fortnight is short of both.
+- **Failure 18: the same bug on the other operand** - "two weeks" read as 2 months. A comparison has two sides; fixing one is not fixing it.
+- **Failure 19: a field that existed but was never populated** - adding a field is not adding a feature.
+- **Correct facts can still mislead** - four true statements that a waiting period "does not block the claim" made the model answer covered to questions about co-payments. Accuracy fell to 0.625 while the arithmetic worked perfectly.
+- **Knowing when the number stops being a signal** - five runs, 0.688 / 0.625 / 0.812 / 0.688 / 0.812, on a set where one case is 0.0625.
+
 ---
 
 ## Related documents

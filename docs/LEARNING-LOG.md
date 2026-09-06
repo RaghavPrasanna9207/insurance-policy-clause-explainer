@@ -1434,3 +1434,168 @@ So a low verdict accuracy means "this model is not good enough at this task yet"
 
 The general principle: **gate on the promises you make, measure everything else.** Confusing the two either blocks work over numbers that were never guaranteed, or ships silently past the one thing that was.
 </details>
+
+---
+
+# M7 — Fixing 0.688, and four bugs hiding behind each other
+
+## The starting position
+
+The scenario simulator answered 11 of 16 questions correctly — **0.688**. That was published honestly and framed as a limitation of a 7B model on multi-hop reasoning.
+
+That framing was wrong. Four of the five failures were bugs in this project, not weakness in the model, and finding them took five measured runs.
+
+---
+
+## Concept 18: I broke this project's own rule
+
+The failures were specific:
+
+```
+5 years held vs a 36-month bar    -> said NOT covered
+2 weeks held vs a 30-day bar      -> said covered
+4 years held vs a 24-month bar    -> said NOT covered
+```
+
+None of those is a language problem. Each is a comparison of two numbers.
+
+`CLAUDE.md` states the governing principle: *deterministic where possible, LLM only where language understanding is genuinely required.* Stage 2 (segmentation) and stage 4 (scoring) follow it — I specifically refused to let the model compute buriedness because that would be arithmetic. **Stage 5 had quietly broken the same rule**, and I had been calling the result a model limitation.
+
+`api/app/pipeline/waiting.py` restores the split:
+
+| Task | Who |
+|---|---|
+| Reading "thirty six months" out of legal prose | the model — that is language |
+| Deciding whether `60 >= 36` | Python — that is arithmetic |
+
+The comparison result is handed to the reasoning step as settled fact. `UNKNOWN` is a first-class outcome: if the person never said how long they have held the policy, no comparison is possible, and that is what lets the verdict be `insufficient_information` rather than a guess.
+
+> A capability limit and an architectural mistake look identical from the outside. Both show up as a wrong answer. The difference is that one of them is your fault, and it is worth checking which before blaming the model.
+
+---
+
+## Failure 17: a green test that passed for the wrong reason
+
+The first version asked the model for `waiting_period_months`. Clause 3.1 reads *"the first thirty days"*, and came back as **30** — read as thirty *months*.
+
+The eval case still passed. A two-week-old policy is short of both 30 days and 30 months, so the wrong unit produced the right answer.
+
+> A test that passes for the wrong reason is worse than one that fails. It reports that the thing works *and* removes your reason to look at it.
+
+The schema now asks for a value and a unit separately — `(30, "days")`, `(36, "months")` — because normalising units is arithmetic, while reporting what the clause *says* is reading. Python converts.
+
+---
+
+## Failure 18: the same bug, on the other operand
+
+Fixing the clause side surfaced its mirror image. The scenario extractor was asked for `months_since_policy_start`, and *"two weeks after my policy started"* came back as **2**.
+
+The number read correctly; the unit was dropped. A fortnight-old policy then counted as two months old and cleared the 30-day bar it should have failed. The computed block said, correctly and uselessly:
+
+```
+clause 3.1: requires 1 month, policy held 2 months -> no longer applies
+```
+
+Arithmetic flawless, input wrong.
+
+> **A comparison has two operands.** Fixing one and leaving the other is not fixing the comparison.
+
+Both sides now report value plus unit and Python converts. The prompt says it in as many words: *"Two weeks" is 2 + weeks, not 2 + months and not 14 + days.*
+
+---
+
+## Failure 19: a field that existed but was never populated
+
+Clause 4.1 excludes cosmetic surgery *"unless such surgery is necessitated by an Accident, Burn or Cancer"*. An `exceptions` field had been added to catch exactly this. It was empty.
+
+The field existed; nothing had told the model to look for carve-outs. Adding the signals explicitly — `unless`, `except`, `other than`, `provided that` — with worked examples populated it.
+
+> Adding a field is not adding a feature. Nothing fills it because it exists.
+
+Worth noting how this was found: not by reasoning about it, but by printing what the analyzer actually extracted. The fix had been written, committed in spirit, and was inert.
+
+---
+
+## Concept 19: correct facts can still mislead
+
+The deterministic block worked, and **accuracy fell from 0.688 to 0.625.**
+
+Each served waiting period was stated as:
+
+```
+clause 3.2 ... HAS BEEN SERVED - this clause does NOT block the claim
+```
+
+Every word true. But "does not block the claim" reads as a verdict on the *question*, not on the *clause*. With four served periods listed, the model saw four statements that nothing blocked the claim and began answering `covered` to questions about co-payments and room-rent caps — citing `3.1, 3.2, 3.3, 3.4` while missing clause 5.3 entirely.
+
+Two fixes:
+
+**Scope.** The block now says out loud what it does *not* settle: exclusions, payout caps, co-payments, notice conditions. Its per-clause wording narrowed to *"this waiting period no longer applies (it says nothing about any other clause)"*.
+
+**Prominence proportional to decisiveness.** A served waiting period is a non-event. Four of them each getting an emphatic line outweighed the one clause that mattered. Served periods now collapse to a single line naming them as irrelevant; only periods that actually block something keep individual treatment.
+
+> Injecting correct computed facts into a prompt is not free. Their *weight* is part of the message, and four true irrelevant statements can drown one decisive clause.
+
+---
+
+## Concept 20: knowing when the number stops being a signal
+
+Across five measured runs:
+
+| Run | Change | Verdict accuracy |
+|---|---|---|
+| 1 | baseline | 0.688 |
+| 2 | deterministic arithmetic | 0.625 |
+| 3 | scoped the block | 0.812 |
+| 4 | units on both sides | 0.688 |
+| 5 | prominence + clause-type routing | **0.812** |
+
+Every change fixed its target case and disturbed a neighbour. On 16 cases **one case is 0.0625**, so 0.688 versus 0.812 is two cases wide — inside the range this set can resolve.
+
+That matters for how the result is held:
+
+- The **unit bugs and the missing carve-out extraction are correctness fixes.** They are right whatever the aggregate does. A 30-day bar and a 30-month bar must not collapse together.
+- The **prompt-shaped changes are held loosely.** They are the ones the metric cannot cleanly separate.
+
+Final state: verdict accuracy **0.812**, citation recall **0.750 → 0.917**, detection integrity **1.000** throughout.
+
+---
+
+## The three that remain, and why they are different
+
+| Case | Expected | Got | What happened |
+|---|---|---|---|
+| `ped-waiting-served` | covered | not_covered | Told the 36-month bar was satisfied, went looking for another reason and cited the **cosmetic surgery** clause for a blood-pressure question |
+| `senior-copay` | conditional | covered | Confirmed nothing *blocks* the claim, never asked whether anything *reduces* it. Missed the 20% co-payment |
+| `accident-in-initial-period` | covered | not_covered | The carve-out *"except claims arising out of an Accident"* was correctly extracted and shown. Cited the clause and refused anyway |
+
+**None is a computation error.** The model has the served waiting period, the extracted carve-out, and the co-payment clause in front of it, and does not act on them.
+
+`senior-copay` is the most consequential: a real user would be told they are covered and never learn they are paying a fifth of the bill. It suggests a missing structural step rather than a prompt weakness — nothing forces the question *"does anything reduce this?"* once the model is satisfied nothing blocks it.
+
+---
+
+## Check it yourself
+
+```bash
+cd api && .venv/Scripts/python.exe -m pytest -q     # 107 tests
+python evals/run_all.py                             # writes evals/REPORT.md
+```
+
+**Question to sit with:** the fix that moved accuracy most was moving a comparison out of the model and into ten lines of Python. Everything else — five prompt revisions across five runs — moved the number around by two cases and settled roughly where it started.
+
+What does that suggest about where to look first, the next time a model gives a wrong answer?
+
+<details>
+<summary>Answer</summary>
+
+**Look for the thing you are asking it to do that is not a language task.**
+
+A language model is being asked to do many things at once in any real prompt: read, classify, compare, count, convert units, apply rules in order, remember a constraint from four paragraphs earlier. Some of those are language. Most of the rest have exact, testable implementations that are ten lines long and never wrong.
+
+Every failure fixed here followed that shape. Comparing 60 against 36 is not language. Converting weeks to days is not language. Deciding that a satisfied waiting period should be mentioned once rather than four times is not language. The model was failing at tasks it should never have been handed.
+
+The tell is that prompt engineering plateaus. Five revisions moved this number by two cases and put it back where it started, because the prompt was not the problem — the division of labour was. When more careful wording keeps producing the same class of error, that is evidence the task is misassigned, not that the wording needs another pass.
+
+The residual, once the misassignment is fixed, is the real capability limit — and it is worth measuring against a larger model rather than guessing at. But you cannot see that residual until you stop asking a language model to do arithmetic, because its arithmetic errors look exactly like reasoning errors from the outside.
+</details>

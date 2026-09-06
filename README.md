@@ -12,8 +12,8 @@ Measured on a 39-clause synthetic IRDAI-style policy with `qwen2.5:7b-instruct-q
 |---|---:|---|
 | Clause classification (macro-F1) | **1.000** | quality |
 | Risk ranking expectations | **6/9** | quality |
-| Scenario verdict accuracy | **0.688** | quality |
-| Scenario citation recall | **0.750** | quality |
+| Scenario verdict accuracy | **0.812** | quality |
+| Scenario citation recall | **0.917** | quality |
 | Quote fabrication rate | **0.125** | quality |
 | **Citation detection integrity** | **1.000** | **guarantee** |
 
@@ -21,7 +21,7 @@ Measured on a 39-clause synthetic IRDAI-style policy with `qwen2.5:7b-instruct-q
 
 Detection integrity asks something different: of the quotations the model *invented*, how many were caught and shown as unverified rather than presented as evidence? That is what the grounding design guarantees, and the only number here that would count as a bug if it moved. It is computed by re-verifying every quotation independently rather than by reading the flag the pipeline set — a self-reported guarantee is not a measurement.
 
-The honest read on 0.688: four of the five remaining misses need date arithmetic (is 5 years more than 36 months?) or following an exception inside a clause. Single-clause classification scores 1.000; combining three interacting rules scores 0.688. **That gap is the finding.**
+The honest read on 0.812: it started at 0.688, and four of those five failures turned out to be bugs in this project rather than model weakness — a comparison being done by the model instead of by Python, and units dropped on both sides of it (`"thirty days"` read as 30 months, `"two weeks"` as 2 months). The three that remain are genuine reasoning failures: in each, the model has the correct structured fact in front of it and does not act on it. Detail in [`docs/LEARNING-LOG.md`](docs/LEARNING-LOG.md#m7--fixing-0688-and-four-bugs-hiding-behind-each-other).
 
 ---
 
@@ -148,7 +148,7 @@ No real insurer policy wordings are committed to this repository.
 | M2 | Analyze + score — classification, deterministic impact formula | ✅ macro-F1 1.000 |
 | M3 | REST API — upload, poll, ranked clauses | ✅ |
 | M4 | Web UI — risk dashboard, clause explorer | ✅ |
-| M5 | Scenario simulator | ✅ verdict 0.688 · detection 1.000 |
+| M5 | Scenario simulator | ✅ verdict 0.812 · detection 1.000 |
 | M6 | Consolidated eval report | ✅ |
 
 Evaluation is the point, not an afterthought: model and prompt changes in this project are justified by measured numbers on the golden set, never by impressions. See [Results](#results) and [`evals/REPORT.md`](evals/REPORT.md).
