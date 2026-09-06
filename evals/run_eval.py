@@ -50,12 +50,13 @@ from app.pipeline.analyze import analyze  # noqa: E402
 from app.pipeline.ingest import ingest  # noqa: E402
 from app.pipeline.score import score  # noqa: E402
 from app.pipeline.segment import segment  # noqa: E402
+from app.llm.prompts import PROMPT_VERSION  # noqa: E402
 from app.taxonomy import ClauseType  # noqa: E402
 
 GOLDEN_DIR = REPO_ROOT / "evals" / "golden"
 GOLDEN_PDF = GOLDEN_DIR / "synthetic-health-policy.pdf"
 GOLDEN_LABELS = GOLDEN_DIR / "synthetic-health-policy.labels.json"
-REPORT_PATH = REPO_ROOT / "evals" / "report.md"
+REPORT_PATH = REPO_ROOT / "evals" / "classification-report.md"
 
 
 def prf(tp: int, fp: int, fn: int) -> tuple[float, float, float]:
@@ -205,6 +206,15 @@ async def run(use_cache: bool, batch_size: int | None = None) -> dict:
 
     return {
         "model": settings.model,
+        # Recorded, not referenced. This file previously said "see
+        # PROMPT_VERSION in prompts.py", which is a pointer rather than a
+        # record: the report was generated under v4 while the code had moved to
+        # v6, and nothing in it could reveal that. A report that cannot state
+        # the conditions of its own run is not evidence of anything.
+        "prompt_version": PROMPT_VERSION,
+        "num_ctx": settings.num_ctx,
+        "num_predict": settings.num_predict,
+        "batch_size": settings.analyze_batch_size,
         "clauses_expected": len(expected_by_number),
         "clauses_analysed": len(expected_by_number) - len(unanalysed),
         "unanalysed": unanalysed,
@@ -225,7 +235,9 @@ def report(res: dict) -> str:
         "# Evaluation report",
         "",
         f"- **Model**: `{res['model']}`",
-        f"- **Prompt version**: see `PROMPT_VERSION` in `api/app/llm/prompts.py`",
+        f"- **Prompt version**: `{res['prompt_version']}`",
+        f"- **Decoding**: num_ctx {res['num_ctx']}, num_predict "
+        f"{res['num_predict']}, batch size {res['batch_size']}",
         f"- **Clauses**: {res['clauses_analysed']}/{res['clauses_expected']} analysed",
         f"- **Wall time**: {res['seconds']}s",
         "",

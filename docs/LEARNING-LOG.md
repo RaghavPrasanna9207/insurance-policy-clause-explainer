@@ -1286,3 +1286,151 @@ Re-verifying independently means the eval computes the answer a second time and 
 
 The general form: **a test that asks the system under test whether it worked is not a test.** It is the same reason the M1 tests slice `raw_text[start:end]` and compare, rather than asking the parser whether its offsets are correct — and the same reason the M0 LLM tests hit a real Ollama rather than a mock.
 </details>
+
+---
+
+# M6 — One report, and proving the repo works for someone else
+
+## What M6 had to produce
+
+Two things, both about a reader who is not the author: a single evaluation report that states its own conditions, and proof that the project actually runs from a fresh clone.
+
+---
+
+## Failure 15: a report that could not say when it was written
+
+The project had two report files, `evals/report.md` and `evals/scenario-report.md`, each written by its own script. Reading them together turned out to be misleading, and the reason is worth spelling out.
+
+The classification report had been generated when `PROMPT_VERSION` was `v4`. By the time the scenario report existed, prompts were at `v6`, and the LLM cache key had also grown to include decoding settings that had changed. **The two files described different runs of different code, and nothing in either said so.**
+
+Worse, the classification report contained this line:
+
+```
+- **Prompt version**: see `PROMPT_VERSION` in `api/app/llm/prompts.py`
+```
+
+A pointer, not a record. It tells a reader where to look *today*, which is precisely useless for judging whether a number generated months ago still describes the code in front of them.
+
+> **A report is a record of a run. If it cannot state the conditions of that run, it is not evidence of anything.**
+
+This is the same class of bug as a stale LLM cache — results that no longer correspond to the code that appears to have produced them — reproduced one layer up, in the reporting rather than the caching.
+
+`evals/run_all.py` now runs both evals against the same code in one pass and stamps the output with the model, prompt version, decoding settings, batch size, git commit and timestamp. There is exactly one report, `evals/REPORT.md`, and the two per-eval files are gitignored intermediates.
+
+Re-running everything at `v6` also answered a question that had been quietly open: classification was still **macro-F1 1.000**. The prompt version and the context window had both changed since it was last measured, so that was worth confirming rather than assuming.
+
+### A smaller honesty fix
+
+The consolidated report first printed `Total wall time | 0s`, because every response came from cache. True, and misleading — it invites a reader to think the eval is free. It now says:
+
+```
+| Total wall time | 0s (served from cache; a cold run takes several minutes) |
+```
+
+---
+
+## Concept 17: separating what is measured from what is promised
+
+The report's headline table has a `Kind` column, and it carries more weight than the numbers:
+
+| What is measured | Score | Kind |
+|---|---:|---|
+| Clause classification (macro-F1) | 1.000 | quality |
+| Risk ranking expectations | 6/9 | quality |
+| Scenario verdict accuracy | 0.688 | quality |
+| Scenario citation recall | 0.750 | quality |
+| Quote fabrication rate | 0.125 | quality |
+| **Citation detection integrity** | **1.000** | **guarantee** |
+
+Every *quality* row measures how well a 7B model on a laptop performs a hard task. Those are published exactly as they came out, including 0.688 and 6/9.
+
+**One row is different in kind.** Detection integrity asks: of the quotations the model invented, how many were caught and shown to the reader as unverified rather than presented as evidence? That is the property the system actually promises. It is the only number that would count as a *bug* if it moved.
+
+That distinction is enforced in code, not just in prose. `run_all.py` exits non-zero if detection integrity drops below 1.000, so it can gate a pipeline — and the quality numbers deliberately do **not** gate:
+
+```python
+if scenario["detection_integrity"] < 1.0:
+    sys.exit(1)
+```
+
+> A threshold on a quality metric invites tuning to the threshold. A threshold on a guarantee catches a broken guarantee. They should not be treated the same way, and only one of them belongs in CI.
+
+---
+
+## Failure 16: misreading my own test failure
+
+The M6 gate was to clone the repository somewhere clean and follow the documented steps. On the first attempt:
+
+```
+ERROR tests/test_llm.py
+ERROR tests/test_scenario.py
+ERROR tests/test_score.py
+!!! Interrupted: 3 errors during collection !!!
+```
+
+The immediate conclusion — *the repo does not work from a fresh clone* — was wrong, and stated out loud before checking.
+
+The tests had been launched while `pip install` was still running in the background. The three modules that failed were the three importing packages that were not on disk *yet*. Running the same command after the install finished gave **85 passed**.
+
+Two things worth keeping from that:
+
+1. **"It failed" and "it failed for the reason I assumed" are different claims.** A collection error naming three files looks like a repo problem and was a race with my own setup. One `--tb=line` would have shown an ordinary `ModuleNotFoundError` and settled it in seconds.
+2. It is still the right gate. Running it is what surfaced the genuinely stale report files that a fresh clone was shipping.
+
+---
+
+## What a fresh clone actually gets
+
+Verified rather than assumed:
+
+- **72 tracked files, 881KB.** No `.env`, no database, no `node_modules`, no virtualenv, and **no PDF has ever been committed** — checked across the entire history, not just the current tree.
+- **All three golden PDFs rebuild themselves.** They are gitignored build artefacts; `tests/conftest.py` regenerates them from `build_synthetic_policy.py` when missing, so a clone with no binary fixtures still runs the whole suite.
+- **85 tests pass** with no model running; 91 with Ollama up.
+
+The licensing position holds as a consequence: evals run on a policy this repository authors, so the repo is self-contained and redistributable, and no insurer's copyrighted wording is anywhere in it.
+
+---
+
+## The project, end to end
+
+| Stage | LLM? | What guarantees it |
+|---|---|---|
+| 1. Ingest | No | Offsets slice back byte-identical, asserted per clause |
+| 2. Segment | No | Rules over layout; recall verified on a deliberately unstyled PDF |
+| 3. Analyze | Yes | Every categorical field enum-constrained; responses cached by content |
+| 4. Score | No | Pure arithmetic, unit-tested, reproducible |
+| 5. Scenario | Yes | Citation ids enum-locked, quotations verified against source |
+
+The through-line, stated once: **deterministic wherever possible, a model only where language understanding is genuinely required, and every model output constrained by a grammar rather than a request.**
+
+That is what makes a 7B model on a laptop worth building on. It is not that the model is good enough to trust — it is that the system is arranged so that the places it can go wrong are either impossible or caught.
+
+---
+
+## Check it yourself
+
+```bash
+git clone <repo> && cd insurance-policy-clause-explainer
+cd api && python -m venv .venv
+.venv/Scripts/python.exe -m pip install -r requirements.txt
+.venv/Scripts/python.exe -m pytest -m "not llm"    # 85, no model needed
+cd .. && python evals/run_all.py                    # writes evals/REPORT.md
+```
+
+**A last question, and the one most worth sitting with.** `evals/run_all.py` exits non-zero when detection integrity falls below 1.000, and never fails on verdict accuracy — not even if it dropped from 0.688 to 0.2.
+
+That looks backwards. A system answering four in five questions wrongly is obviously broken. Why is that not the failing condition?
+
+<details>
+<summary>Answer</summary>
+
+Because the two numbers make different promises to the person using this, and only one of them is a promise this system can keep.
+
+**Verdict accuracy is a capability measure.** It moves with the model, the prompt, the policy, and the difficulty of the questions asked. A drop from 0.688 to 0.2 is bad news, but it is *information* — and the honest response is to publish it, diagnose it, and decide whether to change models. Turning it into a build failure creates pressure to make the number go up, and the cheapest way to make an eval number go up is to tune against the eval. That is how you get a system that scores well on sixteen cases and worse on a real policy. The M2 ranking work already hit exactly that wall, and stopped at 6/9 for the same reason.
+
+**Detection integrity is a safety property.** It does not say the answers are good; it says that when an answer is *not* supported by the document, the reader is told. A user can work with a tool that is often uncertain and always honest about it. A tool that presents an invented quotation as evidence is worse than no tool at all, because it is wrong in the specific way that looks most like being right — and in this domain, that costs someone a real claim.
+
+So a low verdict accuracy means "this model is not good enough at this task yet". A detection integrity below 1.000 means "this system will lie to someone". Only the second is a defect, and only defects should break a build.
+
+The general principle: **gate on the promises you make, measure everything else.** Confusing the two either blocks work over numbers that were never guaranteed, or ships silently past the one thing that was.
+</details>

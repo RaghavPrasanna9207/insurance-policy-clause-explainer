@@ -25,3 +25,7 @@ web/dist/
 
 # Screenshot output from `npm run shots`
 web/.screenshots/
+
+# Per-eval reports are intermediate. evals/REPORT.md is the committed record.
+evals/classification-report.md
+evals/scenario-report.md

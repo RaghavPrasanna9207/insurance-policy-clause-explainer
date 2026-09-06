@@ -88,12 +88,21 @@ Answers the obvious question this project invites, without being defensive about
 - **Failure 12: two numbers that must agree should not be two numbers** - a clause budget set independently of the context window can exceed it.
 - **A check that cries wolf gets ignored** - a quotation 233 of 245 characters perfect was reported as if fabricated.
 
+### M6 - One report, and proving the repo works for someone else
+Consolidating the evals, and the fresh-clone gate.
+
+- **Failure 15: a report that could not say when it was written** - two report files describing runs of different code, one saying "see PROMPT_VERSION in prompts.py" instead of recording it. A report is a record of a run; a pointer is not a record.
+- **Separating what is measured from what is promised** - the report's `Kind` column, and why the eval exits non-zero on detection integrity but never on verdict accuracy.
+- **Failure 16: misreading my own test failure** - "it failed" and "it failed for the reason I assumed" are different claims. A collection error that looked like a broken repo was a race with a background `pip install`.
+- **What a fresh clone actually gets** - 881KB, no PDF ever committed, all golden fixtures rebuilt from their generator.
+
 ---
 
 ## Related documents
 
 - **[../DESIGN.md](../DESIGN.md)** - the design system: aesthetic direction, the four-face typography with its semantic rule, the colour tokens, and the list of forbidden anti-patterns.
 - **[../CLAUDE.md](../CLAUDE.md)** — the architecture, the deliberate omissions (no vector DB, no task queue, no LLM in the scoring path), and the conventions this project follows.
+- **[../evals/REPORT.md](../evals/REPORT.md)** - the consolidated results, stamped with the model, prompt version, decoding settings and commit that produced them. Regenerate with `python evals/run_all.py`.
 - **[../evals/](../evals/)** — the evaluation harness. Model and prompt changes in this project are justified by measurements, not by impressions.
 
 ---

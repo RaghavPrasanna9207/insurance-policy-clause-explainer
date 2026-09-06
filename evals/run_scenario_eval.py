@@ -44,6 +44,7 @@ sys.path.insert(0, str(REPO_ROOT / "api"))
 
 from app.config import settings  # noqa: E402
 from app.grounding import verify_quote  # noqa: E402
+from app.llm.prompts import PROMPT_VERSION  # noqa: E402
 from app.llm import cache  # noqa: E402
 from app.pipeline.analyze import analyze  # noqa: E402
 from app.pipeline.ingest import ingest  # noqa: E402
@@ -143,6 +144,9 @@ async def run(use_cache: bool) -> dict:
 
     return {
         "model": settings.model,
+        "prompt_version": PROMPT_VERSION,
+        "num_ctx": settings.num_ctx,
+        "num_predict": settings.num_predict,
         "seconds": round(elapsed, 1),
         "rows": rows,
         "verdict_accuracy": sum(r["verdict_ok"] for r in rows) / max(total, 1),
@@ -173,6 +177,8 @@ def report(res: dict) -> str:
         "# Scenario simulator evaluation",
         "",
         f"- **Model**: `{res['model']}`",
+        f"- **Prompt version**: `{res['prompt_version']}`",
+        f"- **Decoding**: num_ctx {res['num_ctx']}, num_predict {res['num_predict']}",
         f"- **Cases**: {res['total']}",
         f"- **Wall time**: {res['seconds']}s",
         "",
