@@ -124,3 +124,27 @@ def test_every_schema_string_field_that_is_categorical_has_an_enum():
     items = _reasoning_schema(["3.2"])["properties"]["deciding_clauses"]["items"]
     assert "enum" in items["properties"]["effect"]
     assert "enum" in items["properties"]["clause_id"]
+
+
+def test_only_decisive_facts_are_reported_as_missing():
+    """The list shown to the user and the list shown to the model are one list.
+
+    They were briefly two. The prompt had been narrowed to the five facts that
+    can decide an Indian health claim, but the user-facing list still contained
+    every null field - so the interface told people it needed to know their
+    "body system" and "estimated cost inr" before it could answer.
+    """
+    from app.pipeline.scenario import DECISIVE_FACTS
+
+    assert "body_system" not in DECISIVE_FACTS
+    assert "estimated_cost_inr" not in DECISIVE_FACTS
+    assert "notes" not in DECISIVE_FACTS
+    assert "months_since_policy_start" in DECISIVE_FACTS
+
+    # The prompt renderer must use the same source, not a copy of it.
+    from app.llm.prompts import render_reasoning_request
+
+    facts = {k: None for k in DECISIVE_FACTS} | {"body_system": None, "notes": ""}
+    rendered = render_reasoning_request("x", facts, [])
+    assert "body_system" not in rendered
+    assert "months_since_policy_start" in rendered

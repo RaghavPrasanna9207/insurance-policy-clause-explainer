@@ -58,12 +58,32 @@ CITATION_EFFECTS = ["denies", "delays", "reduces", "requires", "permits"]
 # Cap on how many clauses the model may cite. Without an upper bound a model
 # that is unsure tends to cite everything, which reads as thorough and is
 # actually an abdication - the point of the answer is which clauses DECIDE it.
-MAX_CITATIONS = 6
+#
+# Lowered from 6 to 4 for two reasons at once: four is already more deciding
+# clauses than a real question has, and it shrinks the worst-case response
+# enough to stay clear of the generation cap.
+MAX_CITATIONS = 4
 
 # Rough characters-per-token for budgeting. Deliberately conservative: an
 # underestimate would silently truncate the clause list and drop the exclusion
 # that decides the case.
 CHARS_PER_TOKEN = 3.5
+
+# Facts that can actually decide an outcome under an Indian health policy.
+#
+# Defined once and imported by the prompt renderer, because these were briefly
+# two separate lists: the prompt was narrowed to these five, but the list shown
+# to the USER still included every null field, so the interface offered "body
+# system" and "estimated cost inr" as information it needed to answer. Two
+# lists that must agree should not be two lists - the same rule that applies to
+# the context window and its token budget.
+DECISIVE_FACTS = (
+    "months_since_policy_start",
+    "age",
+    "pre_existing_condition",
+    "hospitalised",
+    "hours_since_admission",
+)
 
 
 @dataclass
@@ -286,10 +306,7 @@ async def run_scenario(
 ) -> ScenarioResult:
     """Answer one scenario against one policy."""
     facts = await extract_facts(scenario)
-    missing = sorted(
-        key for key, value in facts.items()
-        if key != "notes" and value in (None, "", "unknown")
-    )
+    missing = [k for k in DECISIVE_FACTS if facts.get(k) in (None, "", "unknown")]
 
     considered = shortlist(clauses)
     if not considered:

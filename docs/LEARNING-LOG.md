@@ -1056,3 +1056,233 @@ Then, once the scenario simulator exists, run the same eval against a hosted fro
 If a hosted model scores materially higher there, the defensible architecture is a **hybrid**: local for the 40 bulk classifications, which are private, effectively free, and already perfect on the golden set; hosted for the one hard reasoning call, where capability actually shows up.
 
 A table reading *"local 7B: 0.72 · frontier: 0.91 · here is the trade we chose and why"* is worth more than either number alone, because it shows the choice was made rather than defaulted into.
+
+---
+
+# M5 — The scenario simulator, and making a fabricated citation impossible
+
+## What M5 had to produce
+
+Ask a question in your own words — *"I had knee surgery 8 months after buying this"* — and get back a verdict, the clauses that decide it, and the policy's own wording quoted from each.
+
+Four stages:
+
+```
+scenario ──> [5a extract facts] ──> [5b shortlist] ──> [5c reason] ──> [5d verify]
+             LLM, schema             pure filter        LLM, id-enum     substring
+```
+
+---
+
+## Concept 14: Two grounding mechanisms, because one is not enough
+
+This is where the enum result from M0 finally earns its keep, and where its limit becomes visible.
+
+**Layer one: the citation's address.** The reasoning schema's `clause_id` field is an enum built at request time from exactly the clause ids placed in that prompt:
+
+```python
+# api/app/pipeline/scenario.py
+"clause_id": {"type": "string", "enum": clause_ids},
+```
+
+Ollama enforces JSON-Schema enums during sampling, so while a citation is being generated, every token that would spell a different id has probability zero. A citation pointing at a clause the model was never shown is **unrepresentable**, not merely unlikely. Most systems detect bad citations after generation and retry; this makes them impossible to produce.
+
+**Layer two: the citation's content.** The enum guarantees the address exists. It says nothing about whether the claim attached to that address is true — and that gap is not hypothetical. It was observed:
+
+> The model cited clause `1.4` while quoting text belonging to clause `2.4`. The enum accepted it, because `1.4` was a real id.
+
+So `api/app/grounding.py` checks that any quoted text actually appears inside the clause it was attributed to. That is what catches invented wording bolted onto a valid id.
+
+> **The first layer makes the address real. The second makes the content real. Neither alone is grounding.**
+
+### Why the ids are the policy's own clause numbers
+
+The misattribution above had a cause. The ids were internal (`c14`) while the clause text itself began "2.4 Day Care Procedures", so the model was translating between two numbering systems mid-sentence — and got it wrong.
+
+Citation ids are now the policy's own numbers, so the id being cited and the number printed inside the clause are the same string. The translation step is gone because there is nothing left to translate.
+
+---
+
+## Concept 15: Why there is still no retrieval
+
+The standard architecture for "answer a question about a document" is retrieval: embed the clauses, embed the question, fetch the top k. This project does not, and the reason is arithmetic.
+
+The whole policy is **~3,100 tokens** against an 8,192-token context. Every clause that could possibly matter fits in one prompt with room to spare.
+
+Given that, retrieval could only make the answer worse. Top-k means choosing a k, and any k below "all of them" can drop the single clause that decides the case — which here means confidently telling someone they are covered because the exclusion did not make the cut. **Retrieval would solve a problem this document does not have, and introduce a failure mode it did not previously have.**
+
+`shortlist()` therefore sorts by impact and keeps everything that fits. On a normal policy nothing is dropped at all; the ordering only matters for a document large enough to overflow, and then what survives is the clauses most likely to cost the reader money.
+
+---
+
+## Failure 10: a silent context-window default
+
+The architecture above depends entirely on "the whole policy fits in the context". That claim was false.
+
+`qwen2.5` supports 32,768 tokens, but this model's Ollama definition sets no `num_ctx`, so **Ollama was applying its own 4,096-token default.** The test policy fits under that by luck. A slightly larger one would have had its opening clauses silently dropped, and the answer would have been reasoned over a truncated policy with nothing to indicate it.
+
+The fix is one line of options, but the lesson is bigger: **a guarantee that depends on a runtime default you never set is not a guarantee.** The design said 32k; the runtime said 4k; nothing in between checked.
+
+---
+
+## Failure 11: over-provisioning is not free
+
+Having found that, the obvious move was to set the window generously. 16,384 seemed safely large.
+
+The KV cache lives in VRAM beside the 4.7GB of weights. At 16,384 the runtime held 5.46GB, the machine was left with **2.0GB free of 15.7GB**, and the operating system killed the eval run for memory pressure.
+
+Sized from the actual requirement instead — a 40-clause policy is ~3,100 tokens, the system prompt ~1,200, the response ~500, so ~4,800 — the window is now 8,192. Comfortable headroom, half the cache.
+
+> "To be safe" is not a number. Caution that is not measured is just a different guess, and this one was paid for in RAM the rest of the system needed.
+
+---
+
+## Failure 12: two numbers that must agree should not be two numbers
+
+While fixing the above, a latent bug surfaced: `scenario_token_budget` was **12,000** while `num_ctx` was **8,192**. Two independently-set values that must agree.
+
+A 12k clause budget against an 8k window builds a prompt larger than the context, and Ollama truncates it silently — dropping exactly the clauses the shortlist had just been careful to include. The guarantee and the config value that could break it lived twenty lines apart and were never checked against each other.
+
+The budget is now derived:
+
+```python
+# api/app/config.py
+@property
+def scenario_token_budget(self) -> int:
+    return max(self.num_ctx - self.scenario_reserved_tokens, 1_000)
+```
+
+The same mistake appeared a second time in M5, in a different place. The list of facts the model is told are missing had been narrowed to the five that can decide an Indian health claim, but the list shown to the *user* still included every null field — so the interface asked for the reader's "body system" and "estimated cost inr" before it could answer. Both now read from one `DECISIVE_FACTS` tuple.
+
+---
+
+## Failure 13: an error message that said nothing
+
+One scenario ran past a 420-second timeout three times and failed with:
+
+```
+LlmError: qwen2.5:7b-instruct-q4_K_M failed after 3 attempts:
+```
+
+Nothing after the colon. Twenty-one minutes of failure, reported as no information at all.
+
+The cause is a detail worth carrying to other projects: **`httpx.ReadTimeout` stringifies to an empty string.** The handler formatted the exception with `{last_error}` and trusted every exception class to have a useful `__str__`. Some do not. Error messages now always include the exception *type*.
+
+---
+
+## Failure 14: retrying a deterministic failure
+
+With the message fixed, the real cause appeared: **generation was never capped.** `llama.cpp` generates until a stop token or the context fills, so a model that begins repeating itself does the latter. Capping it at `num_predict` took the same case from three consecutive timeouts to **9.9 seconds**.
+
+Then the cap was too tight, and the JSON came back truncated mid-quote. But the more interesting failure was how the client responded to that:
+
+```
+JSONDecodeError: Unterminated string starting at: line 6 column 16
+```
+
+...three times, identically.
+
+> **temperature is 0.** Re-sending an identical request produces identical tokens. Retrying a deterministic failure is not a retry — it is the same failure, three times, at three times the cost.
+
+So the two failure kinds are now handled as the different things they are:
+
+| Failure | Correct response |
+|---|---|
+| Truncated JSON | **Change something** — double `num_predict`, and log that the configured ceiling is too low |
+| Transport error | **Repeat unchanged** — a timeout is not a property of the prompt |
+
+Both behaviours are pinned by tests, including one asserting the ceiling must *not* creep upward on transport failures.
+
+The cap itself was also resized from what the schema can hold rather than from a round number that felt safe — worst case is 4 citations of ~200 characters plus reasoning, about 500 tokens, so 1,600 with triple headroom. **"Cap runaway generation" and "cap useful output" are the same knob.**
+
+---
+
+## Concept 16: measuring the right thing, again
+
+The eval reports four numbers over 16 hand-authored scenarios:
+
+| Metric | Score |
+|---|---|
+| Verdict accuracy | **0.688** (11/16) |
+| Citation recall | **0.750** (12 cases require a citation) |
+| Fabrication rate | **0.125** (3 invented quotes) |
+| **Detection integrity** | **1.000** |
+
+The first version of this eval had a single metric called "groundedness" with a hard 100% target. Then a case failed it: the model cited a waiting-period clause for a co-payment question and quoted words that were not in it. The verbatim check caught it and flagged the answer unverified.
+
+Reporting that as a system failure would have been **exactly backwards.** It is the check doing its job. The metric was conflating two different questions:
+
+- **Fabrication rate** is about *the model*. A 7B model will sometimes attach an invented quote to a real clause id. Driving this to zero is a quality goal.
+- **Detection integrity** is about *the system*. Every fabricated quote must be caught and shown as unverified. **This** is the property the design promises, and the only one with a hard target.
+
+A real failure would be an unverifiable quote reaching a reader unflagged. That number is 1.000.
+
+One further detail: detection integrity is computed by **independently re-verifying every quotation** and comparing against the flag the pipeline set — not by reading the flag. A self-reported guarantee is not a measurement; if the verifier were silently broken, its own flag would cheerfully report everything fine.
+
+---
+
+## Knowing when to stop, again
+
+The first run scored **0.562** with an obvious systematic bias: six of seven misses were `not_covered` for cases that were not denials. That was an over-correction of *my own* earlier fix — having pushed hard on "do not soften a refusal", the model began refusing everything.
+
+One principled fix addressed a genuine definitional gap rather than fitting the metric:
+
+```
+"20% co-payment applies"       -> conditional. You are paid 80%.
+"room rent capped at 1% a day" -> conditional. You are paid, with a deduction.
+"cosmetic surgery is excluded" -> not_covered. Nothing is paid.
+```
+
+**Being paid less is not being refused.** That took accuracy 0.562 → 0.688 and fixed all three `conditional` cases.
+
+It also broke one that had been right: `cataract-served` regressed from `covered` to `not_covered`. That is the signal to stop — the same signature as M2's ranking work, where changes began trading cases against each other rather than improving the system.
+
+### What the remaining misses actually are
+
+Worth reading, because they are not random:
+
+| Case | Expected | Got | Needs |
+|---|---|---|---|
+| `ped-waiting-served` | covered | not_covered | 5 years > 36 months |
+| `cosmetic-after-accident` | covered | not_covered | reading "unless necessitated by an Accident" |
+| `initial-waiting-period` | not_covered | covered | 2 weeks < 30 days |
+| `cataract-served` | covered | not_covered | 4 years > 24 months |
+
+**Four of five require date arithmetic or following an exception clause.** Not vocabulary, not classification — multi-hop reasoning over interacting rules. That is precisely where a 7B model is weakest, and precisely what the earlier interlude on local versus hosted models predicted would need measuring against a frontier model.
+
+Single-clause classification scores macro-F1 1.000 locally. Combining three interacting rules scores 0.688. The gap between those two numbers *is* the finding.
+
+---
+
+## Where M5 ended up
+
+**91 tests passing.** Files added: `app/grounding.py`, `app/pipeline/scenario.py`, `app/routers/scenarios.py`, `web/src/components/ScenarioPanel.tsx`, `evals/run_scenario_eval.py`, `evals/golden/scenarios.json`.
+
+---
+
+## Check it yourself
+
+```bash
+cd api && .venv/Scripts/python.exe -m pytest -v
+python evals/run_scenario_eval.py        # writes evals/scenario-report.md
+```
+
+Then run both servers and ask the app something it cannot answer — *"does this cover my car being stolen?"* It should say your policy does not settle it, rather than guessing.
+
+**Question to sit with:** the eval's `detection_integrity` is 1.000, computed by re-verifying every quotation independently rather than by reading the `verified` flag the pipeline already set. Reading the flag would have been one line instead of ten, and would have produced the same number.
+
+Why is the ten-line version the only one worth having?
+
+<details>
+<summary>Answer</summary>
+
+Because reading the flag would measure **nothing**.
+
+`ScenarioResult.verified` is set by the very code the metric is supposed to be testing. If `verify_quote` had a bug — a normalisation step that was too generous, a regex that silently matched nothing, an `in` test on the wrong variable — then every citation would be marked verified, the flag would report a clean run, and the metric would print **1.000**.
+
+A perfect score produced by a broken verifier is indistinguishable from a perfect score produced by a working one, if the score comes from the verifier.
+
+Re-verifying independently means the eval computes the answer a second time and compares. It can now catch the case the design fears most: a quotation that genuinely is not in the policy, which the pipeline nevertheless waved through.
+
+The general form: **a test that asks the system under test whether it worked is not a test.** It is the same reason the M1 tests slice `raw_text[start:end]` and compare, rather than asking the parser whether its offsets are correct — and the same reason the M0 LLM tests hit a real Ollama rather than a mock.
+</details>

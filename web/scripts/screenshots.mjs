@@ -78,8 +78,26 @@ await setTheme('dark')
 await shot('07-clause-panel-dark')
 await setTheme('light')
 
-// --- Narrow viewport ---
+// --- Scenario simulator ---
 await page.keyboard.press('Escape')
+await page.waitForTimeout(300)
+const box = page.locator('#scenario')
+await box.scrollIntoViewIfNeeded()
+await page.waitForTimeout(400)
+await shot('09-scenario-empty')
+
+// Use an example chip: it fires a real question against the real policy.
+await page.locator('button', { hasText: 'I have had diabetes for years' }).first().click()
+await page.waitForSelector('blockquote', { timeout: 300000 })
+await page.waitForTimeout(800)
+await box.scrollIntoViewIfNeeded()
+await page.waitForTimeout(300)
+await shot('10-scenario-answer-light')
+await setTheme('dark')
+await shot('11-scenario-answer-dark')
+await setTheme('light')
+
+// --- Narrow viewport ---
 await page.setViewportSize({ width: 430, height: 900 })
 await page.waitForTimeout(500)
 await shot('08-narrow-report')

@@ -20,7 +20,11 @@ class Settings(BaseSettings):
     # few hundred more, on top of a possible ~27s cold model load. 180s was not
     # enough and produced httpx.ReadTimeout under real load; 420s has margin
     # without hanging a request forever.
-    request_timeout: float = 420.0
+    # With num_predict capping generation, a call is prompt evaluation plus a
+    # bounded response, so 240s is ample. The earlier 420s was compensating for
+    # runaway generation rather than fixing it - and a long timeout on a broken
+    # call just makes the failure take longer to discover.
+    request_timeout: float = 240.0
 
     # EXPLICIT context window. This is not a tuning knob, it is a correctness
     # fix.
@@ -50,6 +54,26 @@ class Settings(BaseSettings):
     # Tokens reserved inside the context for everything that is NOT clause text:
     # the system prompt, the extracted facts, and the generated answer.
     scenario_reserved_tokens: int = 2_500
+
+    # HARD CAP on generated tokens. Without one, llama.cpp generates until the
+    # model emits a stop token or the context fills - and a model that starts
+    # repeating itself does the latter. That is what happened: one scenario ran
+    # past a 420-second timeout three times in a row, burning 21 minutes before
+    # failing, because nothing bounded the output.
+    #
+    # 1,600 is computed from what the schema can hold, not guessed. 900 was
+    # guessed, and the model hit it mid-quote: the JSON came back with an
+    # unterminated string and the whole eval died.
+    #
+    # Worst case under the reasoning schema: 4 citations x (a clause id, a
+    # quoted sentence of ~200 chars, an effect, JSON punctuation) ~= 1,100
+    # chars, plus ~400 chars of reasoning, plus the missing_information array.
+    # Call it 1,700 chars ~= 500 tokens. 1,600 is triple that.
+    #
+    # The lesson is that "cap runaway generation" and "cap useful output" are
+    # the same knob, so it has to be sized from the largest legitimate response,
+    # never from a round number that feels safe.
+    num_predict: int = 1_600
     # temperature=0 is not decoration: extraction must be reproducible, or the
     # LLM cache and the eval numbers both become meaningless.
     temperature: float = 0.0

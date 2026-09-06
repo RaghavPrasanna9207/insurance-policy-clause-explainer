@@ -52,8 +52,16 @@ def make_key(
     prompt_version: str,
     messages: list[dict[str, str]],
     schema: dict[str, Any] | None,
+    options: dict[str, Any] | None = None,
 ) -> str:
     """Hash every input that could change the response.
+
+    `options` is included because decoding parameters change the OUTPUT, not
+    merely the runtime. `num_ctx` truncates the prompt when it is too small and
+    `num_predict` cuts the response short - both produce a genuinely different
+    answer, so a cached result from one setting must never be served for
+    another. This is the same rule `prompt_version` exists to enforce, applied
+    to the parameters rather than the words.
 
     sort_keys=True matters: Python preserves dict insertion order, so two
     logically identical schemas built in a different field order would otherwise
@@ -65,6 +73,7 @@ def make_key(
             "prompt_version": prompt_version,
             "messages": messages,
             "schema": schema,
+            "options": options or {},
         },
         sort_keys=True,
     )

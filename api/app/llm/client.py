@@ -57,8 +57,9 @@ async def complete_json(
     decoding hits the token limit mid-document, producing truncated JSON.
     """
     model = model or settings.model
+    options = _decode_options()
 
-    key = cache.make_key(model, prompt_version, messages, schema)
+    key = cache.make_key(model, prompt_version, messages, schema, options)
     if use_cache:
         if (hit := cache.get(key)) is not None:
             log.debug("llm cache hit %s", key[:12])
@@ -67,30 +68,83 @@ async def complete_json(
     last_error: Exception | None = None
     for attempt in range(1, max_attempts + 1):
         try:
-            raw = await _post_chat(messages, schema, model)
+            raw = await _post_chat(messages, schema, model, options)
             parsed = json.loads(raw)
             if use_cache:
-                cache.put(key, model, parsed)
+                # Keyed on the options that actually produced this answer, which
+                # may not be the ones we started with (see the escalation below).
+                cache.put(
+                    cache.make_key(model, prompt_version, messages, schema, options),
+                    model,
+                    parsed,
+                )
             return parsed
+
         except json.JSONDecodeError as exc:
-            # Constrained decoding guarantees valid *prefixes*, but if generation
-            # hits the token ceiling the document can still end mid-structure.
+            # Constrained decoding guarantees valid *prefixes*, but generation
+            # that hits the token ceiling still ends mid-structure. That is
+            # exactly what this is: an unterminated string, not a malformed one.
+            #
+            # RETRYING THIS UNCHANGED IS POINTLESS. temperature is 0, so the
+            # same prompt yields the same tokens every time - three identical
+            # attempts at an identical truncation, which is what happened
+            # before this branch existed. A retry is only worth making if
+            # something about the request changes.
+            #
+            # So the retry raises the ceiling instead of repeating the request.
             last_error = exc
-            log.warning("attempt %d: truncated/invalid JSON: %s", attempt, exc)
+            options = {**options, "num_predict": options["num_predict"] * 2}
+            log.warning(
+                "attempt %d: response truncated mid-JSON; retrying with "
+                "num_predict=%d. If this recurs, raise `num_predict` in config - "
+                "the configured ceiling is too low for this schema.",
+                attempt,
+                options["num_predict"],
+            )
+
         except httpx.HTTPError as exc:
+            # Transport failures ARE worth repeating unchanged: a timeout or a
+            # dropped connection is not a property of the prompt.
             last_error = exc
             log.warning("attempt %d: transport error: %s", attempt, exc)
 
         if attempt < max_attempts:
             await asyncio.sleep(2**(attempt - 1))  # 1s, 2s
 
+    # The exception TYPE is included deliberately. httpx.ReadTimeout stringifies
+    # to an empty string, so an earlier version of this message read
+    # "failed after 3 attempts: " with nothing after the colon - which said
+    # nothing at all about a failure that had taken 21 minutes.
     raise LlmError(
-        f"{model} failed after {max_attempts} attempts: {last_error}"
+        f"{model} failed after {max_attempts} attempts: "
+        f"{type(last_error).__name__}: {last_error or '(no message)'}"
     ) from last_error
 
 
+def _decode_options() -> dict[str, Any]:
+    """Decoding parameters, in one place.
+
+    Built here rather than inline so the exact dict that is sent is also the
+    dict that is hashed into the cache key - if the two were constructed
+    separately they could drift, and a cache entry would then be keyed on
+    settings the request never actually used.
+    """
+    return {
+        "temperature": settings.temperature,
+        # Without an explicit window Ollama applies its own 4,096 default, well
+        # under this project's 32k assumption, and truncates silently.
+        "num_ctx": settings.num_ctx,
+        # Bounded output: an uncapped generation ran past three consecutive
+        # 420s timeouts when the model began repeating itself.
+        "num_predict": settings.num_predict,
+    }
+
+
 async def _post_chat(
-    messages: list[dict[str, str]], schema: dict[str, Any], model: str
+    messages: list[dict[str, str]],
+    schema: dict[str, Any],
+    model: str,
+    options: dict[str, Any],
 ) -> str:
     async with httpx.AsyncClient(timeout=settings.request_timeout) as client:
         resp = await client.post(
@@ -101,14 +155,7 @@ async def _post_chat(
                 "stream": False,
                 # The whole point: this is a grammar constraint, not a hint.
                 "format": schema,
-                "options": {
-                    "temperature": settings.temperature,
-                    # Sent on every call. Without it Ollama silently truncates
-                    # any prompt over its 4,096-token default, which would mean
-                    # reasoning over a policy with its opening clauses missing
-                    # and no error to say so.
-                    "num_ctx": settings.num_ctx,
-                },
+                "options": options,
             },
         )
         resp.raise_for_status()

@@ -128,3 +128,108 @@ def test_prompt_version_changes_the_cache_key():
 
     assert len({k1, k2, k3, k4}) == 4, "cache key ignores an input that matters"
     assert k1 == cache.make_key("m", "v1", msgs, CLASSIFY_SCHEMA), "key is unstable"
+
+
+def test_decode_options_change_the_cache_key():
+    """num_ctx and num_predict change the ANSWER, so they must change the key.
+
+    `num_ctx` truncates the prompt when it is too small; `num_predict` cuts the
+    response short. Either produces a genuinely different result, so a cached
+    entry from one setting must never be served for another - the same rule
+    `prompt_version` enforces for wording, applied to the parameters.
+
+    This was found the hard way: an uncapped `num_predict` let a generation run
+    past three consecutive timeouts, and capping it would have been invisible to
+    a cache that keyed only on the prompt.
+    """
+    msgs = _messages(PRE_EXISTING_CLAUSE)
+    base = {"temperature": 0.0, "num_ctx": 8192, "num_predict": 900}
+
+    key = cache.make_key("m", "v1", msgs, CLASSIFY_SCHEMA, base)
+    smaller_ctx = cache.make_key("m", "v1", msgs, CLASSIFY_SCHEMA, {**base, "num_ctx": 4096})
+    shorter_out = cache.make_key("m", "v1", msgs, CLASSIFY_SCHEMA, {**base, "num_predict": 100})
+
+    assert len({key, smaller_ctx, shorter_out}) == 3, "decode options are not in the key"
+    assert key == cache.make_key("m", "v1", msgs, CLASSIFY_SCHEMA, dict(base)), "key unstable"
+
+
+def test_the_options_sent_are_the_options_hashed():
+    """Guards against the two drifting apart.
+
+    If the dict sent to Ollama and the dict hashed into the key were built
+    separately, a cache entry could be keyed on settings the request never used.
+    """
+    from app.config import settings
+    from app.llm.client import _decode_options
+
+    options = _decode_options()
+    assert options["num_ctx"] == settings.num_ctx
+    assert options["num_predict"] == settings.num_predict
+    assert options["temperature"] == settings.temperature
+
+
+async def test_truncated_json_retries_with_a_higher_ceiling(monkeypatch):
+    """A deterministic failure must not be retried unchanged.
+
+    temperature is 0, so re-sending an identical request yields identical
+    tokens. When a response is truncated mid-JSON, three identical attempts is
+    three identical truncations - which is exactly what happened before this
+    behaviour existed, and it failed an entire eval run.
+
+    The retry has to change something. Here it doubles the generation ceiling,
+    which addresses the actual cause.
+    """
+    from app.llm import client as llm_client
+
+    seen: list[int] = []
+
+    async def fake_post(messages, schema, model, options):
+        seen.append(options["num_predict"])
+        # Truncate on the first call, succeed once there is room.
+        if len(seen) == 1:
+            return '{"clause_type": "exclusion", "plain_language": "the quote was cut'
+        return '{"clause_type": "exclusion", "plain_language": "ok", "waiting_months": 3}'
+
+    monkeypatch.setattr(llm_client, "_post_chat", fake_post)
+
+    result = await llm_client.complete_json(
+        _messages(PRE_EXISTING_CLAUSE),
+        CLASSIFY_SCHEMA,
+        prompt_version="test-truncation",
+        use_cache=False,
+    )
+
+    assert result["plain_language"] == "ok"
+    assert len(seen) == 2, "should have retried exactly once"
+    assert seen[1] == seen[0] * 2, "the retry must raise the ceiling, not repeat the request"
+
+
+async def test_transport_errors_are_retried_unchanged(monkeypatch):
+    """The mirror of the test above.
+
+    A timeout or dropped connection is not a property of the prompt, so
+    repeating it verbatim is the correct response - and the ceiling must NOT
+    creep upward on failures that had nothing to do with output length.
+    """
+    import httpx
+
+    from app.llm import client as llm_client
+
+    seen: list[int] = []
+
+    async def fake_post(messages, schema, model, options):
+        seen.append(options["num_predict"])
+        if len(seen) == 1:
+            raise httpx.ReadTimeout("timed out")
+        return '{"clause_type": "exclusion", "plain_language": "ok", "waiting_months": 3}'
+
+    monkeypatch.setattr(llm_client, "_post_chat", fake_post)
+
+    await llm_client.complete_json(
+        _messages(PRE_EXISTING_CLAUSE),
+        CLASSIFY_SCHEMA,
+        prompt_version="test-transport",
+        use_cache=False,
+    )
+
+    assert seen == [seen[0], seen[0]], "transport retry must not change the ceiling"

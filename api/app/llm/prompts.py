@@ -36,7 +36,7 @@ coverage, it just happens to be describing its ceiling.
 
 from app.taxonomy import ClauseType
 
-PROMPT_VERSION = "v5-scenarios"
+PROMPT_VERSION = "v6-verdict-rules"
 
 CLASSIFY_SYSTEM = """\
 You are an expert on Indian (IRDAI-regulated) health insurance policy wordings.
@@ -235,6 +235,28 @@ TELLING THE VERDICTS APART - these were measured getting confused:
   the situation, or when a fact you would need is missing from the description.
   Not when the answer is merely unwelcome.
 
+BEING PAID LESS IS NOT BEING REFUSED.
+This is the most common mistake. A co-payment, a room-rent cap, a
+proportionate deduction or a disease sub-limit means the claim IS paid - just
+reduced. That is **conditional**, never not_covered.
+
+  "20% co-payment applies"        -> conditional. You are paid 80%.
+  "room rent capped at 1% a day"  -> conditional. You are paid, with a deduction.
+  "cosmetic surgery is excluded"  -> not_covered. Nothing is paid.
+
+Ask: does the policy pay ZERO for this, or does it pay a smaller amount?
+Only zero is not_covered.
+
+CHECK THE ARITHMETIC BEFORE REFUSING.
+A waiting period that HAS elapsed is not a reason to deny. If someone held the
+policy 5 years and the bar is 36 months, it has been served - that is 60 months
+against 36. Convert years to months and compare before citing a waiting period.
+
+READ THE EXCEPTIONS.
+Exclusions frequently carve out cases: "unless necessitated by an Accident",
+"except claims arising out of an Accident". If the situation falls inside the
+carve-out, the exclusion does NOT apply and you should not cite it as a denial.
+
 A FACT BEING UNSTATED ONLY MATTERS IF YOU ACTUALLY NEED IT.
 The situation will always leave things unsaid - an age, a cost, an exact hour.
 That is normal and is not by itself a reason to abstain. Ask only: do I need
@@ -261,7 +283,9 @@ CITING CLAUSES:
   EXACTLY from the clause text as given. Do not paraphrase, tidy, shorten or
   correct the wording. The quote is checked character by character against the
   policy, and an inexact quote is discarded.
-- Quote at least a full phrase, not two or three words.
+- Quote the phrase that actually decides it: one sentence, not the whole
+  clause. Two or three words prove nothing, and reprinting an entire clause is
+  not a citation - it pushes the real reason back onto the reader to find.
 - Put ONLY the clause's own words inside the quote. Do not append a clause
   number, a bracketed reference or any note of your own - the quote is compared
   against the policy character by character, and anything you add to it is a
@@ -286,18 +310,11 @@ def render_reasoning_request(scenario: str, facts: dict, clauses) -> str:
     are built from one list, in one place, in `pipeline/scenario.py`.
     """
     known = {k: v for k, v in facts.items() if v not in (None, "", [], "unknown")}
-    # Only facts that can actually decide an outcome under an Indian health
-    # policy. An earlier version listed every null field, including cost and
-    # body system, and nine "not stated" bullets pushed the model to answer
-    # insufficient_information for situations the clauses plainly settled.
-    decisive = (
-        "months_since_policy_start",
-        "age",
-        "pre_existing_condition",
-        "hospitalised",
-        "hours_since_admission",
-    )
-    missing = [k for k in decisive if facts.get(k) in (None, "", "unknown")]
+    # Imported rather than redeclared: the model's list and the user's list are
+    # the same list. See DECISIVE_FACTS in pipeline/scenario.py for why.
+    from app.pipeline.scenario import DECISIVE_FACTS
+
+    missing = [k for k in DECISIVE_FACTS if facts.get(k) in (None, "", "unknown")]
 
     lines = [
         "SITUATION (in the person's own words):",

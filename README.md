@@ -120,10 +120,12 @@ No real insurer policy wordings are committed to this repository.
 | M2 | Analyze + score — classification, deterministic impact formula | ✅ macro-F1 1.000 |
 | M3 | REST API — upload, poll, ranked clauses | ✅ |
 | M4 | Web UI — risk dashboard, clause explorer | ✅ |
-| M5 | Scenario simulator | ✅ |
+| M5 | Scenario simulator | ✅ verdict 0.688 · detection 1.000 |
 | M6 | Eval report | |
 
 Evaluation is the point, not an afterthought: model and prompt changes in this project are justified by measured numbers on the golden set, never by impressions.
+
+The scenario simulator reports two numbers that are deliberately different in kind. **Detection integrity is 1.000** — every quotation the model invented was caught and shown as unverified, which is the guarantee the grounding design makes. **Verdict accuracy is 0.688**, a quality measure, and it is published as-is: four of the five remaining misses need date arithmetic or following an exception clause, which is exactly where a 7B model is weakest. See [`evals/scenario-report.md`](evals/scenario-report.md).
 
 ---
 

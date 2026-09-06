@@ -6,13 +6,26 @@ questions that matter more, and that a labelling score cannot see:
 
   VERDICT ACCURACY     did it reach the answer a competent human reader would?
   CITATION RECALL      did it cite the clause that actually decides the case?
-  GROUNDEDNESS         is every quotation genuinely present in the policy?
+  FABRICATION RATE     how often did the model quote something not in the policy?
+  DETECTION INTEGRITY  was every fabricated quote caught and flagged?
 
-Groundedness is the one with a hard target of 100%. The other two are quality
-measures where a local 7B model is allowed to be imperfect; groundedness is a
-correctness property. An answer whose quotations cannot be found in the
-document is not a worse answer, it is a fabricated one, and the whole grounding
-design exists so that number stays at 1.000.
+THE LAST TWO ARE NOT THE SAME MEASUREMENT, and an earlier version of this file
+conflated them under one name with a hard 100% target. That was a category
+error worth spelling out.
+
+  Fabrication rate measures THE MODEL. A 7B model will sometimes attach an
+  invented quote to a real clause id - measured here at 1 case in 16, where it
+  cited a waiting-period clause for a co-payment question and quoted words that
+  were not in it. Driving this to zero is a quality goal, not a guarantee.
+
+  Detection integrity measures THE SYSTEM. Every fabricated quote must be
+  caught and surfaced as unverified, never presented as fact. THIS is the
+  property with a hard 100% target, and it is the one the grounding design
+  actually promises.
+
+Reporting a caught fabrication as a system failure would have been exactly
+backwards: it is the check doing its job. What would be a real failure is an
+unverifiable quote reaching a reader unflagged.
 
 Usage:
     python evals/run_scenario_eval.py
@@ -30,6 +43,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "api"))
 
 from app.config import settings  # noqa: E402
+from app.grounding import verify_quote  # noqa: E402
 from app.llm import cache  # noqa: E402
 from app.pipeline.analyze import analyze  # noqa: E402
 from app.pipeline.ingest import ingest  # noqa: E402
@@ -79,11 +93,26 @@ async def run(use_cache: bool) -> dict:
     clauses = await build_clauses()
     print(f"  {len(clauses)} analysed clauses\n")
 
+    source_by_id = {c.clause_id: c.text for c in clauses}
+
     rows = []
     started = time.perf_counter()
     for index, case in enumerate(cases, 1):
         print(f"  [{index}/{len(cases)}] {case['id']}", flush=True)
         result = await run_scenario(case["scenario"], clauses)
+
+        # Re-verify every quotation INDEPENDENTLY rather than trusting the flag
+        # the pipeline set. A self-reported guarantee is not a measurement: if
+        # the verifier were silently broken, its own flag would happily say
+        # everything is fine. This recomputes the check and compares.
+        truly_bad = 0
+        flagged_bad = 0
+        for citation in result.citations:
+            ok, _ = verify_quote(citation.quote, source_by_id.get(citation.clause_id, ""))
+            if not ok:
+                truly_bad += 1
+                if not citation.verified:
+                    flagged_bad += 1
 
         cited = {c.clause_id for c in result.citations}
         required = set(case["must_cite"])
@@ -102,6 +131,8 @@ async def run(use_cache: bool) -> dict:
             ],
             "reasoning": result.reasoning,
             "why": case["why"],
+            "truly_bad": truly_bad,
+            "flagged_bad": flagged_bad,
         })
 
     elapsed = time.perf_counter() - started
@@ -118,7 +149,20 @@ async def run(use_cache: bool) -> dict:
         "citation_recall": (
             sum(r["citation_ok"] for r in citable) / len(citable) if citable else 1.0
         ),
-        "groundedness": sum(r["grounded"] for r in rows) / max(total, 1),
+        # Renamed from "groundedness", which merged two different questions.
+        # This one is about the MODEL: how often did it quote something that is
+        # not in the policy.
+        "fabrication_rate": sum(not r["grounded"] for r in rows) / max(total, 1),
+        # This one is about the SYSTEM: of the answers containing a fabricated
+        # quote, how many were correctly flagged as unverified. Anything below
+        # 1.000 means an invented quotation reached the surface looking like
+        # evidence, which is the failure the whole design exists to prevent.
+        "detection_integrity": (
+            sum(r["flagged_bad"] for r in rows) / sum(r["truly_bad"] for r in rows)
+            if sum(r["truly_bad"] for r in rows)
+            else 1.0
+        ),
+        "fabricated_quotes": sum(r["truly_bad"] for r in rows),
         "citable_count": len(citable),
         "total": total,
     }
@@ -139,13 +183,25 @@ def report(res: dict) -> str:
         f"| Verdict accuracy | **{res['verdict_accuracy']:.3f}** | quality measure |",
         f"| Citation recall | **{res['citation_recall']:.3f}** | quality measure "
         f"({res['citable_count']} cases require a citation) |",
-        f"| Groundedness | **{res['groundedness']:.3f}** | **must be 1.000** |",
+        f"| Fabrication rate | **{res['fabrication_rate']:.3f}** | quality measure "
+        f"({res['fabricated_quotes']} invented quote(s)) |",
+        f"| **Detection integrity** | **{res['detection_integrity']:.3f}** "
+        f"| **must be 1.000** |",
         "",
-        "Groundedness is the only hard target. Verdict accuracy and citation",
-        "recall are quality measures where a local 7B model is allowed to be",
-        "imperfect. Groundedness is a correctness property: an answer whose",
-        "quotations cannot be found in the policy is not a weaker answer, it is a",
-        "fabricated one.",
+        "**These last two measure different things, and only one is a guarantee.**",
+        "",
+        "*Fabrication rate* is about the model: how often it attached an invented",
+        "quotation to a real clause id. A 7B model will sometimes do this, and",
+        "driving it to zero is a quality goal.",
+        "",
+        "*Detection integrity* is about the system: of the quotations that genuinely",
+        "could not be found in the policy, how many were caught and shown to the",
+        "reader as unverified. This is the property the grounding design actually",
+        "promises, and it is the only hard target here. It is computed by",
+        "re-verifying every quotation independently and comparing against the flag",
+        "the pipeline set - a self-reported guarantee is not a measurement.",
+        "",
+        "A caught fabrication is the check working, not the system failing.",
         "",
         "## Case by case",
         "",
@@ -197,7 +253,9 @@ def main() -> None:
     print(f"  verdict accuracy : {res['verdict_accuracy']:.3f}")
     print(f"  citation recall  : {res['citation_recall']:.3f} "
           f"({res['citable_count']} cases)")
-    print(f"  groundedness     : {res['groundedness']:.3f}  (must be 1.000)")
+    print(f"  fabrication rate : {res['fabrication_rate']:.3f} "
+          f"({res['fabricated_quotes']} invented quote(s))")
+    print(f"  detection integ. : {res['detection_integrity']:.3f}  (must be 1.000)")
     print()
     for row in res["rows"]:
         flag = "  " if row["verdict_ok"] else "<-"
