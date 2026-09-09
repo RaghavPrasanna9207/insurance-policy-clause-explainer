@@ -86,6 +86,15 @@ class ClauseAnalysis:
     waiting_period_unit: str | None = None
     # Conditions under which the clause does NOT apply.
     exceptions: list[str] = field(default_factory=list)
+    # THE OPERANDS OF A REDUCTION, reported exactly as the clause states them.
+    # Same split as the waiting period above and for the same reason: reading
+    # "one percent of the Sum Insured per day" out of prose is language;
+    # deciding whether 8,000 exceeds 1% of 10 lakh is arithmetic, and stage 5
+    # does it in Python. See app/pipeline/reduction.py.
+    copay_percent: int | None = None
+    copay_min_age_at_inception: int | None = None
+    cap_percent_of_sum_insured: int | None = None
+    icu_cap_percent_of_sum_insured: int | None = None
     likelihood: int = 3
     severity: int = 3
 
@@ -181,6 +190,28 @@ def _batch_schema(ids: list[str]) -> dict[str, Any]:
                         # clause's escape hatch is exactly what a policyholder
                         # needs to see.
                         "exceptions": {"type": "array", "items": {"type": "string"}},
+                        # REDUCTION OPERANDS. Null on every clause that does not
+                        # cut a payout, which is most of them.
+                        #
+                        # These exist because the model was being asked, inside
+                        # a paragraph of legal prose, to work out whether 8,000
+                        # exceeds one percent of ten lakh - and it got that
+                        # wrong in both directions on the golden set: a room
+                        # under the cap read as a breach, an ICU rate over the
+                        # cap read as fine.
+                        #
+                        # Asking instead for the two numbers the clause STATES
+                        # leaves the model doing what it is good at. Python
+                        # multiplies and compares. This is the same fix already
+                        # applied to waiting periods, in the family of
+                        # comparisons nobody had noticed was the same family:
+                        # money and age rather than duration.
+                        "copay_percent": {"type": ["integer", "null"]},
+                        "copay_min_age_at_inception": {"type": ["integer", "null"]},
+                        "cap_percent_of_sum_insured": {"type": ["integer", "null"]},
+                        "icu_cap_percent_of_sum_insured": {
+                            "type": ["integer", "null"]
+                        },
                         # Integer enums, not bare integers: a 1-5 scale that can
                         # return 7 is not a 1-5 scale, and stage 4 normalises
                         # these assuming the stated range.
@@ -191,6 +222,9 @@ def _batch_schema(ids: list[str]) -> dict[str, Any]:
                         "id", "clause_type", "plain_language", "what_it_means",
                         "triggers", "monetary_limits", "time_windows",
                         "waiting_period_value", "waiting_period_unit", "exceptions",
+                        "copay_percent", "copay_min_age_at_inception",
+                        "cap_percent_of_sum_insured",
+                        "icu_cap_percent_of_sum_insured",
                         "likelihood", "severity",
                     ],
                 },
@@ -214,6 +248,10 @@ def _parse(payload: dict[str, Any]) -> dict[str, ClauseAnalysis]:
             waiting_period_value=item.get("waiting_period_value"),
             waiting_period_unit=item.get("waiting_period_unit"),
             exceptions=[e.strip() for e in item.get("exceptions", []) if e.strip()],
+            copay_percent=item.get("copay_percent"),
+            copay_min_age_at_inception=item.get("copay_min_age_at_inception"),
+            cap_percent_of_sum_insured=item.get("cap_percent_of_sum_insured"),
+            icu_cap_percent_of_sum_insured=item.get("icu_cap_percent_of_sum_insured"),
             likelihood=item["likelihood"],
             severity=item["severity"],
         )

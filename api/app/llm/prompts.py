@@ -36,7 +36,7 @@ coverage, it just happens to be describing its ceiling.
 
 from app.taxonomy import ClauseType
 
-PROMPT_VERSION = "v11-prominence"
+PROMPT_VERSION = "v12-reductions"
 
 CLASSIFY_SYSTEM = """\
 You are an expert on Indian (IRDAI-regulated) health insurance policy wordings.
@@ -110,6 +110,29 @@ EXTRACTED DETAILS:
     "no claim ... except claims arising out of an Accident"
        -> ["claims arising out of an Accident"]
   Empty list only when the clause genuinely admits no exception.
+
+THE NUMBERS BEHIND A REDUCTION. Null on every clause that reduces nothing,
+which is most of them. Report what the clause SAYS; the comparison against the
+person's actual figures is done afterwards, in code.
+- copay_percent: the co-payment percentage the insured must bear.
+    "a co-payment of twenty percent of the admissible claim amount" -> 20
+- copay_min_age_at_inception: the age that triggers that co-payment, where the
+  clause sets one. Read the wording carefully - it usually keys on age when the
+  policy STARTED, not age at the time of claim.
+    "completed sixty years of age at the time of first inception" -> 60
+    a co-payment with no age condition at all -> null
+- cap_percent_of_sum_insured: an ordinary per-day accommodation cap expressed
+  as a percentage of the sum insured.
+    "room rent ... limited to one percent of the Sum Insured per day" -> 1
+- icu_cap_percent_of_sum_insured: the same, for intensive care, where the
+  clause states a separate rate.
+    "Intensive Care Unit charges ... limited to two percent" -> 2
+  A clause that states one rate for a room and a different rate for ICU fills
+  in BOTH fields; one that mentions no ICU rate leaves this null.
+
+A cap expressed in RUPEES rather than as a percentage of the sum insured
+("twenty five thousand rupees per eye") leaves all four fields null and belongs
+in monetary_limits, where it already goes.
 
 LIKELIHOOD (1-5) - how many policyholders this clause will actually touch:
   1  Almost nobody. War, nuclear perils, adventure sports.
@@ -209,8 +232,30 @@ Examples of the distinction:
 NEVER convert between units. "Two weeks" is 2 + weeks, not 2 + months and
 not 14 + days. Report the number and the word the person actually used;
 converting is done afterwards, in code.
-- "I'm 67"                                 -> age: 67
-- no age mentioned                         -> age: null
+TWO DIFFERENT AGES, AND THEY ARE NOT INTERCHANGEABLE.
+`age` is how old the person is NOW. `age_at_policy_start` is how old they were
+when the policy began. A senior-citizen co-payment keys on the second one, so
+guessing it from the first would impose a 20% cut on someone who does not owe
+it. Fill in only what was actually said; the arithmetic linking them is done
+afterwards, in code.
+
+- "I'm 67"                                    -> age: 67, age_at_policy_start: null
+- "I bought this policy at 67"                -> age: null, age_at_policy_start: 67
+- "I took it out at 70 and I'm 72 now"        -> age: 72, age_at_policy_start: 70
+- no age mentioned                            -> both null
+
+MONEY, THE SAME WAY: a value and the word that went with it.
+Indian policies are written in lakh and crore, and converting them is
+arithmetic done later in code - exactly like the units above.
+
+- "my sum insured is 5 lakh"       -> sum_insured_value: 5, sum_insured_unit: lakh
+- "sum insured of 75,000 rupees"   -> sum_insured_value: 75000, unit: rupees
+- "a room costing 9,000 a night"   -> room_rent_per_day_inr: 9000, room_is_icu: false
+- "four days in ICU at 12,000/day" -> room_rent_per_day_inr: 12000, room_is_icu: true
+- no room or ICU mentioned         -> room_rent_per_day_inr: null, room_is_icu: null
+
+room_rent_per_day_inr is the PER-DAY charge in plain rupees, never the total
+bill. "Four days at 12,000 a day" is 12000, not 48000.
 
 For pre_existing_condition, answer "unknown" unless the description makes it
 clear either way. "Unknown" is the honest answer far more often than not.
@@ -297,6 +342,34 @@ wrong answer even when the verdict happens to land correctly.
 
 Never contradict those results and never recompute them.
 
+DO NOT DO THE MONEY ARITHMETIC YOURSELF EITHER.
+Every cap expressed as a percentage - a room-rent limit, an ICU limit, a
+senior-citizen co-payment - has already been worked out against the person's
+own figures, under "WHAT REDUCES THE PAYOUT". Those results are computed and
+correct. Do not multiply percentages, and do not check them.
+
+  - A reduction marked APPLIES means the claim is paid at less than the full
+    amount. If nothing refuses the claim, that makes the verdict
+    **conditional**, and the amount must be named in your reasoning.
+  - A reduction marked CANNOT TELL means a figure needed for the comparison was
+    never stated. If the answer turns on it, say so.
+  - A reduction marked YOUR CALL has no arithmetic to it: whether a cataract
+    sub-limit or a modern-treatment restriction covers this treatment is a
+    question about what the treatment WAS, and that one is yours to decide from
+    the clause text.
+  - Reductions listed as ruled out decide nothing. Do not cite them.
+
+ASK BOTH QUESTIONS, NOT ONE.
+The failure this section exists to prevent: having established that nothing
+BLOCKS a claim, stopping there and answering "covered". Those are two separate
+questions and both must be answered.
+
+  1. Is this claim refused?          exclusions, unserved waiting periods
+  2. Is it paid IN FULL?             co-payments, room caps, sub-limits
+
+Someone told "covered" who is actually paid 80% has been given a wrong answer,
+and they find out when the money arrives.
+
 READ THE EXCEPTIONS.
 Where a clause has carve-outs they are listed under it as "EXCEPTIONS - this
 clause does NOT apply when: ...". If the situation falls inside one, the clause
@@ -348,7 +421,8 @@ refusal, and never promise cover the clauses do not give.
 
 
 def render_reasoning_request(
-    scenario: str, facts: dict, clauses, waiting_block: str = ""
+    scenario: str, facts: dict, clauses,
+    waiting_block: str = "", reduction_block: str = "",
 ) -> str:
     """Build the reasoning prompt.
 
@@ -384,6 +458,12 @@ def render_reasoning_request(
 
     if waiting_block:
         lines += ["", waiting_block]
+    # After the waiting periods, because the two answer questions that come in
+    # that order: first "is this claim payable at all", then "is it payable in
+    # full". Reversing them puts a co-payment in front of a bar that means
+    # nothing is paid at all.
+    if reduction_block:
+        lines += ["", reduction_block]
 
     lines += ["", "POLICY CLAUSES AVAILABLE TO YOU:", ""]
     for clause in clauses:

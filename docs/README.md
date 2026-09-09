@@ -106,6 +106,18 @@ Verdict accuracy was not acceptable. Four of the five failures turned out to be 
 - **Correct facts can still mislead** - four true statements that a waiting period "does not block the claim" made the model answer covered to questions about co-payments. Accuracy fell to 0.625 while the arithmetic worked perfectly.
 - **Knowing when the number stops being a signal** - five runs, 0.688 / 0.625 / 0.812 / 0.688 / 0.812, on a set where one case is 0.0625.
 
+### M8 - Widening the ruler, and the second family of comparisons
+Rebuilding the scenario eval set, and a correct fix that measured worse.
+
+- **A ruler that cannot resolve your changes** - on 16 cases one case is 0.0625, and five consecutive runs moved within that. Below its granularity a metric does not merely fail to help, it misleads, because a number that moved feels like evidence.
+- **0.812 was an easier exam, not a better system** - the same unchanged code scores 0.725 on 40 cases. The smaller set had not been asking the questions it was bad at.
+- **Recall only sees one of the two ways to be wrong** - it goes UP when a system cites more, so a fix trading under-citing for over-citing scores as a win. Hence `must_not_cite` and a separate false-citation rate.
+- **The same mistake in a family nobody had noticed was the same** - an earlier fix took DURATION comparisons away from the model and left MONEY and AGE. "Is 8,000 more than 1% of 10 lakh" is not a language question.
+- **The operand that was secretly two operands** - a co-payment keys on age AT INCEPTION, not age now. The third time this project has hit a comparison whose operands were not what they appeared to be.
+- **Failure 20: the fix made it worse by 0.125** - correct arithmetic, injected into the prompt, sent every new failure to `conditional` or `insufficient_information`.
+- **Concept 24: silence is not uncertainty** - "cannot be determined" about a room nobody mentioned manufactures doubt on nearly every question.
+- **Concept 25: the honest read on a fix that did not pay for itself** - net -2 cases, diagnosed to one specific line that carried no information and cost three cases.
+
 ---
 
 ## Related documents

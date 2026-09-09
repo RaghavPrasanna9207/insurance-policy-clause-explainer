@@ -67,6 +67,12 @@ async def create_scenario(
                 impact_score=analysis.impact_score,
                 waiting_period_days=analysis.waiting_period_days,
                 exceptions=json.loads(analysis.exceptions_json or "[]"),
+                copay_percent=analysis.copay_percent,
+                copay_min_age_at_inception=analysis.copay_min_age_at_inception,
+                cap_percent_of_sum_insured=analysis.cap_percent_of_sum_insured,
+                icu_cap_percent_of_sum_insured=(
+                    analysis.icu_cap_percent_of_sum_insured
+                ),
             )
         )
         meta[citation_id] = (clause.id, clause.number, clause.heading, clause.page_start + 1)

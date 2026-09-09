@@ -82,6 +82,12 @@ class ClauseAnalysis(SQLModel, table=True):
     # Structured, so the scenario simulator can compare rather than re-read.
     waiting_period_days: int | None = None
     exceptions_json: str = "[]"
+    # The operands of a reduction, likewise structured so stage 5 can compare
+    # rather than re-read. See app/pipeline/reduction.py.
+    copay_percent: int | None = None
+    copay_min_age_at_inception: int | None = None
+    cap_percent_of_sum_insured: int | None = None
+    icu_cap_percent_of_sum_insured: int | None = None
 
     # The model's two judgments (1-5), the only LLM input to the score.
     likelihood: int

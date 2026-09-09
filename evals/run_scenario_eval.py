@@ -81,6 +81,10 @@ async def build_clauses() -> list[ShortlistClause]:
                 impact_score=sc.impact_score,
                 waiting_period_days=analysis.waiting_period_days,
                 exceptions=analysis.exceptions,
+                copay_percent=analysis.copay_percent,
+                copay_min_age_at_inception=analysis.copay_min_age_at_inception,
+                cap_percent_of_sum_insured=analysis.cap_percent_of_sum_insured,
+                icu_cap_percent_of_sum_insured=analysis.icu_cap_percent_of_sum_insured,
             )
         )
     return clauses
@@ -119,12 +123,19 @@ async def run(use_cache: bool) -> dict:
 
         cited = {c.clause_id for c in result.citations}
         required = set(case["must_cite"])
+        # Clauses the answer must NOT lean on. Recall alone cannot see this
+        # failure: a system that cites every clause it can reach scores a
+        # perfect recall while being useless, and one pushed to hunt for
+        # co-payments starts finding them for people who were 58 at inception.
+        forbidden = set(case.get("must_not_cite", []))
         rows.append({
             "id": case["id"],
             "expected": case["expected_verdict"],
             "got": result.verdict,
             "verdict_ok": result.verdict == case["expected_verdict"],
             "required": sorted(required),
+            "forbidden": sorted(forbidden),
+            "wrongly_cited": sorted(forbidden & cited),
             "cited": sorted(cited),
             "citation_ok": required.issubset(cited),
             "grounded": result.verified,
@@ -143,6 +154,8 @@ async def run(use_cache: bool) -> dict:
     # Citation recall is only meaningful for cases that require a citation;
     # "insufficient_information with nothing to cite" would otherwise inflate it.
     citable = [r for r in rows if r["required"]]
+    # Likewise, only the cases that name a forbidden clause can fail this way.
+    guarded = [r for r in rows if r["forbidden"]]
 
     return {
         "model": settings.model,
@@ -155,6 +168,15 @@ async def run(use_cache: bool) -> dict:
         "citation_recall": (
             sum(r["citation_ok"] for r in citable) / len(citable) if citable else 1.0
         ),
+        # The false-positive direction of citation quality. Reported alongside
+        # recall rather than folded into it, because the two fail for opposite
+        # reasons and a single blended number would let one hide the other.
+        "false_citation_rate": (
+            sum(bool(r["wrongly_cited"]) for r in guarded) / len(guarded)
+            if guarded
+            else 0.0
+        ),
+        "guarded_count": len(guarded),
         # Renamed from "groundedness", which merged two different questions.
         # This one is about the MODEL: how often did it quote something that is
         # not in the policy.
@@ -191,6 +213,8 @@ def report(res: dict) -> str:
         f"| Verdict accuracy | **{res['verdict_accuracy']:.3f}** | quality measure |",
         f"| Citation recall | **{res['citation_recall']:.3f}** | quality measure "
         f"({res['citable_count']} cases require a citation) |",
+        f"| False citation rate | **{res['false_citation_rate']:.3f}** | quality measure "
+        f"({res['guarded_count']} cases name a clause that must NOT be relied on) |",
         f"| Fabrication rate | **{res['fabrication_rate']:.3f}** | quality measure "
         f"({res['fabricated_quotes']} invented quote(s)) |",
         f"| **Detection integrity** | **{res['detection_integrity']:.3f}** "
@@ -221,6 +245,8 @@ def report(res: dict) -> str:
         cite = ", ".join(row["cited"]) or "—"
         if row["required"] and not row["citation_ok"]:
             cite += f" (missing {', '.join(row['required'])})"
+        if row["wrongly_cited"]:
+            cite += f" (**must not cite {', '.join(row['wrongly_cited'])}**)"
         lines.append(
             f"| `{row['id']}` | {row['expected']} | {row['got']}{verdict_mark} "
             f"| {cite} | {'yes' if row['grounded'] else '**NO**'} |"
@@ -261,6 +287,8 @@ def main() -> None:
     print(f"  verdict accuracy : {res['verdict_accuracy']:.3f}")
     print(f"  citation recall  : {res['citation_recall']:.3f} "
           f"({res['citable_count']} cases)")
+    print(f"  false citations  : {res['false_citation_rate']:.3f} "
+          f"({res['guarded_count']} guarded cases)")
     print(f"  fabrication rate : {res['fabrication_rate']:.3f} "
           f"({res['fabricated_quotes']} invented quote(s))")
     print(f"  detection integ. : {res['detection_integrity']:.3f}  (must be 1.000)")

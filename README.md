@@ -12,8 +12,9 @@ Measured on a 39-clause synthetic IRDAI-style policy with `qwen2.5:7b-instruct-q
 |---|---:|---|
 | Clause classification (macro-F1) | **1.000** | quality |
 | Risk ranking expectations | **6/9** | quality |
-| Scenario verdict accuracy | **0.812** | quality |
-| Scenario citation recall | **0.917** | quality |
+| Scenario verdict accuracy | **0.675** | quality |
+| Scenario citation recall | **0.774** | quality |
+| Scenario false citation rate | **0.400** | quality |
 | Quote fabrication rate | **0.125** | quality |
 | **Citation detection integrity** | **1.000** | **guarantee** |
 
@@ -21,7 +22,9 @@ Measured on a 39-clause synthetic IRDAI-style policy with `qwen2.5:7b-instruct-q
 
 Detection integrity asks something different: of the quotations the model *invented*, how many were caught and shown as unverified rather than presented as evidence? That is what the grounding design guarantees, and the only number here that would count as a bug if it moved. It is computed by re-verifying every quotation independently rather than by reading the flag the pipeline set — a self-reported guarantee is not a measurement.
 
-The honest read on 0.812: it started at 0.688, and four of those five failures turned out to be bugs in this project rather than model weakness — a comparison being done by the model instead of by Python, and units dropped on both sides of it (`"thirty days"` read as 30 months, `"two weeks"` as 2 months). The three that remain are genuine reasoning failures: in each, the model has the correct structured fact in front of it and does not act on it. Detail in [`docs/LEARNING-LOG.md`](docs/LEARNING-LOG.md#m7--fixing-0688-and-four-bugs-hiding-behind-each-other).
+**The honest read on 0.675, including why it went down.** This scenario set used to have 16 cases and reported 0.812. On 16 cases one case is worth 0.0625, and five consecutive measured runs moved within that band — a ruler too coarse to resolve the changes being made against it. The set is now 40 hand-authored cases, weighted toward the failure mode it was under-sampling. **The same unchanged code scores 0.725 on it.** 0.812 was not a wrong measurement; it was a measurement of an easier exam.
+
+The current 0.675 is that 0.725 minus a net two cases, and the cause is known rather than mysterious. A deterministic module now does the numeric comparisons the model was getting wrong in both directions (is 8,000 more than 1% of 10 lakh; is 58 at least 60) — that arithmetic is correct and covered by tests. Feeding its results into the reasoning prompt is what costs more than it earns: on questions that mention no money and no age, a single line reminding the model that caps exist turned three confident, correct refusals into `insufficient_information`. Recorded as it came out, with the diagnosis, in [`docs/LEARNING-LOG.md`](docs/LEARNING-LOG.md#m8--widening-the-ruler-and-the-second-family-of-comparisons).
 
 ---
 
@@ -106,8 +109,8 @@ Upload a policy and it will show you, in order, the clauses most likely to cost 
 
 ```bash
 cd api
-.venv/Scripts/python.exe -m pytest -v            # all 91 tests
-.venv/Scripts/python.exe -m pytest -m "not llm"  # the 85 that need no model
+.venv/Scripts/python.exe -m pytest -v            # all 129 tests
+.venv/Scripts/python.exe -m pytest -m "not llm"  # the 122 that need no model
 ```
 
 ### Evals
@@ -150,6 +153,7 @@ No real insurer policy wordings are committed to this repository.
 | M4 | Web UI — risk dashboard, clause explorer | ✅ |
 | M5 | Scenario simulator | ✅ verdict 0.812 · detection 1.000 |
 | M6 | Consolidated eval report | ✅ |
+| M8 | Wider eval set (40 cases) + deterministic reductions | ⚠️ arithmetic landed, prompt integration net −2 cases |
 
 Evaluation is the point, not an afterthought: model and prompt changes in this project are justified by measured numbers on the golden set, never by impressions. See [Results](#results) and [`evals/REPORT.md`](evals/REPORT.md).
 

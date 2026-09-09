@@ -6,12 +6,12 @@ one run against the code and settings stated here.
 | | |
 |---|---|
 | Model | `qwen2.5:7b-instruct-q4_K_M` |
-| Prompt version | `v11-prominence` |
+| Prompt version | `v12-reductions` |
 | Decoding | num_ctx 8192, num_predict 1600, temperature 0.0 |
 | Analysis batch size | 1 |
-| Commit | `f9b566a` |
-| Generated | 2026-09-06 16:05 UTC |
-| Total wall time | 319s |
+| Commit | `d16d7aa` |
+| Generated | 2026-09-09 15:55 UTC |
+| Total wall time | 0s (served from cache; a cold run takes several minutes) |
 
 The golden set is a 39-clause synthetic IRDAI-style policy authored for
 this repository, so the labels and the document come from one source and
@@ -24,9 +24,10 @@ cannot drift apart. No real insurer wording is used.
 | What is measured | Score | Kind |
 |---|---:|---|
 | Clause classification (macro-F1) | **1.000** | quality |
-| Risk ranking expectations | **7/9** | quality |
-| Scenario verdict accuracy | **0.812** | quality |
-| Scenario citation recall | **0.917** | quality |
+| Risk ranking expectations | **6/9** | quality |
+| Scenario verdict accuracy | **0.675** | quality |
+| Scenario citation recall | **0.774** | quality |
+| Scenario false citation rate | **0.400** | quality |
 | Quote fabrication rate | **0.125** | quality |
 | **Citation detection integrity** | **1.000** | **guarantee** |
 
@@ -72,7 +73,7 @@ waiting period misleads a policyholder just as badly as a missed exclusion.
 
 ## 2. Risk ranking
 
-**7/9 expectations met** (top 10)
+**6/9 expectations met** (top 10)
 
 Classification F1 measures labelling. This measures the ranking, which
 is the actual product. The two are not the same: an early version
@@ -86,41 +87,79 @@ inspected, so the metric tests the system rather than rationalising it.
 
 **Should be in the top 10 but is not:**
 
-- `3.2` (rank 11) — 36-month pre-existing disease waiting period. Affects most buyers over 40, and is what people most often assume they are covered for.
+- `3.2` (rank 13) — 36-month pre-existing disease waiting period. Affects most buyers over 40, and is what people most often assume they are covered for.
 - `5.3` (rank 21) — 20% senior-citizen co-payment. Applies to every claim for a large class of policyholder, permanently.
+
+**In the top 10 but should not be:**
+
+- `6.5` (rank 10) — The Company may require a medical examination AT ITS OWN EXPENSE. A power the insurer must pay to exercise is not a financial risk to the policyholder.
 
 ---
 
 ## 3. Scenario simulator
 
-**Verdict accuracy 0.812** (13/16) · citation recall 0.917 · detection integrity 1.000
+**Verdict accuracy 0.675** (27/40) · citation recall 0.774 · detection integrity 1.000
 
 | Case | Expected | Got | Cited | Quotes verified |
 |---|---|---|---|---|
 | `ped-waiting-not-served` | not_covered | not_covered | 3.2 | yes |
-| `ped-waiting-served` | covered | not_covered ⚠ | 4.1 | yes |
-| `cosmetic-exclusion` | not_covered | not_covered | 4.1 | **flagged** |
-| `cosmetic-after-accident` | covered | covered | 3.1, 3.2, 4.1 | yes |
-| `no-timing-given` | insufficient_information | insufficient_information | 3.1, 3.2, 3.3, 3.4 | yes |
+| `ped-waiting-served` | covered | insufficient_information ⚠ | 3.2 | yes |
+| `cosmetic-exclusion` | not_covered | not_covered | 4.1 | yes |
+| `cosmetic-after-accident` | covered | covered | 4.1 | yes |
+| `no-timing-given` | insufficient_information | insufficient_information | — | yes |
 | `late-notice` | conditional | conditional | 6.1 | yes |
 | `room-rent-breach` | conditional | conditional | 5.1 | yes |
-| `senior-copay` | conditional | covered ⚠ | 3.1, 4.1 (missing 5.3) | yes |
+| `senior-copay` | conditional | insufficient_information ⚠ | 3.1, 3.2, 4.1 (missing 5.3) | yes |
 | `adventure-sport` | not_covered | not_covered | 4.3 | yes |
-| `initial-waiting-period` | not_covered | not_covered | 3.1 | yes |
-| `accident-in-initial-period` | covered | not_covered ⚠ | 3.1 | yes |
+| `initial-waiting-period` | not_covered | insufficient_information ⚠ | 3.1, 3.2, 3.3, 3.4 | yes |
+| `accident-in-initial-period` | covered | conditional ⚠ | 3.1 | **flagged** |
 | `maternity-too-early` | not_covered | not_covered | 3.4 | **flagged** |
-| `dental-no-accident` | not_covered | not_covered | 4.6 | yes |
+| `dental-no-accident` | not_covered | insufficient_information ⚠ | 4.6 | **flagged** |
 | `non-medical-items` | not_covered | not_covered | 4.7 | yes |
 | `not-in-document` | insufficient_information | insufficient_information | — | yes |
-| `cataract-served` | covered | covered | 3.3, 4.1 | yes |
+| `cataract-served` | covered | conditional ⚠ | 3.3, 5.4 | yes |
+| `copay-applies-emergency` | conditional | conditional | 5.3 | yes |
+| `copay-just-under-sixty` | covered | conditional ⚠ | 3.2 | yes |
+| `copay-unknown-inception-age` | insufficient_information | insufficient_information | 3.2, 3.3, 5.3 | yes |
+| `copay-and-room-breach` | conditional | conditional | 3.1, 3.2, 3.3, 5.3 (missing 5.1, 5.3) | yes |
+| `senior-but-excluded` | not_covered | not_covered | 4.1 | yes |
+| `room-rent-within-cap` | covered | conditional ⚠ | 5.1 | **flagged** |
+| `icu-rate-breach` | conditional | conditional | 5.1 | yes |
+| `proportionate-deduction` | conditional | conditional | 5.2 | yes |
+| `cataract-sublimit-amount` | conditional | conditional | 4.1, 5.4 | yes |
+| `robotic-surgery-limit` | conditional | conditional | 5.5 | yes |
+| `oral-chemo-limit` | conditional | conditional | 5.5 | yes |
+| `intoxication-injury` | not_covered | conditional ⚠ | 4.3 (missing 4.2) | **flagged** |
+| `infertility-ivf` | not_covered | not_covered | 4.1 (missing 4.5) | yes |
+| `breach-of-law` | not_covered | not_covered | 4.4 | yes |
+| `documents-late` | conditional | conditional | 6.2 | yes |
+| `no-preauth-cashless` | conditional | conditional | 6.4 | yes |
+| `non-disclosure` | not_covered | insufficient_information ⚠ | — (missing 6.3) | yes |
+| `other-policy-contribution` | conditional | insufficient_information ⚠ | 3.1, 3.2, 3.3, 3.4 (missing 6.6) | yes |
+| `pre-hospitalisation-window` | covered | covered | 2.2, 3.1, 3.2 | yes |
+| `post-hospitalisation-too-late` | not_covered | conditional ⚠ | 3.2 (missing 2.3) | yes |
+| `ayush-private-clinic` | not_covered | not_covered | 2.6 | yes |
+| `ambulance-admissible` | covered | covered | 2.1, 2.2, 2.5 | yes |
+| `day-care-not-listed` | insufficient_information | covered ⚠ | 1.4, 2.4, 3.3 | yes |
+| `dependant-not-addressed` | insufficient_information | insufficient_information | 3.1, 3.2, 3.3, 3.4 | yes |
 
 ### What the misses actually need
 
 These are not random. Read them together:
 
-- **`ped-waiting-served`** — expected `covered`, got `not_covered`. 60 months elapsed against a 36-month pre-existing disease waiting period, so it has been served.
-- **`senior-copay`** — expected `conditional`, got `covered`. Over 60 at inception, so a 20% co-payment applies to every admissible claim.
-- **`accident-in-initial-period`** — expected `covered`, got `not_covered`. The 30-day initial waiting period expressly excepts claims arising from an accident.
+- **`ped-waiting-served`** — expected `covered`, got `insufficient_information`. 60 months elapsed against a 36-month pre-existing disease waiting period, so it has been served. The cosmetic surgery exclusion has nothing to do with blood pressure, and citing it is a wrong answer even when the verdict lands.
+- **`senior-copay`** — expected `conditional`, got `insufficient_information`. Over 60 at inception, so a 20% co-payment applies to every admissible claim.
+- **`initial-waiting-period`** — expected `not_covered`, got `insufficient_information`. 30-day initial waiting period for illness; only an accident is carved out.
+- **`accident-in-initial-period`** — expected `covered`, got `conditional`. The 30-day initial waiting period expressly excepts claims arising from an accident.
+- **`dental-no-accident`** — expected `not_covered`, got `insufficient_information`. Dental treatment is excluded unless caused by an accident and requiring hospitalisation.
+- **`cataract-served`** — expected `covered`, got `conditional`. 24-month specified-disease waiting period served; day care is covered; under 60 so no co-payment. A sub-limit caps the amount but does not deny the claim.
+- **`copay-just-under-sixty`** — expected `covered`, got `conditional`. The co-payment requires having COMPLETED sixty years at first inception. 58 is not 60, so it does not apply - and this is the case a system pushed to look for reductions will get wrong. Gallbladder is not in the specified-disease list, and four years clears every waiting period.
+- **`room-rent-within-cap`** — expected `covered`, got `conditional`. 1% of 10 lakh is 10,000/day and the room cost 8,000, so the cap is not breached and no proportionate deduction follows. Hernia's 24-month bar is served at three years.
+- **`intoxication-injury`** — expected `not_covered`, got `conditional`. Expenses attributable to the use of alcohol are excluded outright, and no waiting period or cap enters into it.
+- **`non-disclosure`** — expected `not_covered`, got `insufficient_information`. Non-disclosure of a material fact makes the policy void and forfeits the premium. That is not a reduction, it is the whole policy falling away.
+- **`other-policy-contribution`** — expected `conditional`, got `insufficient_information`. The contribution clause limits this insurer to its rateable proportion. The claim is paid, but only in part by this policy.
+- **`post-hospitalisation-too-late`** — expected `not_covered`, got `conditional`. Post-hospitalisation cover runs for ninety days following discharge. A hundred and twenty days is outside it.
+- **`day-care-not-listed`** — expected `insufficient_information`, got `covered`. In-patient cover needs more than twenty four consecutive hours, so 2.1 does not apply. Day care cover applies only to treatments listed in Annexure II, and this document does not contain that annexure - so whether a six-hour drip qualifies cannot be answered from what is here.
 
 Most require either date arithmetic (is 5 years more than 36 months?)
 or following an exception inside a clause ("unless necessitated by an
@@ -128,7 +167,7 @@ Accident"). That is multi-hop reasoning over interacting rules, which
 is where a 7B model is weakest.
 
 Single-clause classification scores macro-F1 1.000. Combining three interacting rules
-scores 0.812. **The gap between those two
+scores 0.675. **The gap between those two
 numbers is the finding**, and it is the case for measuring a hosted
 frontier model on this same set before assuming a bigger model is or
 is not worth it.

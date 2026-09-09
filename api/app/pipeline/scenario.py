@@ -47,7 +47,7 @@ from app.llm.prompts import (
     render_reasoning_request,
     render_scenario,
 )
-from app.pipeline import waiting
+from app.pipeline import reduction, waiting
 from app.taxonomy import Verdict
 
 log = logging.getLogger(__name__)
@@ -137,6 +137,12 @@ class ShortlistClause:
     # them arithmetically instead of asking the model to re-read the prose.
     waiting_period_days: int | None = None
     exceptions: list[str] = field(default_factory=list)
+    # The operands a reduction is computed from, carried through from analysis.
+    # See app/pipeline/reduction.py for what is done with them.
+    copay_percent: int | None = None
+    copay_min_age_at_inception: int | None = None
+    cap_percent_of_sum_insured: int | None = None
+    icu_cap_percent_of_sum_insured: int | None = None
 
 
 @dataclass
@@ -191,9 +197,31 @@ FACTS_SCHEMA: dict[str, Any] = {
             "enum": ["days", "weeks", "months", "years", None],
         },
         "age": {"type": ["integer", "null"]},
+        # AGE WHEN THE POLICY STARTED, which is a different number from `age`
+        # and is the one a senior-citizen co-payment actually keys on. Someone
+        # 68 today may have bought the policy at 50; treating the two as
+        # interchangeable fires a 20% co-payment at a person who does not owe
+        # one. Where only one of the two is stated, Python derives the other
+        # from the policy's age - see reduction.age_at_inception.
+        "age_at_policy_start": {"type": ["integer", "null"]},
         "hospitalised": {"type": ["boolean", "null"]},
         "hours_since_admission": {"type": ["integer", "null"]},
         "estimated_cost_inr": {"type": ["integer", "null"]},
+        # THE SUM INSURED, as a value and a unit. Indian policy schedules are
+        # written "5 lakh", never 500000, and asking the model for the rupee
+        # figure is asking it to multiply - the same mistake that read
+        # "two weeks" as two months on the other side of a waiting-period
+        # comparison. It reports what the sentence said; Python multiplies.
+        "sum_insured_value": {"type": ["integer", "null"]},
+        "sum_insured_unit": {
+            "type": ["string", "null"],
+            "enum": ["rupees", "thousand", "lakh", "crore", None],
+        },
+        # The per-day accommodation charge, in plain rupees, and whether it was
+        # intensive care - because the room cap and the ICU cap are different
+        # percentages of the same sum insured.
+        "room_rent_per_day_inr": {"type": ["integer", "null"]},
+        "room_is_icu": {"type": ["boolean", "null"]},
         "pre_existing_condition": {
             "type": "string",
             "enum": ["yes", "no", "unknown"],
@@ -203,7 +231,9 @@ FACTS_SCHEMA: dict[str, Any] = {
     "required": [
         "procedure", "condition", "body_system",
         "policy_age_value", "policy_age_unit",
-        "age", "hospitalised", "hours_since_admission", "estimated_cost_inr",
+        "age", "age_at_policy_start", "hospitalised", "hours_since_admission",
+        "estimated_cost_inr", "sum_insured_value", "sum_insured_unit",
+        "room_rent_per_day_inr", "room_is_icu",
         "pre_existing_condition", "notes",
     ],
 }
@@ -318,18 +348,25 @@ async def reason(
     nudge_citations: bool = False,
 ) -> dict[str, Any]:
     ids = [c.clause_id for c in clauses]
+    held = policy_age_days(facts)
     # Every waiting period compared against the stated policy age, in Python,
     # before the model sees anything. The result is handed over as settled fact.
     # Prefer days when stated, else convert months. Neither is guessed: if
     # the person said nothing, both stay None and every waiting period comes
     # back UNKNOWN rather than being compared against an invented figure.
-    checks = waiting.evaluate(clauses, policy_age_days(facts))
+    checks = waiting.evaluate(clauses, held)
+    # And the second family of comparisons, added after the first was fixed:
+    # a waiting period decides whether the claim is PAID, a reduction decides
+    # whether it is paid IN FULL. Only the first question was being asked, so
+    # a senior citizen was told "covered" while losing a fifth of the claim.
+    cuts = reduction.evaluate(clauses, facts, held)
     messages = [
         {"role": "system", "content": REASON_SYSTEM},
         {
             "role": "user",
             "content": render_reasoning_request(
-                scenario, facts, clauses, waiting.render(checks)
+                scenario, facts, clauses,
+                waiting.render(checks), reduction.render(cuts),
             ),
         },
     ]

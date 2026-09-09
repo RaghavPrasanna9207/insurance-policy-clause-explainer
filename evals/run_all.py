@@ -103,6 +103,8 @@ def build(classification: dict, scenario: dict, seconds: float) -> str:
     lines += [
         f"| Scenario verdict accuracy | **{scenario['verdict_accuracy']:.3f}** | quality |",
         f"| Scenario citation recall | **{scenario['citation_recall']:.3f}** | quality |",
+        f"| Scenario false citation rate | "
+        f"**{scenario['false_citation_rate']:.3f}** | quality |",
         f"| Quote fabrication rate | **{scenario['fabrication_rate']:.3f}** | quality |",
         f"| **Citation detection integrity** | "
         f"**{scenario['detection_integrity']:.3f}** | **guarantee** |",

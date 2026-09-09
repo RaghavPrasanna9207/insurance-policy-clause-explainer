@@ -1599,3 +1599,483 @@ The tell is that prompt engineering plateaus. Five revisions moved this number b
 
 The residual, once the misassignment is fixed, is the real capability limit — and it is worth measuring against a larger model rather than guessing at. But you cannot see that residual until you stop asking a language model to do arithmetic, because its arithmetic errors look exactly like reasoning errors from the outside.
 </details>
+
+---
+
+# M8 — Widening the ruler, and the second family of comparisons
+
+## The starting position
+
+The scenario simulator answers a what-if question about a health policy —
+*"I had knee surgery 8 months after buying this"* — with one of four verdicts
+(`covered`, `not_covered`, `conditional`, `insufficient_information`) and the
+clauses that decide it.
+
+Its quality was measured against a hand-written set of 16 cases in
+`evals/golden/scenarios.json`, and that set reported **verdict accuracy 0.812**.
+
+Two things were wrong with that number, and neither was visible from inside it.
+
+---
+
+## Concept 21: a ruler that cannot resolve what you are measuring
+
+On a 16-case set, one case is worth 0.0625. Five consecutive measured runs of
+this system, each following a real code or prompt change, produced:
+
+```
+0.688  ->  0.625  ->  0.812  ->  0.688  ->  0.812
+```
+
+Every one of those gaps is one or two cases wide. The set could not tell a
+genuine improvement from the model happening to land differently on two
+borderline questions, which means five runs of careful work produced almost no
+information about which changes had helped.
+
+This is a general trap and it is worth naming precisely. **The granularity of
+your measurement sets a floor on the size of the effect you can detect.** Below
+that floor, a metric does not merely fail to help — it actively misleads,
+because a number that moved feels like evidence. Tuning against a ruler too
+coarse for the change you are making is how you end up confidently shipping a
+regression, or reverting an improvement.
+
+The fix is not cleverness, it is more cases. At 40 cases one case is 0.025, and
+a genuine two-case improvement clears the noise instead of drowning in it.
+
+So the set was rewritten to 40 cases, all hand-authored against the same
+synthetic policy, and all written *before* anything was measured — the
+discipline that keeps a test set testing the system rather than rationalising
+whatever the system already did.
+
+The new cases are deliberately not spread evenly. The old set had **three**
+cases out of sixteen that turned on a *reduction* — a co-payment, a room-rent
+cap, a disease sub-limit — while the system's single worst known failure was in
+exactly that gap. A set that under-samples the failure mode cannot measure a
+fix to it. The widened set has **thirteen**.
+
+---
+
+## Concept 22: recall only measures one of the two ways to be wrong
+
+The set records, for each case, the clauses the answer cannot be right without:
+
+```json
+{
+  "id": "senior-copay",
+  "scenario": "I bought this policy at 67 and I am claiming for a
+               hospitalisation three years later for something new.",
+  "expected_verdict": "conditional",
+  "must_cite": ["5.3"],
+  "why": "Over 60 at inception, so a 20% co-payment applies to every
+          admissible claim."
+}
+```
+
+Citation recall asks: did the answer cite what it had to? That measures one
+direction of failure — citing too little.
+
+It cannot see the other direction, and the other direction has a specific way
+of appearing. A system pushed to hunt harder for co-payments will start finding
+them for people who do not owe one. **Recall goes UP when a system cites more,
+so a fix that trades under-citing for over-citing scores as an improvement.**
+
+Hence a second field, and a second metric:
+
+```json
+{
+  "id": "copay-just-under-sixty",
+  "scenario": "I bought this policy when I was 58 and I am claiming now,
+               four years later, for a gallbladder operation.",
+  "expected_verdict": "covered",
+  "must_cite": [],
+  "must_not_cite": ["5.3"],
+  "why": "The co-payment requires having COMPLETED sixty years at first
+          inception. 58 is not 60, so it does not apply."
+}
+```
+
+`evals/run_scenario_eval.py` scores it separately rather than blending it into
+recall, because the two fail for opposite reasons and one number would let each
+hide the other:
+
+```python
+# The false-positive direction of citation quality. Reported alongside
+# recall rather than folded into it, because the two fail for opposite
+# reasons and a single blended number would let one hide the other.
+"false_citation_rate": (
+    sum(bool(r["wrongly_cited"]) for r in guarded) / len(guarded)
+    if guarded
+    else 0.0
+),
+```
+
+---
+
+## What the wider ruler found the moment it was used
+
+Running the **unchanged** system against the 40-case set:
+
+| | 16 cases | 40 cases |
+|---|---:|---:|
+| Verdict accuracy | 0.812 | **0.725** |
+| Citation recall | 0.917 | **0.710** |
+| False citation rate | not measured | **0.400** |
+
+The system had not got worse. It had always been this good; the smaller set
+simply had not asked the questions it was bad at. **0.812 was not a wrong
+measurement, it was a measurement of an easier exam.**
+
+And the new failures fell into a pattern:
+
+```
+room-rent-within-cap   expected covered      got conditional
+icu-rate-breach        expected conditional  got covered
+oral-chemo-limit       expected conditional  got covered
+post-hosp-too-late     expected not_covered  got covered
+senior-copay           expected conditional  got covered
+```
+
+`room-rent-within-cap` describes a room costing 8,000 rupees a night against a
+sum insured of 10 lakh. The policy caps room rent at 1% of the sum insured per
+day — 10,000 — so the room is comfortably *within* the cap. The model read it
+as a breach. `icu-rate-breach` describes 12,000 a day in intensive care against
+a 2% cap on a 5 lakh sum insured — 10,000 — an actual breach, which the model
+read as fine.
+
+Both are the comparison of two numbers, in opposite directions.
+
+---
+
+## Concept 23: the same mistake, in a family nobody had noticed was the same
+
+This project's governing rule is stated in `CLAUDE.md`: *deterministic where
+possible, LLM only where language understanding is genuinely required.*
+
+An earlier milestone had already found the scenario simulator breaking that
+rule, and fixed it. The module `api/app/pipeline/waiting.py` exists because the
+model was being asked whether five years exceeds thirty-six months, and getting
+it wrong about half the time. Its docstring states the split:
+
+```
+    reading "thirty six months" out of legal prose   -> the model's job
+    deciding whether 60 >= 36                        -> this module's job
+```
+
+That fix was correct and it was narrow. It took **durations** away from the
+model. It left **money** and **age** exactly where they were, and nobody
+noticed, because the 16-case set contained no case that required either
+comparison.
+
+The failures above are all the same shape as the ones `waiting.py` was built to
+kill:
+
+```
+deciding whether 8,000 > 1% of 10,00,000    is not language
+deciding whether 12,000 > 2% of 5,00,000    is not language
+deciding whether 58 >= 60                   is not language
+```
+
+`api/app/pipeline/reduction.py` restores the split for them. The analyzer is
+asked for the numbers the clause *states* — never for a comparison — in the
+same value-and-unit shape that `waiting.py` established:
+
+```python
+"copay_percent": {"type": ["integer", "null"]},
+"copay_min_age_at_inception": {"type": ["integer", "null"]},
+"cap_percent_of_sum_insured": {"type": ["integer", "null"]},
+"icu_cap_percent_of_sum_insured": {"type": ["integer", "null"]},
+```
+
+and Python does the arithmetic.
+
+### The operand that was secretly two operands
+
+The co-payment clause in the golden policy reads:
+
+> All admissible claims in respect of an Insured Person who has **completed
+> sixty years of age at the time of first inception of the policy** shall be
+> subject to a co-payment of twenty percent of the admissible claim amount.
+
+It keys on age **at inception** — which is not the person's age now. Someone who
+is 68 today may have bought the policy at 50 and owes nothing. The fact
+extractor had only a single `age` field, so the two were the same number, and
+the comparison had a 50% chance of being made against the wrong operand.
+
+`api/app/pipeline/reduction.py` separates them and derives one from the other
+where it can, in Python:
+
+```python
+def age_at_inception(facts, policy_age_days):
+    stated = facts.get("age_at_policy_start")
+    if stated and stated > 0:
+        return stated
+
+    age_now = facts.get("age")
+    if age_now and age_now > 0 and policy_age_days is not None:
+        derived = age_now - policy_age_days // 365
+        if 0 < derived <= age_now:
+            return derived
+    return None
+```
+
+This is the third time this project has hit the same bug. A waiting period read
+`"thirty days"` as 30 *months*. A scenario read `"two weeks"` as 2 *months*. Now
+an age at claim was read as an age at inception. **Every one of them was a
+comparison whose two operands were not the things they appeared to be.**
+
+The same lesson was applied pre-emptively to money. Indian policy schedules say
+*"5 lakh"*, never 500000, so the extractor reports `(5, "lakh")` and the
+multiplication happens in code — because converting units is exactly the
+arithmetic that produced the two bugs above.
+
+---
+
+## Failure 20: the fix made it worse, by 0.125
+
+With the reduction sweep wired in, the measured result went **backwards**:
+
+```
+0.725  ->  0.600
+```
+
+It fixed what it was built to fix. `icu-rate-breach`, `oral-chemo-limit` and
+`copay-applies-emergency` all became correct, and the arithmetic behind them was
+flawless. But fourteen other cases broke, and they broke in a way that named the
+cause immediately:
+
+```
+every new failure landed on either `conditional` or `insufficient_information`
+```
+
+Nothing else. Not a spread of wrong answers — two specific wrong answers, over
+and over.
+
+Here is the block the prompt was receiving for `intoxication-injury`, a case
+whose scenario is *"I fell down the stairs after drinking heavily and fractured
+my hip. I have held the policy five years"* — a question decided entirely by the
+policy's alcohol exclusion, mentioning no money, no room and no age:
+
+```
+- CANNOT TELL: clause 5.1: room rent are capped at 1% of the sum insured
+  per day, but the sum insured and the per-day charge was not stated, so
+  whether the cap is exceeded cannot be determined
+- CANNOT TELL: clause 5.3: a 20% co-payment applies if the person had
+  reached 60 at inception, but their age when the policy STARTED was not
+  stated, so this cannot be determined
+- YOUR CALL: clause 5.2: caps or reduces what is paid ...
+- YOUR CALL: clause 5.4: caps or reduces what is paid ...
+- YOUR CALL: clause 5.5: caps or reduces what is paid ...
+```
+
+Five statements. Every one of them true. Every one of them irrelevant to
+whether a drunken fall is covered. Two of them say a figure is missing — which
+reads as *insufficient information* — and three say a cap might apply — which
+reads as *conditional*.
+
+**The block that was supposed to add a finding added only doubt, and the model
+answered the doubt.**
+
+---
+
+## Concept 24: silence is not the same as uncertainty
+
+What makes this failure worth recording is that the lesson needed to avoid it
+had already been learned, written down, and was quoted in the new module's own
+docstring.
+
+The earlier lesson, from `api/app/pipeline/waiting.py`, is that prominence must
+be proportional to decisiveness. Served waiting periods had each been given
+their own emphatic line saying the clause *"does NOT block the claim"*; with
+four of them listed, the model read four statements that nothing blocked the
+claim and started answering `covered` to questions about co-payments. So
+`waiting.py` collapses served periods to a single line.
+
+The new module dutifully did the same thing — for the wrong status. It
+collapsed `DOES_NOT_APPLY`, and gave every `UNKNOWN` and `JUDGEMENT` its own
+line. `DOES_NOT_APPLY` is *rare*: it requires both operands to be present. The
+common statuses were the ones left shouting.
+
+The repair is a distinction the module did not originally have. Two situations
+had been collapsed into `UNKNOWN`:
+
+- someone gave a sum insured and no room rate — a **real open question**, which
+  may decide the answer
+- someone described a broken hip and mentioned neither — **not a question at
+  all**, because the room-rent cap was never what they were asking about
+
+Both mean "no comparison was made", which is why one status looked sufficient.
+They differ entirely in what that means, so `reduction.py` now separates them,
+and the second prints nothing:
+
+```python
+    # NEITHER figure given: the person never mentioned a room or a sum
+    # insured, so this cap is simply not what their question is about.
+    # Saying "cannot be determined" here is technically true and actively
+    # harmful - it manufactures doubt about a clause nobody raised.
+    if not sum_insured and not charged:
+        return ReductionCheck(
+            clause.clause_id, ReductionKind.ROOM_CAP,
+            ReductionStatus.NOT_RAISED,
+            "no room charge or sum insured was mentioned",
+        )
+```
+
+The framing was made proportional too. Nine lines explaining how reductions
+interact with a verdict earn their space when a co-payment has actually been
+computed; on a question about a broken hip, where the only content is "some
+caps exist, read them", they are pure noise. A block that says nothing can
+still change the answer if it says nothing at length.
+
+> **The generalisable point:** when you inject computed facts into a prompt,
+> you are not only choosing what is true, you are choosing what is *salient*.
+> A true statement about something nobody asked about is not neutral — it is
+> evidence that the question is open. In a system whose whole purpose is to be
+> able to say "I don't know", manufacturing doubt is not a small bug.
+
+---
+
+## Concept 25: the honest read on a fix that did not pay for itself
+
+Three measured runs on the 40-case set:
+
+| Run | State | Verdict accuracy |
+|---|---|---:|
+| 1 | baseline — no reduction sweep | **0.725** |
+| 2 | sweep, every status given its own line | 0.600 |
+| 3 | sweep, with `NOT_RAISED` silent and framing sized to stake | **0.675** |
+
+Run 3 recovered most of the regression and **still did not reach the baseline.**
+Case by case against run 1:
+
+```
+FIXED (3)                      BROKEN (5)
++ copay-applies-emergency      - initial-waiting-period
++ icu-rate-breach              - dental-no-accident
++ oral-chemo-limit             - cataract-served
+                               - copay-just-under-sixty
+                               - non-disclosure
+                               net -2 cases
+```
+
+**So the reduction sweep, as integrated, is a net negative.** That is the
+result, and it is recorded here as it came out.
+
+It is worth being precise about *which* half failed, because the two halves have
+very different standing:
+
+- **The arithmetic is correct and is not in question.** `reduction.py` compares
+  8,000 against 1% of 10 lakh, 12,000 against 2% of 5 lakh, and 58 against 60,
+  and it gets all of them right every time. 22 unit tests in
+  `api/tests/test_reduction.py` pin the boundaries, including that "completed
+  sixty years" is satisfied at exactly 60 and not at 59. Those comparisons were
+  previously being made by a 7B model inside a paragraph of legal prose, and it
+  got them wrong in both directions. That is a genuine correctness fix and it
+  stands whatever the aggregate does — the same distinction drawn in the
+  previous milestone between correctness fixes and prompt-shaped changes held
+  loosely.
+
+- **The prompt integration is what costs more than it earns.** Feeding those
+  correct results into the reasoning step still pushes the model toward
+  `conditional` and `insufficient_information` on questions the reductions have
+  nothing to do with.
+
+And the evidence points at exactly one remaining culprit. Three of the five
+broken cases — `initial-waiting-period` (a chest infection two weeks into a
+30-day bar), `dental-no-accident`, `non-disclosure` — mention no money, no room
+and no age. Every computed check on them returns `NOT_RAISED` and prints
+nothing. The *entire* block those three received was one line:
+
+```
+- Note: clauses 5.2, 5.4, 5.5 cap what is paid for the treatments they
+  name. Read them; if this treatment is not one of them, they decide
+  nothing here.
+```
+
+All three had been confident, correct refusals at baseline. All three became
+`insufficient_information`.
+
+That line carries no computed finding. It is a reminder to read three clauses
+whose full text is already in the prompt a few hundred tokens further down. It
+buys nothing and, on this evidence, costs three cases.
+
+> **The lesson, which is the same one this milestone keeps re-teaching in new
+> costumes:** every line added to a prompt is a claim about what matters. A line
+> that adds no information still adds emphasis, and emphasis is not free. "It
+> can't hurt to remind it" is a hypothesis, and on this set it measured false.
+
+---
+
+## What this milestone actually delivered
+
+Stated plainly, because two of the three are worth more than the headline
+number suggests:
+
+1. **A ruler that works.** 40 cases instead of 16, weighted toward the failure
+   mode, with a false-citation metric that can see over-citing. The previously
+   reported 0.812 was a measurement of an easier exam; the honest figure for
+   the same code is 0.725.
+2. **Two integer comparisons taken away from the model**, with tests, in the
+   family that the earlier duration fix had missed.
+3. **A prompt integration that does not yet pay for itself**, diagnosed to a
+   specific line rather than left as a mystery.
+
+---
+
+## Check it yourself
+
+```bash
+cd api && .venv/Scripts/python.exe -m pytest -q          # 129 tests
+python evals/run_scenario_eval.py                        # writes evals/scenario-report.md
+python evals/run_all.py                                  # writes evals/REPORT.md
+```
+
+To watch the failure in this entry directly, render the block for a scenario
+that mentions no money and no age:
+
+```python
+from app.pipeline.reduction import evaluate, render
+# every check returns NOT_RAISED; only the judgement line survives
+print(render(evaluate(policy_clauses, {}, policy_age_days=1825)))
+```
+
+**Question to sit with:** the arithmetic in this milestone is provably correct,
+and feeding it to the model made the answers worse. Two of the three runs
+above were spent discovering that being right is not the same as being useful
+to say.
+
+What would you check *before* adding your next correct fact to a prompt?
+
+<details>
+<summary>Answer</summary>
+
+**Whether the fact is relevant to the question being asked — and if you cannot
+determine that, whether saying nothing is the safer default.**
+
+The failures in this entry are not failures of accuracy. Every statement the
+block made was true. They are failures of *relevance*, and relevance is
+something the injecting code has to decide, because the model cannot: a fact
+placed in front of it has already been marked as worth its attention by the
+act of placing it there.
+
+That gives a concrete pre-flight check for any computed fact you are about to
+inject:
+
+1. **Can this fact change the answer to THIS question?** If the person never
+   mentioned a room, the room-rent cap cannot change their answer. Print
+   nothing. This is the difference between `NOT_RAISED` and `UNKNOWN`, and it
+   was worth 0.075 of accuracy on its own.
+2. **Is its prominence proportional to its decisiveness?** Four satisfied
+   waiting periods are one non-event, not four findings. Three caps that might
+   apply are not three results.
+3. **Does it carry information the model does not already have?** The judgement
+   line failed this test — it pointed at clauses whose full text was already in
+   the same prompt.
+
+The deeper point is that a prompt is not a database the model queries as
+needed. It is a *briefing*, and everything in it is implicitly asserted to be
+worth reading. Adding true-but-irrelevant material does not leave the answer
+unchanged; it shifts what the model believes the question is about. In a system
+designed to say "I don't know" when the document is silent, manufactured doubt
+is not a neutral failure — it converts correct refusals into abstentions, which
+is precisely what happened to three cases here.
+</details>
