@@ -2079,3 +2079,1060 @@ designed to say "I don't know" when the document is silent, manufactured doubt
 is not a neutral failure — it converts correct refusals into abstentions, which
 is precisely what happened to three cases here.
 </details>
+
+---
+
+# M9 — The ruler was made of rubber, and two requests at once was why
+
+## The starting position
+
+The scenario simulator answers a what-if question about a health insurance
+policy — *"I had knee surgery 8 months after buying this"* — with one of four
+verdicts (`covered`, `not_covered`, `conditional`, `insufficient_information`)
+and the clauses that decide it. Its quality is measured by running 40
+hand-written cases in `evals/golden/scenarios.json` and counting how many
+verdicts match the expected one.
+
+The previous milestone had ended on an unresolved note. It added a module that
+does insurance arithmetic in code rather than asking the model — comparing a
+room rate against 1% of the sum insured, an age against a co-payment threshold
+— and then fed those computed results into the reasoning prompt. The
+arithmetic was right. The aggregate got **worse**, from 0.725 to 0.675, and the
+cause had been traced to one specific line of prompt text.
+
+That line appeared only when every computed check came back "this question
+doesn't raise this cap at all". With nothing computed to report, the block
+still printed:
+
+```python
+# api/app/pipeline/reduction.py, before this milestone
+computed = applies or unknown or ruled_out
+if not computed:
+    return (
+        f"- Note: clauses {', '.join(c.clause_id for c in judgement)} cap "
+        f"what is paid for the treatments they name. Read them; if this "
+        f"treatment is not one of them, they decide nothing here."
+    )
+```
+
+Three cases that had been confident, correct refusals — a chest infection two
+weeks into a 30-day waiting period, a dental crown with no accident, an
+undisclosed thyroid condition — became `insufficient_information` when that
+line was present. None of them mentions money, a room, or an age. The line
+told the model to go read three clauses whose full text was already sitting in
+the same prompt a few hundred tokens below.
+
+So this milestone began with an obvious task: delete the line, re-measure,
+expect roughly +3 cases.
+
+---
+
+## What deleting the line did
+
+The branch now returns nothing at all:
+
+```python
+# api/app/pipeline/reduction.py
+computed = applies or unknown or ruled_out
+if not computed:
+    return ""
+```
+
+Re-running the scenario eval moved verdict accuracy from **0.675 to 0.725**,
+citation recall from 0.774 to 0.806, and the quote fabrication rate from 0.125
+to 0.050.
+
+Two of the three predicted cases came back. `dental-no-accident` recovered.
+`initial-waiting-period` and `non-disclosure` did not.
+
+Before accepting "the diagnosis was two-thirds right", it is worth checking the
+mechanism rather than the outcome. The claim was that those cases receive an
+empty block now. That is checkable directly, by wrapping the function and
+printing what it returns for those exact scenarios:
+
+```
+initial-waiting-period | I got a bad chest infection two weeks after my policy started...
+statuses: [('5.1','not_raised'), ('5.2','judgement'), ('5.3','not_raised'), ('5.4','judgement'), ('5.5','judgement')]
+block repr: ''
+```
+
+Empty, as designed — and the case still fails. So for those two the deleted
+line was never the cause, and something else was making them abstain.
+
+That was the correct conclusion from the evidence available. It was also built
+on sand, for a reason that had nothing to do with insurance.
+
+---
+
+## Failure 21: the same code, measured three times, gave three different numbers
+
+To publish the result properly, the full report needed regenerating. The
+project's convention is that `PROMPT_VERSION` in `api/app/llm/prompts.py` is
+bumped whenever the words sent to the model change, because that string is part
+of every cache key — so bumping it discards every cached model response and
+forces a genuinely fresh run:
+
+```
+v12-reductions  ->  v13-silent-reductions
+```
+
+The fresh run scored **0.700**, not the 0.725 measured minutes earlier on the
+same code.
+
+A third run, with the cache cleared again, scored **0.750**.
+
+| Run | Cache state | Verdict accuracy |
+|---|---|---:|
+| 1 | warm (only changed prompts regenerated) | 0.725 |
+| 2 | cold (everything regenerated) | 0.700 |
+| 3 | cold (everything regenerated) | 0.750 |
+
+Identical code. Identical prompt text — `PROMPT_VERSION` is a cache key and is
+never rendered into a prompt, which is worth verifying rather than assuming:
+
+```bash
+grep -rn "PROMPT_VERSION" api/app/llm/ api/app/pipeline/
+# every hit passes it to cache.make_key(); none concatenates it into a message
+```
+
+And `temperature` is 0.0.
+
+Comparing the three runs case by case, **five of the forty cases flip between
+runs**:
+
+```
+ALWAYS WRONG (8)              FLIPS BETWEEN RUNS (5)     ALWAYS RIGHT (27)
+ped-waiting-served            senior-copay
+initial-waiting-period        cataract-served
+accident-in-initial-period    copay-just-under-sixty
+room-rent-within-cap          senior-but-excluded
+intoxication-injury           breach-of-law
+non-disclosure
+post-hospitalisation-too-late
+day-care-not-listed
+```
+
+So the system's real score is *27 guaranteed passes plus up to five coin
+flips*: somewhere in 0.675–0.800, and which end gets reported is luck.
+
+**This invalidates more than one milestone's conclusions.** The previous
+milestone compared 0.725 against 0.675 and wrote a careful diagnosis of why a
+change had cost two cases. Two cases is inside the noise. The diagnosis may
+still be right — its mechanism was verified independently — but the *number*
+never supported it. The milestone before that had already noticed five runs
+landing on 0.688 / 0.625 / 0.812 / 0.688 / 0.812 and concluded the 16-case set
+was too small to resolve the changes being made against it. That conclusion was
+half right in an expensive way: the set was too small, but enlarging it to 40
+cases did not fix the problem, because the problem was never the set size.
+
+> **The lesson:** when a measurement moves, there are always two explanations —
+> the thing you changed, or the instrument. Nothing in this project had ever
+> checked the second one. An eval you have not tested for reproducibility is
+> not an instrument, it is an anecdote generator, and it will produce a
+> confident story for any change you make.
+
+---
+
+## Concept 26: `temperature = 0` is not reproducibility
+
+This is the assumption that went unexamined for eight milestones, and it is
+worth taking apart properly because almost everyone building on a local model
+holds it.
+
+**What temperature actually does.** A language model does not emit a token. It
+emits a *score for every token in its vocabulary* — roughly 150,000 numbers for
+qwen2.5. Those scores are called logits. Turning them into a choice needs a
+sampling rule, and temperature is the knob on that rule:
+
+- **temperature = 1.0** — convert the logits to probabilities and draw from
+  that distribution. A token the model rates at 30% is chosen about 30% of the
+  time. Genuinely random, differently each run.
+- **temperature = 0.7** — sharpen the distribution first, so likely tokens get
+  likelier and unlikely ones nearly vanish. Still random, less adventurous.
+- **temperature = 0.0** — the limit of that sharpening: *always take the
+  highest-scoring token*. No draw, no randomness. Also called greedy decoding.
+
+So at temperature 0 the sampler is deterministic. **Given the same logits, it
+returns the same token, every time.** That much is true, and it is where the
+reasoning usually stops.
+
+**The hidden clause is "given the same logits."** The sampler is deterministic;
+producing the logits is a separate question. And on a GPU, the same prompt
+through the same weights does not reliably produce bit-identical logits — which
+means the argmax can land on a different token, and from there the two
+generations diverge completely, because every subsequent token is conditioned
+on a text that now differs.
+
+That is why the divergence, when it appears, is never subtle. Two runs of one
+scenario:
+
+```
+run A: {"deciding_clauses": [{"clause_id": "3.1", "effect": "reduces", ...
+run B: {"deciding_clauses": [{"clause_id": "4.3", "effect": "denies",  ...
+```
+
+One says a waiting period reduces the claim; the other says an exclusion denies
+it. A single flipped token at position 37, and the answers have nothing in
+common. Near-ties are not rare events at the margins — they are the normal
+condition of a 150,000-way choice, and there is one at every token.
+
+---
+
+## Failure 22: the fix I was certain of, which changed nothing
+
+The first hypothesis was the seed. Ollama accepts a `seed` option and the
+project was not sending one, so Ollama drew a random one per request. The
+decoding options are built in one place:
+
+```python
+# api/app/llm/client.py, before this milestone
+return {
+    "temperature": settings.temperature,
+    "num_ctx": settings.num_ctx,
+    "num_predict": settings.num_predict,
+}
+```
+
+No seed. Pinning it looked like a one-line fix to a whole milestone's worth of
+confusion.
+
+It made no difference. With `"seed": 0` sent explicitly, three sequential calls
+with identical messages still returned two different answers.
+
+**Why it could never have worked, in hindsight:** a seed feeds a random number
+generator, and at temperature 0 *nothing draws from that generator*. The
+sampler takes an argmax. Seeding it is seeding a die that is never rolled. The
+hypothesis contradicted the very explanation of temperature that justified it,
+and it survived precisely because the fix felt cheap enough not to think hard
+about first.
+
+The seed is still pinned in `api/app/config.py`, because a system whose premise
+is reproducibility should not leave an input unspecified. But it is documented
+there for what it is: worth stating, and measured to fix nothing.
+
+---
+
+## The tool that settles it, rather than another opinion
+
+The right response to "I do not know whether my measurements are real" is not a
+better guess. It is an instrument. `evals/check_determinism.py` sends the same
+input N times with the cache bypassed and compares the results byte for byte,
+at two layers that fail for different reasons:
+
+```
+MODEL     the same messages, sent N times with the cache bypassed, must come
+          back byte-identical. This is llama.cpp's decoding, with no pipeline
+          involvement at all.
+
+PIPELINE  the analysis stage run N times must produce identical structured
+          output. This is the same model plus THIS PROJECT'S concurrency.
+```
+
+Separating the layers is the whole design. A single pass/fail would have said
+"not reproducible" and left the cause open. Two layers turn the result into a
+diagnosis, because **the model layer passing while the pipeline layer fails
+points at the project's own code**, not at llama.cpp.
+
+That is exactly what happened. Eighteen sequential model calls, byte-identical
+every time. The pipeline layer, diverging — and always inside `plain_language`,
+the free-text rewrite, where near-ties are densest.
+
+Bypassing the cache without destroying it needed one small change to production
+code: threading the flag that `complete_json` already had through the stage
+that did not expose it.
+
+```python
+# api/app/pipeline/analyze.py
+async def analyze(
+    segments: list[Segment],
+    *,
+    batch_size: int | None = None,
+    concurrency: int | None = None,
+    progress=None,
+    use_cache: bool = True,
+) -> dict[str, ClauseAnalysis]:
+```
+
+The eval harness's existing `--no-cache` calls `cache.clear()`, which deletes
+every cached response in the database. That is right for a full eval run and
+useless for a check that wants to re-run twelve clauses without throwing away
+twenty minutes of unrelated work.
+
+---
+
+## Failure 23: claiming the cause after one observation each way
+
+With the layers separated, the suspect was `analyze_concurrency`, which was 2 —
+the analysis stage keeps two requests in flight at once. One run at
+concurrency 2 diverged; one run at concurrency 1 was identical.
+
+That looked like the answer, and it was written up as the answer.
+
+Then concurrency 2 was run again and **passed**. One failure and one pass at
+the same setting is not evidence of anything — it is two coin flips, and it is
+the same error as reading a two-case difference on a noisy eval. Intermittent
+faults need repeats, and the check already took `--repeats`:
+
+```
+concurrency=1, 6 repeats:  6/6 identical                        OK
+concurrency=2, 6 repeats:  3 of 6 diverge, alternating exactly  FAIL
+concurrency=4, 6 repeats:  1 of 6 diverges                      FAIL
+```
+
+The alternation at concurrency 2 — `9046 / 9080 / 9046 / 9080 / 9046 / 9080`
+characters, perfectly regular — is the tell. Random corruption does not
+alternate. Request interleaving does.
+
+---
+
+## Concept 27: float addition is not associative, and that is a product bug
+
+School arithmetic says `(a + b) + c` equals `a + (b + c)`. Floating-point
+arithmetic says no. Each intermediate result is rounded to fit 32 or 16 bits,
+and rounding at a different point loses a different crumb:
+
+```
+(1e16 + 1.0) - 1e16   ->  0.0     the 1.0 is rounded away, then subtracted
+1e16 + (1.0 - 1e16)   ->  2.0     ...depending entirely on the grouping
+```
+
+A transformer layer is millions of such additions. The GPU splits them across
+thousands of threads, and **how it splits them depends on the shape of the work
+it is given**. One request alone is one shape. Two requests batched together is
+another: the kernel processes both sequences in one matmul, different threads
+take different slices, and the partial sums are combined in a different order.
+
+The result differs in the last bits. That is invisible almost everywhere — and
+decisive at a near-tie, where two tokens are separated by less than the error.
+The tie breaks the other way, and the two generations part company for good:
+
+```
+run A: "A hospital is any place that provides inpatient or day care treatment..."
+run B: "A hospital is any place that takes sick people in for treatment..."
+```
+
+Nothing is corrupted here. Both readings are correct. **But they are different
+readings of the same clause, produced by the same code from the same PDF**, and
+that is the part that matters beyond the eval: this was never only a
+measurement problem. A user who uploads their policy, closes the tab, and
+uploads it again gets a different plain-English rewrite of their own document.
+The cache hides it — identical input, cached response — but a cache is an
+optimisation, not a guarantee, and it is empty the first time anything runs.
+
+---
+
+## Concept 28: measure the cost of the safe choice before assuming you cannot afford it
+
+Serialising the analysis stage was obviously correct for reproducibility, and
+obviously expensive. Two requests in flight, so removing one should halve
+throughput — 200-clause policies going from minutes to many minutes, a real
+cost to a real user, for a property only the eval harness cares about.
+
+That is the sort of tradeoff worth agonising over, and it is worth ten minutes
+to check the number first. Same 40-clause policy, cache off, both settings:
+
+```
+concurrency=1: 40 clauses in 203.0s
+concurrency=2: 40 clauses in 184.2s
+```
+
+**Nine percent. Nineteen seconds.**
+
+One request already saturates an 8GB card — the GPU has no idle capacity for a
+second one to use, so the second mostly queues. The original comment in the
+config had recorded that "2 measured better than 4 on an 8GB card" without
+following the trend one step further, to 1.
+
+The agonising tradeoff did not exist. The concurrency was buying nineteen
+seconds and costing the ability to measure anything at all.
+
+> **The lesson:** an unmeasured cost will be estimated, and estimates of
+> performance are reliably wrong in the direction that justifies keeping what
+> you already have. The expensive-sounding safe choice is often nearly free,
+> and finding that out is usually cheaper than the deliberation it replaces.
+
+---
+
+## Failure 24: the residual, and a second fix that measured nothing
+
+Serialising the analysis stage removed a proven source of nondeterminism. It
+did not make the eval reproducible.
+
+Two full runs on the serialised code, both with every model response generated
+fresh, scored **0.650** and **0.675**. Twelve of the failing cases were common
+to both; three differed - `breach-of-law` and `cataract-served` failed in the
+first and passed in the second, `other-policy-contribution` the reverse.
+
+So there is a second source, and the search for it produced one more refuted
+hypothesis worth recording.
+
+**The observation.** Sending the same reasoning prompt three times back to back,
+with the cache bypassed, gives:
+
+```
+call 1: 1015 chars
+call 2: 1384 chars
+call 3: 1384 chars
+```
+
+Only the first differs. Interleaving a second, unrelated scenario between the
+repeats does not disturb it - calls 2 through 6 all agree. Whatever is
+different about the first call, it is not the identity of the request before
+it.
+
+**The hypothesis.** Something about a process's first generation is unlike the
+ones after it, and the project already had a function whose job was to get that
+out of the way early:
+
+```python
+# api/app/llm/client.py
+async def warm() -> None:
+    """Preload the model into VRAM."""
+    ...
+    # An empty message list asks Ollama to load the model and stop.
+    json={"model": settings.model, "messages": [], "stream": False},
+```
+
+An empty message list loads the weights and returns **without decoding a single
+token**, so the first real request of the process was still the first
+generation. The app calls `warm()` at startup; the eval harness never called it
+at all. Making it run one throwaway one-token generation looked like the fix,
+and it would have fixed a product bug too: the first policy uploaded after
+server startup would have had one clause read differently from the way it would
+be read a minute later.
+
+**It changed nothing.** With a real warm-up generation first, the same test:
+
+```
+call 1: 1961 chars
+call 2: 1364 chars
+call 3: 1364 chars
+```
+
+Still the odd one out. The change was reverted rather than kept, because
+keeping an unmeasured improvement on the grounds that it cannot hurt is the
+exact reasoning this project has already been burned by twice - once with four
+true statements about waiting periods, once with a one-line note about
+sub-limits.
+
+**The likely mechanism, stated as a hypothesis rather than a conclusion:**
+llama.cpp reuses the cached KV of a matching prompt prefix. The first time a
+6,000-token prompt arrives, all 6,000 tokens are prefilled in batches. The
+second time the identical prompt arrives, the prefix is already in the cache
+and almost nothing is prefilled. Those are different computations over the same
+numbers, and by Concept 27 they need not agree in the last bits. A one-token
+warm-up on the word "ok" shares no prefix with a 6,000-token policy prompt, so
+it cannot prevent the full prefill that follows.
+
+If that is right, the fix is not a warm-up but pinning whatever varies in the
+prefill path - and confirming it needs a test that isolates prefill batching,
+which does not exist yet. **It is recorded here as open, because the honest
+state of this milestone is one source found and removed, one source identified
+and not yet removed.**
+
+---
+
+## What this milestone delivered
+
+1. **A one-line prompt deletion**, correct on its own terms: it removed text
+   carrying no information the model could not already read, and two tests pin
+   that the block is empty when nothing was computed. Its measured effect is
+   **within the noise and cannot be claimed** - the case its recovery was
+   attributed to, `dental-no-accident`, failed again on a later run.
+2. **The discovery that every eval number this project has compared was read
+   through ±2-3 cases of noise**, and that a third of the failing set are coin
+   flips rather than verdicts.
+3. **`evals/check_determinism.py`**, which turns "is this reproducible" from an
+   assumption into a command, at two layers that fail for different reasons.
+4. **One proven source removed**: concurrent requests, 6/6 identical at
+   concurrency 1 against 3-of-6 diverging at 2, for a measured 9% of analysis
+   wall time.
+5. **A product bug fixed as a side effect**: the same policy read twice at
+   concurrency 1 now gives the same reading, where before it did not.
+6. **An open residual**, characterised to a single reproducible observation -
+   the first substantive generation of a process differs from every one after
+   it - with the obvious fix tried, measured, and rejected.
+
+The headline number is **0.650**, from the run that produced
+`evals/REPORT.md`. It is lower than the 0.675-0.750 this project has been
+reporting, and none of that drop is a regression: it is the first number taken
+on a pipeline where the largest source of variance had been removed, and the
+range it replaces was never a measurement of one thing.
+
+---
+
+## Check it yourself
+
+```bash
+cd api && .venv/Scripts/python.exe -m pytest -q     # 130 tests
+python evals/check_determinism.py                   # MODEL and PIPELINE layers pass;
+                                                    # the SEQUENCE layer fails - see M10
+```
+
+To watch the failure this milestone is about, ask for the old setting back:
+
+```bash
+python evals/check_determinism.py --repeats 6 --concurrency 2
+```
+
+The model layer passes and the pipeline layer fails, which is the shape of the
+whole diagnosis in one screen.
+
+**Question to sit with:** the eval harness in this project was written to stop
+model and prompt changes being justified by impressions instead of numbers. It
+did that job for eight milestones while quietly producing numbers that moved on
+their own.
+
+What makes a measurement trustworthy, if not the fact that it is a number?
+
+<details>
+<summary>Answer</summary>
+
+**That you have measured the measurement.** A number earns trust by having a
+known error bar, and nothing about being a number supplies one.
+
+The specific trap here is that noise is invisible from inside a single run. One
+run of this eval produces `0.700` - not "0.700 plus or minus 0.05", not a
+distribution, just a decimal with three digits of implied precision. Every
+property that would warn you is missing from the output: the spread, the number
+of times it was measured, which cases are unstable. Print a mean without a
+variance and readers supply a variance of zero, because that is what the format
+implies.
+
+Concretely, three habits separate an instrument from an anecdote generator:
+
+1. **Run it twice before you trust it once.** The cheapest possible experiment,
+   and this project went eight milestones without it. Two identical runs that
+   disagree tell you more than a hundred single runs that agree with your
+   hopes.
+2. **Report instability as a first-class result.** "27 always right, 8 always
+   wrong, 5 flip" is a far more useful sentence than "0.725". It says exactly
+   where the system is solid, where it is broken, and where it has no
+   conviction at all - and only the middle number is a quality problem.
+3. **Never let a delta smaller than the noise floor justify a decision.** The
+   previous milestone's two-case regression, agonised over and diagnosed in
+   detail, was smaller than the instrument's own error.
+
+The deeper point is that an eval harness is itself a piece of software, and it
+is the one piece nobody tests, because its output *is* the test. That makes its
+failure mode uniquely quiet: a broken test suite goes red, while a broken
+measurement just keeps producing plausible decimals that send you looking for
+explanations in the wrong place. The unstable cases here had been read as
+evidence about prompt wording across two milestones. At least some of them were
+evidence about batch scheduling on a GPU.
+</details>
+
+---
+
+# M10 — Measuring only what changed, and a third family of arithmetic
+
+## The starting position
+
+The scenario simulator answers a what-if question about an Indian health
+policy — *"I had a follow-up scan 120 days after I was discharged"* — with one
+of four verdicts (`covered`, `not_covered`, `conditional`,
+`insufficient_information`) and the clauses that decide it. Its quality is
+measured by 40 hand-written cases in `evals/golden/scenarios.json`.
+
+The previous milestone established two uncomfortable facts about that
+measurement:
+
+1. **The model does not answer identically twice**, even at temperature 0. One
+   source (concurrent requests) was found and removed; a residual remains,
+   inside the inference runtime, and could not be switched off.
+2. **So the aggregate score moves on its own.** Runs of identical code scored
+   anywhere from 0.650 to 0.750. A prompt change worth two or three cases was
+   indistinguishable from doing nothing.
+
+It also left eight cases that failed in every run — real bugs rather than
+noise. This milestone set out to do two things: make the eval able to measure
+a change despite the wobble, and fix the clearest of the eight.
+
+---
+
+## One more measurement before anything else: repeat is not sequence
+
+The determinism check in `evals/check_determinism.py` had two layers. Both sent
+the **same** input several times and compared the outputs. Both passed.
+
+An eval never does that. It sends forty **different** prompts, in order, once
+each. So a third layer was added that does exactly that — runs real eval
+scenarios in order, twice, and compares pass one against pass two case by case:
+
+```
+SEQUENCE (10 cases, 2 passes): 7 case(s) differ  FAIL
+```
+
+Those are two different properties, and a system can have one without the
+other:
+
+    repeat stability    asking the same question twice gives one answer
+    sequence stability  asking forty questions gives the same forty answers
+
+The first comparison was byte for byte, and reported 9 of 10 differing — true
+and nearly useless, because most of the difference was in the free-text
+`reasoning` paragraph that no metric reads. Comparing only what the metrics
+consume (the verdict, the cited clauses, the quotes) still gave **7 of 10**.
+Verdicts turned out fairly steady; *citations* did not, which is why citation
+recall had been wandering between runs nobody had changed anything in.
+
+> **The lesson:** test the property your conclusion depends on, not a
+> neighbouring one that is easier to check. Two passing layers had said "this
+> is reproducible". The property the eval rests on was never among them.
+
+---
+
+## Concept 29: the cache as a controlled experiment
+
+If the model's answers cannot be made identical, the noise has to be kept out of
+the *comparison* instead. The tool for that already existed, and had been
+treated as a mere speed-up.
+
+**What a content-addressed cache is.** Every model request is hashed — the
+model name, the exact messages, the JSON schema, the decoding options — and the
+hash is the key under which the answer is stored:
+
+```python
+# api/app/llm/cache.py
+def make_key(model, messages, schema, options=None) -> str:
+    payload = json.dumps(
+        {"model": model, "messages": messages, "schema": schema,
+         "options": options or {}},
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+```
+
+"Content-addressed" means the address *is* the content: change one character of
+the prompt and you are asking for a different key.
+
+**Why that makes an experiment.** Suppose you edit a prompt that only three of
+the forty eval cases actually send. The other thirty-seven send byte-identical
+text, find their key, and get back the *stored bytes* of their earlier answer.
+Those answers cannot have moved — not "are unlikely to have", **cannot**. Only
+the three cases whose text changed reach the model and produce new samples.
+
+In a lab, a control group is the part of the experiment you deliberately leave
+untouched, so that any difference in the treated part can be attributed to the
+treatment. The cache hands you a control group for free, and it is a better one
+than a lab gets: the untreated cases are not merely similar to before, they are
+identical.
+
+So instead of comparing two blended scores, `evals/run_scenario_eval.py` now
+reports which cases a change could have reached. Here is a real run, made to
+test exactly this: one word changed in the heading of the cover-window block
+(introduced later in this entry), which only two of the forty questions
+receive. The prediction was 38 replayed and 2 regenerated:
+
+```
+Compared with the previous run (2026-09-13 17:31 UTC, v15-cover-window-section):
+
+   38 replayed from cache   same text sent, stored answer returned - cannot have moved
+    2 regenerated         the only cases this run could have changed
+        fixed          0
+        broken         0
+        still right    2
+        still wrong    0
+```
+
+Thirty-eight cases contributed no noise at all, and the two that could have
+moved did not.
+
+To know which cases were regenerated, the model client counts requests that
+actually reach the model:
+
+```python
+# api/app/llm/client.py
+model_calls = 0
+...
+    global model_calls
+    model_calls += 1
+```
+
+and the eval reads that counter before and after each case. Every run's
+per-case verdicts, and whether each was fresh, are appended to
+`evals/run-history.json`, which is what the comparison, the stability report and
+the `--watchlist` flag (re-run only cases that failed or wobbled) are computed
+from.
+
+---
+
+## Failure 25: the cache's row count lies in exactly one case
+
+The obvious way to detect "was this answer regenerated" is to count the cache's
+rows before and after: a new answer adds a row.
+
+It does not always. When a response is cut off mid-JSON, the client retries
+with a larger output limit, and stores the answer under a key built from the
+*new* options:
+
+```python
+# api/app/llm/client.py
+options = {**options, "num_predict": options["num_predict"] * 2}
+...
+cache.put(cache.make_key(model, messages, schema, options), model, parsed)
+```
+
+The next run looks the request up under the *original* options, misses,
+regenerates, retries again, and overwrites its own row. The table does not
+grow, so a regenerated answer would have been reported as replayed — the one
+error the whole comparison cannot afford. Hence counting model calls directly.
+
+---
+
+## Failure 26: counting the wrong calls
+
+The first version marked a case "fresh" if **any** model request happened while
+answering it. But every case first extracts facts from the question, and the
+very next change in this milestone edited the fact extractor's prompt. Every
+case would have shown as regenerated — including cases whose facts came out the
+same, whose reasoning prompt was therefore byte-identical, and whose verdict
+was the stored answer.
+
+The verdict comes from the reasoning step alone. So the eval now extracts facts
+*first*, outside the count, and counts only what happens after:
+
+```python
+# evals/run_scenario_eval.py
+await extract_facts(case["scenario"])
+calls_before = client.model_calls
+result = await run_scenario(case["scenario"], clauses, resample=resample)
+fresh = client.model_calls > calls_before
+```
+
+`run_scenario`'s own fact extraction is then a cache hit, and "fresh" means
+exactly "the verdict could have changed".
+
+---
+
+## Failure 27: advice that would have confirmed a result with a copy of itself
+
+When a regenerated case flips, it is one sample from a model that does not
+answer identically twice. The comparison's output originally said:
+
+```
+not evidence on its own - re-run it with --only before believing it.
+```
+
+`--only` runs a chosen subset. But re-running a case replays its **stored**
+answer — the very sample being doubted. Following that advice would have
+"confirmed" every fix, always, by reading it back.
+
+A second opinion needs a genuinely new sample of the *same* prompt, so the
+reasoning step gained a way to bypass the cache without writing to it:
+
+```python
+# api/app/pipeline/scenario.py
+async def run_scenario(scenario, clauses, *, resample: bool = False):
+    ...
+    payload = await reason(scenario, facts, considered, use_cache=not resample)
+```
+
+```bash
+python evals/run_scenario_eval.py --only post-hospitalisation-too-late --resample
+```
+
+Nothing resampled is stored, so the original answer stays the baseline. Every
+result in this entry marked "×3" was checked this way.
+
+---
+
+## Concept 30: a version label is not a cache key
+
+The project's convention had been to bump `PROMPT_VERSION` whenever a prompt
+changed, *because the version was part of every cache key* — so bumping it
+guaranteed a reworded prompt never got a stale answer.
+
+Two things were wrong with that, and the second only became visible once the
+cache was being used as a control group.
+
+**It was redundant.** The key already hashes the message text. A reworded prompt
+is different text and gets a different key whether or not anyone remembers to
+bump anything.
+
+**It destroyed the control group.** A version bump changes *every* key, so a
+change to one prompt discarded the stored answer to every prompt. All forty
+cases regenerated, each a fresh chance to wobble, and a three-case change was
+buried under forty cases of noise — exactly the situation Concept 29 exists to
+avoid.
+
+So the version was taken out of the key and kept as a label:
+
+```python
+# api/app/llm/prompts.py
+PROMPT_VERSION is a LABEL. Bump it whenever a prompt's wording changes, so eval
+reports, the run history and stored analyses record which instructions produced
+them. It is not part of the cache key - the cache hashes the prompt text
+itself...
+```
+
+The guarantee the old test protected — editing a prompt must never serve a
+stale answer — is still tested, now against the thing that actually provides
+it:
+
+```python
+# api/tests/test_llm.py
+def test_changing_the_prompt_text_changes_the_cache_key():
+    reworded[-1]["content"] = reworded[-1]["content"] + " "
+    ...
+    assert len({k1, k2, k3, k4}) == 4
+```
+
+A bonus appeared the first time a change was reverted: going back to an earlier
+prompt replayed that prompt's stored answers exactly, instead of regenerating a
+new and different sample of what used to be measured.
+
+---
+
+## The fix: a cover window, decided in code
+
+Indian health policies pay for treatment around a hospital stay only within a
+window. The synthetic policy says:
+
+```
+2.2 ... Medical Expenses incurred during the sixty days immediately preceding
+    the date of admission ...
+2.3 ... Medical Expenses incurred during the ninety days immediately following
+    the date of discharge ...
+```
+
+The case `post-hospitalisation-too-late` — *"a follow-up scan a hundred and
+twenty days after I was discharged"* — failed in every run on record. The model
+answered `covered` or `conditional`. Is 120 more than 90?
+
+That is the third time this project has found the same mistake. `waiting.py`
+took duration comparisons away from the model; `reduction.py` took money and
+age comparisons away. This is a third family, and it gets the same split:
+
+    reading "the ninety days immediately following discharge"  -> the model
+    reading "a scan 120 days after I was discharged"           -> the model
+    deciding whether 120 <= 90                                 -> window.py
+
+The clause reader records each window as a value, a unit, and an **anchor**;
+the fact extractor records the person's expense the same way; and
+`api/app/pipeline/window.py` compares them:
+
+```python
+# api/app/pipeline/window.py
+if anchor != clause_anchor:
+    status = WindowStatus.NOT_RAISED
+elif offset_days is None:
+    status = WindowStatus.UNKNOWN
+elif offset_days <= window:
+    status = WindowStatus.WITHIN
+else:
+    status = WindowStatus.OUTSIDE
+```
+
+**Why the anchor exists.** A window has a side. Fifty days *before admission*
+says nothing about the window *after discharge*; comparing them compares numbers
+that measure different things. It is the same operand trap an earlier milestone
+hit, when a senior co-payment turned out to key on age *at inception* rather
+than age now.
+
+**Why NOT_RAISED prints nothing.** Most questions never mention a stay's before
+or after. An earlier milestone measured what happens when a prompt carries a
+note about something the question never touched: confident, correct answers
+turn into `insufficient_information`. So an unraised window renders to an empty
+string, and ten tests in `api/tests/test_window.py` pin the boundaries,
+including that day 90 of a 90-day window counts as inside it.
+
+It also fixed a misreading nobody had noticed. The clause reader had been
+putting clause 2.2's "sixty days before admission" into the *waiting period*
+field, and `waiting.py` then told every scenario that 2.2 was a 60-day waiting
+period. With a field of its own, the window stopped leaking into the wrong one.
+
+---
+
+## Failure 28: one paragraph of instructions reclassified clauses it never mentioned
+
+The first version of the clause reader's new instructions did two things: added
+a note to the definition of `waiting_period` saying a hospital-stay window is
+not one, and described the three new fields in the middle of the existing
+field list.
+
+Clause 2.2 was fixed. Classification accuracy across all clauses fell from
+**1.000 to 0.919**:
+
+```
+waiting_period -> exclusion   (3.2)
+sub_limit      -> condition   (5.3, the senior co-payment)
+condition      -> procedural  (6.5, medical examination)
+```
+
+None of those clauses has anything to do with a hospital stay. Removing one
+piece of the edit at a time isolated the cause:
+
+| Instructions | 2.2 | 5.3 | 6.5 |
+|---|---|---|---|
+| before this milestone | waiting_period ✗ | sub_limit ✓ | condition ✓ |
+| + field description only | coverage ✓ | condition ✗ | condition ✓ |
+| + field description + type note | coverage ✓ | condition ✗ | procedural ✗ |
+| field description **moved to its own section** | coverage ✓ | sub_limit ✓ | condition ✓ |
+
+The type note did nothing but harm; the field description alone fixed 2.2. And
+the field description broke the co-payment clause purely by **where it sat** —
+inserted just above the co-payment fields. Moved to its own short section after
+them, it broke nothing: 39 of 39 clauses correct, in four separate samples.
+
+(Clause 3.2's misreading was different: resampled, it came back correct every
+time. The eval run had simply drawn an unlucky reading — and every one of that
+run's forty scenarios was then shown a waiting period labelled as a permanent
+exclusion. One bad sample upstream contaminates everything downstream of it.)
+
+> **The lesson:** a small model does not read instructions the way a person
+> does, one relevant rule at a time. Every line shifts the context for every
+> other line, and the effects are not local. A prompt edit has to be checked
+> against everything the prompt does — here, all 40 clauses — not only against
+> the one thing it was written to fix. Checking three clauses would have shipped
+> the version that broke two others.
+
+---
+
+## Failure 29: a correct fix that measured net negative, and was reverted
+
+The window change introduced one stable regression. Asked *"Does this policy
+cover my car being stolen from the hospital car park?"*, the correct answer is
+`insufficient_information` — a health policy is silent on car theft. After the
+change it answered `not_covered`, six samples out of six, citing the cosmetic
+surgery exclusion with a quotation that does not exist.
+
+The cause was in the facts. The extractor has a free-text `notes` field, and
+for this question it wrote:
+
+```
+notes: This policy does not cover car theft from the hospital car park.
+```
+
+That is not something the person said. It is the extractor *answering the
+question* — and the note reaches the reasoning step under "FACTS UNDERSTOOD",
+presented as a stated fact.
+
+The structural fix was obvious and principled: never show `notes` to the
+reasoner. Its content is a paraphrase of the question, which the reasoner
+already receives verbatim. One line, one test, and a leaked conclusion becomes
+impossible rather than discouraged.
+
+Measured three times each:
+
+| Case | Before | Notes removed |
+|---|---|---|
+| `not-in-document` | ✗ ✗ ✗ | ✓ ✓ ✓ |
+| `no-preauth-cashless` | ✓ in every earlier sample | ✗ ✗ ✗ |
+| `senior-but-excluded` | ✓ ✓ ✓ ✓ | ✗ ✗ ✗ |
+| `other-policy-contribution` | ✓ in 4 of 5 | ✗ ✗ ✗ |
+
+One fix, three breaks, and citation recall down from 0.774 to 0.677. Replaying
+the old answers from the cache showed exactly which citations were lost — the
+alcohol exclusion for an intoxication injury, the disclosure condition for an
+undisclosed thyroid condition. The notes had been restating situations in
+something close to policy vocabulary, and that paraphrase was helping a 7B
+model find the right clause. Removing the field removed the leak and the help
+together.
+
+So it was reverted. This is the same judgement an earlier milestone reached
+about a correct piece of arithmetic fed into a prompt (see *Concept 25: the
+honest read on a fix that did not pay for itself*): being right in principle is
+not the same as helping, and only the measurement can say which. The leak is
+recorded as open.
+
+---
+
+## Failure 30: a warning that blamed a cause that did not exist
+
+Reverting the notes change replayed the earlier answers — and the comparison
+printed:
+
+```
+WARNING: 9 replayed case(s) differ from the last recorded run ...
+The cache was filled by a run that was never recorded
+```
+
+No such run existed. Those answers came from a recorded run; they differed from
+the *immediately previous* run because that run used the notes-removed prompt,
+and reverting brings back an earlier prompt's answers. The logic was right to
+surface the difference and wrong about why. It now names both causes — a
+reverted change, or an unrecorded run — and counts neither as a fix or a break.
+
+---
+
+## Where this leaves the numbers
+
+Stable per-case results, each checked over at least three samples:
+
+| Case | Before this milestone | Now |
+|---|---|---|
+| `post-hospitalisation-too-late` | ✗ ✗ | ✓ ✓ ✓ ✓ **(the target)** |
+| `initial-waiting-period` | ✗ ✗ | ✓ ✓ ✓ ✓ |
+| `dental-no-accident` | ✗ ✗ | ✓ ✓ ✓ ✓ |
+| `senior-copay` | ✗ ✗ | ✓ ✓ ✓ ✓ |
+| `not-in-document` | ✓ ✓ | ✗ ✗ ✗ ✗ (notes leak — open) |
+| `copay-unknown-inception-age` | ✓ ✓ | ✗ ✗ ✗ ✗ (cause not found — open) |
+| `icu-rate-breach` | ✗ ✗ | ✓ ✗ ✗ ✗ (wobbles) |
+
+Verdict accuracy over two full runs of the final code: **0.750 and 0.725**,
+against 0.650 and 0.675 for the code this milestone started from. Clause
+classification: **1.000** in four samples.
+
+Why three unrelated cases improved is not proven. The likeliest explanation is
+the misreading fixed as a side effect: clause 2.2 had been presented to every
+scenario as a 60-day waiting period, and for a chest infection two weeks into a
+policy that is a spurious extra bar to reason about. It is recorded as a
+hypothesis, not a finding.
+
+**Still open:**
+
+- the `notes` leak, which needs a fix that keeps the paraphrase's help without
+  its conclusions;
+- `copay-unknown-inception-age`, which started failing with the corrected
+  clause instructions and whose cause is not yet found;
+- a quotation for clause 2.3 that splices the last three words of clause 2.2
+  ("...accepted **by the Company**") onto 2.3's text. The verbatim check catches
+  it every time, so the guarantee holds, but the deciding citation is shown as
+  unverified.
+
+---
+
+## Check it yourself
+
+```bash
+cd api && .venv/Scripts/python.exe -m pytest -q          # 148 tests
+python evals/run_scenario_eval.py                        # full run, compared with the last one
+python evals/run_scenario_eval.py --watchlist            # only cases that failed or wobbled
+python evals/run_scenario_eval.py --only post-hospitalisation-too-late --resample
+```
+
+Run the plain eval twice in a row and read the second comparison: every case
+should say *replayed*.
+
+**Question to sit with:** you change one word in the heading that
+`api/app/pipeline/window.py` puts above its block, and run the eval. Before
+running it, predict how many of the 40 cases regenerate. Then predict the same
+for a one-word change to the waiting-period block in `waiting.py`.
+
+<details>
+<summary>Answer</summary>
+
+**Two, and forty** — and the reason is decided by what each person said, not
+by the policy.
+
+The window block prints only when a question places an expense before
+admission or after discharge. Two of the forty do: `pre-hospitalisation-window`
+and `post-hospitalisation-too-late`. Every other question's reasoning prompt
+contains no window block at all, so its text is unchanged and its stored answer
+replays. That experiment was run while writing this entry: 38 replayed, 2
+regenerated.
+
+The waiting-period block reaches all forty, because it prints even when the
+person never says how long they have held the policy — every waiting period
+then comes back "cannot be determined", and that line is printed. So a change
+to its wording regenerates every case and cannot be isolated, however
+carefully the cache is used.
+
+That is the general skill Concept 29 depends on: a change's reach is a property
+of the data flow — which inputs end up inside which prompt — and it can be
+predicted by tracing that flow. The same tracing found Failure 26 (a fact
+extractor change that looked as if it touched every verdict) and Concept 30 (a
+version label that made every change touch everything). The cache does not
+decide a change's reach; it just makes it visible, case by case.
+</details>

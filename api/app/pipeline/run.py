@@ -180,6 +180,8 @@ def _persist_analyses(doc_id: str, segments, analyses, scored) -> None:
                     icu_cap_percent_of_sum_insured=(
                         analysis.icu_cap_percent_of_sum_insured
                     ),
+                    cover_window_days=analysis.cover_window_days,
+                    cover_window_anchor=analysis.cover_window_anchor,
                     exceptions_json=json.dumps(analysis.exceptions),
                     likelihood=analysis.likelihood,
                     severity=analysis.severity,

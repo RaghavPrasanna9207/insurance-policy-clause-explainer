@@ -1,9 +1,11 @@
 """Prompt templates and their version.
 
-PROMPT_VERSION is part of every cache key. Bump it whenever a prompt's wording
-changes, and the next run recomputes instead of silently serving results
-produced by the old instructions. Forgetting to bump it is the classic way to
-spend an afternoon debugging a change that never actually took effect.
+PROMPT_VERSION is a LABEL. Bump it whenever a prompt's wording changes, so eval
+reports, the run history and stored analyses record which instructions produced
+them. It is not part of the cache key - the cache hashes the prompt text
+itself, so a reworded prompt can never be served an answer to the old wording,
+and an unchanged prompt keeps its stored answer. See app/llm/cache.py for why
+it was taken out of the key.
 
 --------------------------------------------------------------------------
 Why CLASSIFY_SYSTEM is so specific about what each label means
@@ -36,7 +38,7 @@ coverage, it just happens to be describing its ceiling.
 
 from app.taxonomy import ClauseType
 
-PROMPT_VERSION = "v12-reductions"
+PROMPT_VERSION = "v15-cover-window-section"
 
 CLASSIFY_SYSTEM = """\
 You are an expert on Indian (IRDAI-regulated) health insurance policy wordings.
@@ -133,6 +135,15 @@ person's actual figures is done afterwards, in code.
 A cap expressed in RUPEES rather than as a percentage of the sum insured
 ("twenty five thousand rupees per eye") leaves all four fields null and belongs
 in monetary_limits, where it already goes.
+
+THE WINDOW AROUND A HOSPITAL STAY. Null on every clause that states none, which
+is almost all of them.
+- cover_window_value / cover_window_unit / cover_window_anchor: a clause that
+  pays for expenses only within a period before admission or after discharge.
+    "the sixty days immediately preceding the date of admission" -> 60, days, before_admission
+    "the ninety days immediately following the date of discharge" -> 90, days, after_discharge
+  That window counts from a hospital stay, not from when the policy began, so
+  it is never a waiting period and never goes in waiting_period_value.
 
 LIKELIHOOD (1-5) - how many policyholders this clause will actually touch:
   1  Almost nobody. War, nuclear perils, adventure sports.
@@ -256,6 +267,16 @@ arithmetic done later in code - exactly like the units above.
 
 room_rent_per_day_inr is the PER-DAY charge in plain rupees, never the total
 bill. "Four days at 12,000 a day" is 12000, not 48000.
+
+EXPENSES BEFORE OR AFTER A HOSPITAL STAY: how far from the stay, and which side.
+This counts from a HOSPITAL STAY, not from when the policy began - it is never
+the same number as policy_age.
+
+- "tests fifty days before I was admitted"  -> expense_timing_value: 50, expense_timing_unit: days, expense_timing_anchor: before_admission
+- "a scan 120 days after I was discharged"  -> 120, days, after_discharge
+- "physio for two months after I went home from hospital" -> 2, months, after_discharge
+- "a follow-up after I was discharged" (no number) -> null, null, after_discharge
+- nothing said about expenses before admission or after discharge -> all three null
 
 For pre_existing_condition, answer "unknown" unless the description makes it
 clear either way. "Unknown" is the honest answer far more often than not.
@@ -423,6 +444,7 @@ refusal, and never promise cover the clauses do not give.
 def render_reasoning_request(
     scenario: str, facts: dict, clauses,
     waiting_block: str = "", reduction_block: str = "",
+    window_block: str = "",
 ) -> str:
     """Build the reasoning prompt.
 
@@ -458,6 +480,10 @@ def render_reasoning_request(
 
     if waiting_block:
         lines += ["", waiting_block]
+    # Beside the waiting periods, because both answer "is this expense payable
+    # at all" - which has to be settled before "is it payable in full".
+    if window_block:
+        lines += ["", window_block]
     # After the waiting periods, because the two answer questions that come in
     # that order: first "is this claim payable at all", then "is it payable in
     # full". Reversing them puts a co-payment in front of a bar that means

@@ -59,7 +59,6 @@ async def test_constrained_output_stays_inside_our_taxonomy():
     result = await client.complete_json(
         _messages(PRE_EXISTING_CLAUSE),
         CLASSIFY_SCHEMA,
-        prompt_version="test-v1",
         use_cache=False,
     )
 
@@ -82,7 +81,6 @@ async def test_schema_forces_a_value_even_for_an_unrelated_clause():
     result = await client.complete_json(
         _messages("The quick brown fox jumps over the lazy dog."),
         CLASSIFY_SCHEMA,
-        prompt_version="test-v1",
         use_cache=False,
     )
     assert result["clause_type"] in ClauseType.values()
@@ -94,13 +92,13 @@ async def test_cache_returns_identical_result_and_skips_the_model():
 
     t0 = time.perf_counter()
     first = await client.complete_json(
-        _messages(PRE_EXISTING_CLAUSE), CLASSIFY_SCHEMA, prompt_version="test-cache"
+        _messages(PRE_EXISTING_CLAUSE), CLASSIFY_SCHEMA
     )
     cold_seconds = time.perf_counter() - t0
 
     t0 = time.perf_counter()
     second = await client.complete_json(
-        _messages(PRE_EXISTING_CLAUSE), CLASSIFY_SCHEMA, prompt_version="test-cache"
+        _messages(PRE_EXISTING_CLAUSE), CLASSIFY_SCHEMA
     )
     warm_seconds = time.perf_counter() - t0
 
@@ -113,21 +111,42 @@ async def test_cache_returns_identical_result_and_skips_the_model():
     )
 
 
-def test_prompt_version_changes_the_cache_key():
+def test_changing_the_prompt_text_changes_the_cache_key():
     """No Ollama needed: pure key logic.
 
     This is the guard against the most insidious bug in an LLM pipeline -
     editing a prompt, seeing no change, and concluding the model ignored you,
     when in fact a stale cache entry was served.
+
+    It used to be enforced by hashing PROMPT_VERSION into the key and relying on
+    everyone to bump it. It is now enforced by the prompt text itself, which
+    cannot be forgotten: reword a single character and the key changes.
     """
     msgs = _messages(PRE_EXISTING_CLAUSE)
-    k1 = cache.make_key("m", "v1", msgs, CLASSIFY_SCHEMA)
-    k2 = cache.make_key("m", "v2", msgs, CLASSIFY_SCHEMA)
-    k3 = cache.make_key("other-model", "v1", msgs, CLASSIFY_SCHEMA)
-    k4 = cache.make_key("m", "v1", msgs, {"type": "object"})
+    reworded = [dict(m) for m in msgs]
+    reworded[-1]["content"] = reworded[-1]["content"] + " "
+
+    k1 = cache.make_key("m", msgs, CLASSIFY_SCHEMA)
+    k2 = cache.make_key("m", reworded, CLASSIFY_SCHEMA)
+    k3 = cache.make_key("other-model", msgs, CLASSIFY_SCHEMA)
+    k4 = cache.make_key("m", msgs, {"type": "object"})
 
     assert len({k1, k2, k3, k4}) == 4, "cache key ignores an input that matters"
-    assert k1 == cache.make_key("m", "v1", msgs, CLASSIFY_SCHEMA), "key is unstable"
+    assert k1 == cache.make_key("m", msgs, CLASSIFY_SCHEMA), "key is unstable"
+
+
+def test_the_version_label_is_not_in_the_cache_key():
+    """An unchanged prompt must keep its stored answer across a version bump.
+
+    When the version was part of the key, bumping it for a change to ONE prompt
+    discarded the cached answer to EVERY prompt, so all 40 eval cases were
+    regenerated and each became a fresh chance for a nondeterministic model to
+    answer differently. A three-case change could not be told apart from noise.
+    """
+    import inspect
+
+    assert "prompt_version" not in inspect.signature(cache.make_key).parameters
+    assert "prompt_version" not in inspect.signature(client.complete_json).parameters
 
 
 def test_decode_options_change_the_cache_key():
@@ -136,7 +155,7 @@ def test_decode_options_change_the_cache_key():
     `num_ctx` truncates the prompt when it is too small; `num_predict` cuts the
     response short. Either produces a genuinely different result, so a cached
     entry from one setting must never be served for another - the same rule
-    `prompt_version` enforces for wording, applied to the parameters.
+    the message text enforces for wording, applied to the parameters.
 
     This was found the hard way: an uncapped `num_predict` let a generation run
     past three consecutive timeouts, and capping it would have been invisible to
@@ -145,12 +164,12 @@ def test_decode_options_change_the_cache_key():
     msgs = _messages(PRE_EXISTING_CLAUSE)
     base = {"temperature": 0.0, "num_ctx": 8192, "num_predict": 900}
 
-    key = cache.make_key("m", "v1", msgs, CLASSIFY_SCHEMA, base)
-    smaller_ctx = cache.make_key("m", "v1", msgs, CLASSIFY_SCHEMA, {**base, "num_ctx": 4096})
-    shorter_out = cache.make_key("m", "v1", msgs, CLASSIFY_SCHEMA, {**base, "num_predict": 100})
+    key = cache.make_key("m", msgs, CLASSIFY_SCHEMA, base)
+    smaller_ctx = cache.make_key("m", msgs, CLASSIFY_SCHEMA, {**base, "num_ctx": 4096})
+    shorter_out = cache.make_key("m", msgs, CLASSIFY_SCHEMA, {**base, "num_predict": 100})
 
     assert len({key, smaller_ctx, shorter_out}) == 3, "decode options are not in the key"
-    assert key == cache.make_key("m", "v1", msgs, CLASSIFY_SCHEMA, dict(base)), "key unstable"
+    assert key == cache.make_key("m", msgs, CLASSIFY_SCHEMA, dict(base)), "key unstable"
 
 
 def test_the_options_sent_are_the_options_hashed():
@@ -195,7 +214,6 @@ async def test_truncated_json_retries_with_a_higher_ceiling(monkeypatch):
     result = await llm_client.complete_json(
         _messages(PRE_EXISTING_CLAUSE),
         CLASSIFY_SCHEMA,
-        prompt_version="test-truncation",
         use_cache=False,
     )
 
@@ -228,7 +246,6 @@ async def test_transport_errors_are_retried_unchanged(monkeypatch):
     await llm_client.complete_json(
         _messages(PRE_EXISTING_CLAUSE),
         CLASSIFY_SCHEMA,
-        prompt_version="test-transport",
         use_cache=False,
     )
 

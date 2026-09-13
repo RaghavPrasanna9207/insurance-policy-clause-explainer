@@ -241,20 +241,31 @@ def test_not_raised_prints_nothing_at_all():
 
 def test_framing_is_sized_to_what_is_at_stake():
     """Nine lines explaining how reductions interact with a verdict earn their
-    space when a co-payment has been computed, and are noise when the only
-    content is "some caps exist, read them". A block that says nothing can
-    still change the answer if it says nothing at length."""
-    nothing_computed = render(evaluate([FakeClause("5.4")], {}, 1825))
-    assert "WHAT REDUCES THE PAYOUT" not in nothing_computed
-    assert nothing_computed.count("\n") == 0
-
+    space when a co-payment has actually been computed."""
     computed = render(evaluate([COPAY], {"age_at_policy_start": 67}, 1095))
     assert "WHAT REDUCES THE PAYOUT" in computed
 
 
-def test_judgement_clauses_share_one_line():
-    """Three "YOUR CALL" lines gave a reminder the visual weight of a result.
-    They carry no computed finding - the clause text is already in the prompt."""
-    block = render(evaluate([FakeClause("5.2"), FakeClause("5.4"), FakeClause("5.5")], {}, 1825))
-    assert block.count("\n") == 0
+def test_nothing_computed_says_nothing_at_all():
+    """When every arithmetic check returns NOT_RAISED and only JUDGEMENT
+    clauses survive, the block is EMPTY - not short, empty.
+
+    An earlier version emitted one line here naming the capped clauses and
+    telling the model to read them. It carried no computed finding and pointed
+    at clause text already present in the same prompt. Measured on the 40-case
+    scenario set it cost three cases: initial-waiting-period, dental-no-accident
+    and non-disclosure were each a confident, correct refusal without that line
+    and `insufficient_information` with it."""
+    assert render(evaluate([FakeClause("5.4")], {}, 1825)) == ""
+    assert render(evaluate([FakeClause("5.2"), FakeClause("5.4")], {}, 1825)) == ""
+
+
+def test_judgement_clauses_share_one_line_when_something_was_computed():
+    """Alongside a real finding the judgement clauses still appear, and still
+    share a single line. Three "YOUR CALL" lines gave a reminder the visual
+    weight of a result, which it is not - the clause text is already in the
+    prompt."""
+    clauses = [COPAY, FakeClause("5.2"), FakeClause("5.4"), FakeClause("5.5")]
+    block = render(evaluate(clauses, {"age_at_policy_start": 67}, 1095))
     assert "5.2, 5.4, 5.5" in block
+    assert block.count("Also capped by") == 1

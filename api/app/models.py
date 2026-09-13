@@ -88,6 +88,10 @@ class ClauseAnalysis(SQLModel, table=True):
     copay_min_age_at_inception: int | None = None
     cap_percent_of_sum_insured: int | None = None
     icu_cap_percent_of_sum_insured: int | None = None
+    # A cover window around one hospital stay, in days, and its side. See
+    # app/pipeline/window.py.
+    cover_window_days: int | None = None
+    cover_window_anchor: str | None = None
 
     # The model's two judgments (1-5), the only LLM input to the score.
     likelihood: int

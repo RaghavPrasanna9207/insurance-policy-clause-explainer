@@ -37,6 +37,7 @@ import asyncio
 import json
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -45,10 +46,10 @@ sys.path.insert(0, str(REPO_ROOT / "api"))
 from app.config import settings  # noqa: E402
 from app.grounding import verify_quote  # noqa: E402
 from app.llm.prompts import PROMPT_VERSION  # noqa: E402
-from app.llm import cache  # noqa: E402
+from app.llm import cache, client  # noqa: E402
 from app.pipeline.analyze import analyze  # noqa: E402
 from app.pipeline.ingest import ingest  # noqa: E402
-from app.pipeline.scenario import ShortlistClause, run_scenario  # noqa: E402
+from app.pipeline.scenario import ShortlistClause, extract_facts, run_scenario  # noqa: E402
 from app.pipeline.score import score  # noqa: E402
 from app.pipeline.segment import segment  # noqa: E402
 
@@ -85,16 +86,26 @@ async def build_clauses() -> list[ShortlistClause]:
                 copay_min_age_at_inception=analysis.copay_min_age_at_inception,
                 cap_percent_of_sum_insured=analysis.cap_percent_of_sum_insured,
                 icu_cap_percent_of_sum_insured=analysis.icu_cap_percent_of_sum_insured,
+                cover_window_days=analysis.cover_window_days,
+                cover_window_anchor=analysis.cover_window_anchor,
             )
         )
     return clauses
 
 
-async def run(use_cache: bool) -> dict:
+async def run(
+    use_cache: bool, only: list[str] | None = None, resample: bool = False
+) -> dict:
     if not use_cache:
         cache.clear()
 
     cases = json.loads(CASES_PATH.read_text(encoding="utf-8"))["cases"]
+    if only is not None:
+        known = {c["id"] for c in cases}
+        unknown = [i for i in only if i not in known]
+        if unknown:
+            raise SystemExit(f"unknown case id(s): {', '.join(unknown)}")
+        cases = [c for c in cases if c["id"] in only]
     print(f"model: {settings.model}")
     print("preparing policy...")
     clauses = await build_clauses()
@@ -106,7 +117,22 @@ async def run(use_cache: bool) -> dict:
     started = time.perf_counter()
     for index, case in enumerate(cases, 1):
         print(f"  [{index}/{len(cases)}] {case['id']}", flush=True)
-        result = await run_scenario(case["scenario"], clauses)
+        # Facts are extracted FIRST, outside the count, so the count below sees
+        # only the reasoning step - the one that produces the verdict.
+        #
+        # Counting every call over-reports. A change to the fact extractor's
+        # prompt regenerates every case's facts, and nearly every case still
+        # extracts the same facts, sends a byte-identical reasoning prompt, and
+        # gets its stored verdict back. That case could not have moved, but a
+        # count that included the fact call would have called it regenerated.
+        # run_scenario's own call to extract_facts is then a cache hit.
+        await extract_facts(case["scenario"])
+        calls_before = client.model_calls
+        result = await run_scenario(case["scenario"], clauses, resample=resample)
+        # True if the reasoning reached the model. False means the verdict is
+        # the stored bytes of an earlier run and cannot have moved. See
+        # compare_with_previous for why that distinction carries the eval.
+        fresh = client.model_calls > calls_before
 
         # Re-verify every quotation INDEPENDENTLY rather than trusting the flag
         # the pipeline set. A self-reported guarantee is not a measurement: if
@@ -147,6 +173,7 @@ async def run(use_cache: bool) -> dict:
             "why": case["why"],
             "truly_bad": truly_bad,
             "flagged_bad": flagged_bad,
+            "fresh": fresh,
         })
 
     elapsed = time.perf_counter() - started
@@ -164,6 +191,7 @@ async def run(use_cache: bool) -> dict:
         "num_predict": settings.num_predict,
         "seconds": round(elapsed, 1),
         "rows": rows,
+        "subset": only is not None,
         "verdict_accuracy": sum(r["verdict_ok"] for r in rows) / max(total, 1),
         "citation_recall": (
             sum(r["citation_ok"] for r in citable) / len(citable) if citable else 1.0
@@ -194,6 +222,255 @@ async def run(use_cache: bool) -> dict:
         "citable_count": len(citable),
         "total": total,
     }
+
+
+HISTORY_PATH = REPO_ROOT / "evals" / "run-history.json"
+HISTORY_KEEP = 10
+
+
+def load_history() -> list[dict]:
+    if not HISTORY_PATH.exists():
+        return []
+    try:
+        return json.loads(HISTORY_PATH.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        # A convenience record, not a result. A corrupted one is not worth
+        # failing an eval over; start again.
+        return []
+
+
+def record_run(res: dict) -> list[dict]:
+    """Append this run's per-case outcomes to the run history, and return it.
+
+    WHY A HISTORY FILE EXISTS AT ALL. This eval was compared against itself for
+    eight milestones on the assumption that running it twice gives the same
+    answer. It does not: three runs of identical code scored 0.725, 0.700 and
+    0.750. Every ordinary run already knows exactly which cases it got right,
+    so keeping that costs nothing, and it is what the comparison and stability
+    sections below are computed from.
+
+    `fresh` is recorded per case because a replayed answer is not a new
+    measurement. See stability_section for what went wrong without it.
+    """
+    history = load_history()
+    history.append({
+        "at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+        "prompt_version": PROMPT_VERSION,
+        "subset": res["subset"],
+        "verdict_accuracy": res["verdict_accuracy"],
+        "cases": {
+            r["id"]: {"got": r["got"], "fresh": r["fresh"]} for r in res["rows"]
+        },
+    })
+    history = history[-HISTORY_KEEP:]
+    HISTORY_PATH.write_text(json.dumps(history, indent=2), encoding="utf-8")
+    return history
+
+
+def unstable_cases(history: list[dict]) -> dict[str, list[str]]:
+    """Cases that produced more than one verdict across FRESH samples.
+
+    Replayed answers are skipped: they are copies of an earlier sample, and
+    counting a copy as agreement is how five identical-looking runs can be one
+    measurement repeated five times.
+    """
+    seen: dict[str, set[str]] = {}
+    for entry in history:
+        for case_id, outcome in entry["cases"].items():
+            if outcome["fresh"]:
+                seen.setdefault(case_id, set()).add(outcome["got"])
+    return {cid: sorted(v) for cid, v in seen.items() if len(v) > 1}
+
+
+def watchlist(cases: list[dict], history: list[dict]) -> list[str]:
+    """The cases worth re-running for a quick check: failing, or wobbly.
+
+    Derived from the history rather than written down, because a hand-kept list
+    of "the cases that fail" is out of date the moment something is fixed. The
+    cases that pass reliably are the ones a quick check can safely skip; the
+    full set is still run at milestones.
+    """
+    expected = {c["id"]: c["expected_verdict"] for c in cases}
+    latest: dict[str, str] = {}
+    for entry in history:
+        for case_id, outcome in entry["cases"].items():
+            latest[case_id] = outcome["got"]
+    failing = {cid for cid, got in latest.items() if got != expected.get(cid)}
+    wobbly = set(unstable_cases(history))
+    return [c["id"] for c in cases if c["id"] in failing | wobbly]
+
+
+def compare_with_previous(res: dict, history: list[dict]) -> dict:
+    """Split this run's cases by whether they COULD have changed.
+
+    THE PROBLEM THIS SOLVES. A prompt change used to be judged by comparing two
+    aggregate scores, and the aggregate moves by two or three cases between
+    runs of identical code. A two-case improvement and no improvement at all
+    looked the same.
+
+    But most of the noise is avoidable, because the cache is content-addressed.
+    A case whose every model request was answered from the cache sent exactly
+    the same text as before and got back exactly the stored bytes, so its
+    verdict cannot have moved - not "is unlikely to have", cannot. Only the
+    cases whose requests actually reached the model are new samples, and those
+    are precisely the cases the change touched.
+
+    So instead of one blended score, a change is reported as: how many cases it
+    reached, and of those, which were fixed and which were broken. The
+    untouched cases contribute no noise at all.
+
+    `history` must be the history BEFORE this run was recorded.
+    """
+    wobbly = unstable_cases(history)
+    out = {
+        "baseline": history[-1] if history else None,
+        "replayed": [], "drifted": [], "no_baseline": [],
+        "fixed": [], "broken": [], "still_right": [], "still_wrong": [],
+        "wobbly": wobbly,
+    }
+    for row in res["rows"]:
+        previous = next(
+            (e["cases"][row["id"]] for e in reversed(history) if row["id"] in e["cases"]),
+            None,
+        )
+        if previous is None:
+            out["no_baseline"].append(row["id"])
+            continue
+        if not row["fresh"]:
+            out["replayed"].append(row["id"])
+            # Replayed, yet different from the previous run: the stored answer
+            # came from some OTHER run than the one being compared against.
+            # Two ordinary causes - a change was reverted, so the old prompt's
+            # answers replay; or the cache was filled by a run that was never
+            # recorded (interrupted, or --no-report). Either way the named
+            # baseline is not where this answer came from, so it is surfaced
+            # rather than silently counted as a fix or a break.
+            if previous["got"] != row["got"]:
+                out["drifted"].append(row["id"])
+            continue
+        was_right = previous["got"] == row["expected"]
+        if row["verdict_ok"] and not was_right:
+            out["fixed"].append(row["id"])
+        elif was_right and not row["verdict_ok"]:
+            out["broken"].append(row["id"])
+        elif row["verdict_ok"]:
+            out["still_right"].append(row["id"])
+        else:
+            out["still_wrong"].append(row["id"])
+    return out
+
+
+def render_comparison(cmp: dict) -> str:
+    base = cmp["baseline"]
+    if base is None:
+        return (
+            "No earlier run on record, so there is nothing to compare against.\n"
+            "The next run will be compared with this one."
+        )
+
+    def names(ids: list[str]) -> str:
+        return ", ".join(
+            f"{i} (has wobbled before)" if i in cmp["wobbly"] else i for i in ids
+        )
+
+    regenerated = (
+        len(cmp["fixed"]) + len(cmp["broken"])
+        + len(cmp["still_right"]) + len(cmp["still_wrong"])
+    )
+    lines = [
+        f"Compared with the previous run ({base['at']}, {base['prompt_version']}):",
+        "",
+        f"  {len(cmp['replayed']):3} replayed from cache   same text sent, stored answer returned - cannot have moved",
+        f"  {regenerated:3} regenerated         the only cases this run could have changed",
+    ]
+    if regenerated:
+        lines += [
+            f"        fixed        {len(cmp['fixed']):3}  {names(cmp['fixed'])}",
+            f"        broken       {len(cmp['broken']):3}  {names(cmp['broken'])}",
+            f"        still right  {len(cmp['still_right']):3}",
+            f"        still wrong  {len(cmp['still_wrong']):3}",
+        ]
+    if cmp["drifted"]:
+        lines += [
+            "",
+            f"  NOTE: {len(cmp['drifted'])} replayed case(s) differ from the previous run:",
+            f"  {', '.join(cmp['drifted'])}",
+            "  Their stored answers come from an earlier run than the one named",
+            "  above - usually because a change was reverted and the old prompt's",
+            "  answers replayed, or because an unrecorded run filled the cache.",
+            "  They are not counted as fixed or broken.",
+        ]
+    if cmp["no_baseline"]:
+        lines.append(f"\n  {len(cmp['no_baseline'])} case(s) never run before: {', '.join(cmp['no_baseline'])}")
+    if regenerated:
+        lines += [
+            "",
+            "  A regenerated case is ONE sample from a model that does not answer",
+            "  identically twice. Before believing a fix or break, ask again:",
+            "      --only <ids> --resample",
+            "  A plain --only re-run replays the stored answer, which is a copy,",
+            "  not a second opinion.",
+        ]
+    return "\n".join(lines)
+
+
+def stability_section(history: list[dict]) -> str:
+    """Report which cases answer consistently, and which are coin flips.
+
+    COUNTING ONLY FRESH SAMPLES, which the first version of this function did
+    not do. It counted every recorded run, and a run served entirely from the
+    cache copies the previous run's answers exactly - so two recorded runs
+    where the second was a replay reported "every case stable across 2 runs"
+    from what was really one measurement. Copies always agree with the thing
+    they copy. A case is only called stable here once it has been generated
+    fresh at least twice.
+    """
+    full_runs = [e for e in history if not e["subset"]]
+    fresh_counts: dict[str, int] = {}
+    for entry in history:
+        for case_id, outcome in entry["cases"].items():
+            if outcome["fresh"]:
+                fresh_counts[case_id] = fresh_counts.get(case_id, 0) + 1
+    measured = sorted(cid for cid, n in fresh_counts.items() if n >= 2)
+    wobbly = unstable_cases(history)
+
+    lines = ["## Stability", ""]
+    if not measured:
+        lines.append(
+            "No case has been generated fresh more than once yet, so nothing can "
+            "be said about stability. Replayed runs do not count - they return "
+            "stored answers. Run with `--no-cache`, or change something, and "
+            "this section fills in."
+        )
+        return "\n".join(lines) + "\n"
+
+    if len(full_runs) >= 2:
+        accs = [e["verdict_accuracy"] for e in full_runs]
+        lines += [
+            f"Full runs on record: {len(full_runs)}. "
+            f"Verdict accuracy ranged **{min(accs):.3f} - {max(accs):.3f}**.",
+            "",
+        ]
+    lines += [
+        f"**{len(measured)}** cases have at least two fresh samples. "
+        f"Of those, **{len(wobbly)}** gave different verdicts on different runs.",
+        "",
+    ]
+    if wobbly:
+        lines += [
+            "A case listed here is not a result: whether it counts as correct "
+            "depends on which run you look at. A change worth fewer cases than "
+            "this list cannot be measured by comparing aggregate scores.",
+            "",
+            "| Case | Verdicts seen | Fresh samples |",
+            "|---|---|---:|",
+        ]
+        for case_id, seen in sorted(wobbly.items()):
+            lines.append(
+                f"| `{case_id}` | {', '.join(f'`{v}`' for v in seen)} | "
+                f"{fresh_counts[case_id]} |"
+            )
+    return "\n".join(lines) + "\n"
 
 
 def report(res: dict) -> str:
@@ -279,12 +556,43 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--no-cache", action="store_true")
     parser.add_argument("--no-report", action="store_true")
+    parser.add_argument(
+        "--only",
+        help="comma-separated case ids to run, e.g. --only non-disclosure,late-notice",
+    )
+    parser.add_argument(
+        "--resample", action="store_true",
+        help="answer the reasoning step afresh instead of replaying the cache "
+             "(combine with --only or --watchlist to test whether a verdict is stable)",
+    )
+    parser.add_argument(
+        "--watchlist", action="store_true",
+        help="run only the cases that failed or wobbled in the recorded history",
+    )
     args = parser.parse_args()
 
-    res = asyncio.run(run(use_cache=not args.no_cache))
+    # Read before this run is recorded: the comparison is against what came
+    # BEFORE, and the watchlist is chosen from it.
+    history = load_history()
+    cases = json.loads(CASES_PATH.read_text(encoding="utf-8"))["cases"]
+
+    only = None
+    if args.only:
+        only = [i.strip() for i in args.only.split(",") if i.strip()]
+    elif args.watchlist:
+        only = watchlist(cases, history)
+        if not only:
+            print("The watchlist is empty: no recorded failures or wobbles.")
+            return
+        print(f"watchlist: {len(only)} of {len(cases)} cases\n")
+
+    res = asyncio.run(
+        run(use_cache=not args.no_cache, only=only, resample=args.resample)
+    )
 
     print()
-    print(f"  verdict accuracy : {res['verdict_accuracy']:.3f}")
+    scope = f"  ({res['total']}-case subset)" if res["subset"] else ""
+    print(f"  verdict accuracy : {res['verdict_accuracy']:.3f}{scope}")
     print(f"  citation recall  : {res['citation_recall']:.3f} "
           f"({res['citable_count']} cases)")
     print(f"  false citations  : {res['false_citation_rate']:.3f} "
@@ -296,11 +604,28 @@ def main() -> None:
     for row in res["rows"]:
         flag = "  " if row["verdict_ok"] else "<-"
         ground = "" if row["grounded"] else "  UNGROUNDED"
-        print(f"  {flag} {row['id']:26} {row['expected']:26} got {row['got']}{ground}")
+        source = "" if row["fresh"] else "  (replayed)"
+        print(f"  {flag} {row['id']:26} {row['expected']:26} got {row['got']}{ground}{source}")
+
+    comparison = render_comparison(compare_with_previous(res, history))
+    print()
+    print(comparison)
 
     if not args.no_report:
-        REPORT_PATH.write_text(report(res), encoding="utf-8")
-        print(f"\nwrote {REPORT_PATH.relative_to(REPO_ROOT)}")
+        history = record_run(res)
+        # A subset run is recorded - its fresh samples are real measurements -
+        # but it does not overwrite the full report, which would otherwise
+        # silently start describing 13 cases under a heading about 40.
+        if not res["subset"]:
+            REPORT_PATH.write_text(
+                report(res)
+                + "\n---\n\n## Compared with the previous run\n\n```\n"
+                + comparison
+                + "\n```\n\n---\n\n"
+                + stability_section(history),
+                encoding="utf-8",
+            )
+            print(f"\nwrote {REPORT_PATH.relative_to(REPO_ROOT)}")
 
 
 if __name__ == "__main__":

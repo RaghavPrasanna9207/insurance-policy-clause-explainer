@@ -280,6 +280,14 @@ def main() -> None:
     print("2/2  scenario simulator")
     print("=" * 60)
     scenario = asyncio.run(run_scenario_eval.run(use_cache=use_cache))
+    # Recorded like any other scenario run, so a full report run counts toward
+    # the history that comparisons and stability are computed from.
+    comparison = run_scenario_eval.render_comparison(
+        run_scenario_eval.compare_with_previous(
+            scenario, run_scenario_eval.load_history()
+        )
+    )
+    run_scenario_eval.record_run(scenario)
 
     seconds = time.perf_counter() - started
     REPORT_PATH.write_text(build(classification, scenario, seconds), encoding="utf-8")
@@ -297,6 +305,8 @@ def main() -> None:
           f"{'OK' if scenario['detection_integrity'] >= 1.0 else 'FAILED - guarantee broken'}")
     print("=" * 60)
     print(f"wrote {REPORT_PATH.relative_to(REPO_ROOT)} in {seconds:.0f}s")
+    print()
+    print(comparison)
 
     # A non-zero exit if the guarantee is broken, so this can gate a pipeline.
     # The quality numbers deliberately do NOT gate: they are allowed to be poor,

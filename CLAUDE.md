@@ -104,7 +104,7 @@ That last row is load-bearing for the whole grounding design. **Every categorica
 - **Backend** `api/` — FastAPI · SQLModel · PyMuPDF · httpx · pytest. Python 3.12.
 - **Frontend** `web/` — Vite · React · TypeScript · Tailwind.
 - **Evals** `evals/` — the portfolio differentiator. Anyone can ship an LLM wrapper; the eval harness shows engineering judgment. Model and prompt changes are justified by eval numbers, never by vibes.
-- **Prompts** live in `api/app/llm/prompts.py` with a `PROMPT_VERSION`. Bump it when a prompt changes — the LLM cache keys on it, so stale results are never silently reused.
+- **Prompts** live in `api/app/llm/prompts.py` with a `PROMPT_VERSION`. Bump it when a prompt changes — it labels eval reports, the run history and stored analyses. It is **not** part of the cache key: the cache hashes the exact prompt text, schema, model and options, so a reworded prompt never gets a stale answer and an unchanged one keeps its stored answer. That is what lets an eval isolate a change to the cases it actually touched.
 - **Never commit real insurer policy PDFs** (licensing). Evals run on a synthetic policy authored for this repo; real wordings are fetched by script.
 
 ## Non-negotiable: this is not advice

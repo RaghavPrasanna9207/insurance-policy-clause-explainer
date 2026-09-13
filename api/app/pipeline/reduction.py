@@ -359,19 +359,21 @@ def render(checks: list[ReductionCheck]) -> str:
     if not applies and not unknown and not ruled_out and not judgement:
         return ""
 
-    # THE FRAMING IS SIZED TO WHAT IS AT STAKE. Nine lines explaining how
-    # reductions interact with a verdict are worth their space when a
-    # co-payment has actually been computed, and are pure noise on a question
-    # about a broken hip where the only content is "some caps exist, read
-    # them". Emitting the heavy preamble regardless is how a block that says
-    # nothing still changes the answer.
+    # NOTHING WAS COMPUTED, SO NOTHING IS SAID. Reaching here means every
+    # arithmetic check returned NOT_RAISED - the question named no amount, no
+    # room and no age - and the only survivors are JUDGEMENT clauses, whose
+    # full text is already in this same prompt a few hundred tokens below.
+    #
+    # An earlier version emitted one line here reminding the model that those
+    # clauses cap what they name. It carried no computed finding and repeated
+    # nothing the model could not already read, and it cost three cases:
+    # initial-waiting-period, dental-no-accident and non-disclosure were each
+    # a confident, correct refusal without it and `insufficient_information`
+    # with it. A line that adds no information still adds emphasis, and
+    # emphasis is not free.
     computed = applies or unknown or ruled_out
     if not computed:
-        return (
-            f"- Note: clauses {', '.join(c.clause_id for c in judgement)} cap "
-            f"what is paid for the treatments they name. Read them; if this "
-            f"treatment is not one of them, they decide nothing here."
-        )
+        return ""
 
     lines = [
         "WHAT REDUCES THE PAYOUT (arithmetic, not opinion).",

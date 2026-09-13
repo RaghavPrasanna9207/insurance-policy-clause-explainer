@@ -118,6 +118,31 @@ Rebuilding the scenario eval set, and a correct fix that measured worse.
 - **Concept 24: silence is not uncertainty** - "cannot be determined" about a room nobody mentioned manufactures doubt on nearly every question.
 - **Concept 25: the honest read on a fix that did not pay for itself** - net -2 cases, diagnosed to one specific line that carried no information and cost three cases.
 
+### M9 - The ruler was made of rubber, and two requests at once was why
+The eval harness had never been tested for reproducibility. It was not reproducible.
+
+- **The same code, measured three times, gave three numbers** - 0.725, 0.700, 0.750 on identical code and byte-identical prompts. Five of forty cases flip between runs; 27 always pass, 8 always fail.
+- **Concept 26: `temperature = 0` is not reproducibility** - it makes the SAMPLER deterministic, which is only half the sentence. The other half is "given the same logits", and a GPU does not reliably produce the same logits twice.
+- **Failure 22: the fix I was certain of, which changed nothing** - pinning the seed. At temperature 0 nothing draws from the random generator, so seeding it is seeding a die that is never rolled.
+- **Failure 23: claiming the cause after one observation each way** - one failure at concurrency 2 and one pass at concurrency 1 is two coin flips, not a diagnosis. Six repeats each settled it.
+- **Concept 27: float addition is not associative, and that is a product bug** - batching two requests together changes the order the matmul partial sums are combined, which changes the last bits of a logit, which flips a near-tie. The same policy was being rewritten differently on each upload.
+- **Concept 28: measure the cost of the safe choice first** - serialising "obviously" halves throughput. Measured, it cost 9%: one request already saturates an 8GB card.
+- **Failure 24: the residual, and a second fix that measured nothing** - serialising did not finish the job. Two fresh runs still score 0.650 and 0.675. The first substantive generation of a process differs from every one after it; a real warm-up call was tried, measured to change nothing, and reverted. Recorded as open.
+
+### M10 - Measuring only what changed, and a third family of arithmetic
+Making the eval measure a change despite a model that never answers twice the same way, and fixing a case that failed in every run.
+
+- **Repeat is not sequence** - asking one question twice gave one answer; asking forty questions twice changed 7 of 10 at the level the metrics read. Test the property your conclusion depends on.
+- **Concept 29: the cache as a controlled experiment** - a content-addressed cache replays the stored bytes of any prompt that did not change, so those cases cannot have moved. Only the cases a change reached are regenerated. A one-word change reaching 2 cases: 38 replayed, 2 regenerated, exactly as predicted.
+- **Failure 25: the cache's row count lies** - a truncated answer retried with a larger limit is stored under a key nothing looks up, so "did the table grow" misses regenerations. Count model calls instead.
+- **Failure 26: counting the wrong calls** - counting fact extraction made every case look regenerated. Only the reasoning call decides a verdict.
+- **Failure 27: advice that confirmed a result with a copy of itself** - "re-run with --only" replayed the answer being doubted. Hence `--resample`.
+- **Concept 30: a version label is not a cache key** - hashing PROMPT_VERSION was redundant for safety and forced every case to regenerate on every change. Now a label only.
+- **The fix: a cover window, decided in code** - "is a scan 120 days after discharge inside a 90-day window" taken away from the model, with an anchor so before-admission and after-discharge are never compared.
+- **Failure 28: one paragraph reclassified clauses it never mentioned** - a note and a field description dropped classification from 1.000 to 0.919. The same text in a different position broke nothing. Check a prompt edit against everything the prompt does.
+- **Failure 29: a correct fix that measured net negative** - the fact extractor leaked a verdict through a free-text `notes` field. Removing the field fixed one case, broke three, and cost citations. Reverted; recorded as open.
+- **Failure 30: a warning that blamed a cause that did not exist** - reverting a change replays older answers, which the comparison had mistaken for an unrecorded run.
+
 ---
 
 ## Related documents

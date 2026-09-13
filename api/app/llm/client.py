@@ -37,6 +37,24 @@ from app.llm import cache
 
 log = logging.getLogger(__name__)
 
+# How many requests have actually been sent to the model in this process, as
+# opposed to answered from the cache.
+#
+# The eval harness reads this before and after each case to learn whether that
+# case's answer was GENERATED or REPLAYED. That distinction is what lets a
+# prompt change be measured against only the cases it touched: a replayed
+# answer is the exact stored bytes of an earlier run, so it cannot have moved,
+# while a generated one is a fresh sample from a model that does not answer
+# identically twice.
+#
+# Counted here rather than inferred from the cache's row count, because the
+# row count lies in one case. A response truncated mid-JSON is retried with a
+# larger `num_predict` and stored under a key built from THOSE options - a key
+# the next lookup never asks for. On the next run that request misses, is
+# regenerated, and overwrites its own row, so the table does not grow and a
+# regenerated answer would look replayed.
+model_calls = 0
+
 
 class LlmError(RuntimeError):
     """Raised when the model cannot produce usable output after retries."""
@@ -45,7 +63,6 @@ class LlmError(RuntimeError):
 async def complete_json(
     messages: list[dict[str, str]],
     schema: dict[str, Any],
-    prompt_version: str,
     *,
     model: str | None = None,
     use_cache: bool = True,
@@ -59,11 +76,14 @@ async def complete_json(
     model = model or settings.model
     options = _decode_options()
 
-    key = cache.make_key(model, prompt_version, messages, schema, options)
+    key = cache.make_key(model, messages, schema, options)
     if use_cache:
         if (hit := cache.get(key)) is not None:
             log.debug("llm cache hit %s", key[:12])
             return hit
+
+    global model_calls
+    model_calls += 1
 
     last_error: Exception | None = None
     for attempt in range(1, max_attempts + 1):
@@ -74,7 +94,7 @@ async def complete_json(
                 # Keyed on the options that actually produced this answer, which
                 # may not be the ones we started with (see the escalation below).
                 cache.put(
-                    cache.make_key(model, prompt_version, messages, schema, options),
+                    cache.make_key(model, messages, schema, options),
                     model,
                     parsed,
                 )
@@ -131,6 +151,10 @@ def _decode_options() -> dict[str, Any]:
     """
     return {
         "temperature": settings.temperature,
+        # Pinned, not omitted. A system whose premise is reproducibility should
+        # not leave an input unspecified - but see config.seed: this was
+        # measured to fix nothing on its own.
+        "seed": settings.seed,
         # Without an explicit window Ollama applies its own 4,096 default, well
         # under this project's 32k assumption, and truncates silently.
         "num_ctx": settings.num_ctx,

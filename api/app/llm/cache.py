@@ -4,10 +4,23 @@ Analysing a 200-clause policy takes 2-5 minutes. Without a cache, every prompt
 tweak means re-running all 200 clauses to see the effect on the handful you
 actually changed. With one, only genuinely-new work costs time.
 
-The cache is keyed by a hash of *everything that could change the answer*:
-model, prompt version, messages, and the JSON schema. That makes stale reuse
-impossible by construction - if any input differs, the key differs, so there is
-no manual "remember to clear the cache" step to forget.
+The cache is keyed by a hash of *everything the model actually receives*: the
+model name, the messages, the JSON schema and the decoding options. That makes
+stale reuse impossible by construction - if any input differs, the key differs,
+so there is no manual "remember to clear the cache" step to forget.
+
+PROMPT_VERSION IS DELIBERATELY NOT PART OF THE KEY, though it used to be. It was
+redundant for safety: a reworded prompt is different message text, so it
+already gets a different key. What it did add was harm. Bumping the version on
+any prompt change discarded every cached answer, including the ones whose
+prompts had not changed at all - so every change regenerated all 40 eval cases,
+and a model that does not answer identically twice turned each of them into a
+fresh chance to wobble. A change touching three cases could not be told apart
+from noise across forty.
+
+Keyed on content alone, an unchanged prompt replays its stored answer and only
+the cases a change actually reached are regenerated. The version survives as a
+label in reports and the eval history, which is what it is good for.
 
 It lives in its own SQLite file rather than the app database so that
 `rm data/llm_cache.db` resets model outputs without touching uploaded documents.
@@ -49,7 +62,6 @@ def _connect() -> sqlite3.Connection:
 
 def make_key(
     model: str,
-    prompt_version: str,
     messages: list[dict[str, str]],
     schema: dict[str, Any] | None,
     options: dict[str, Any] | None = None,
@@ -60,8 +72,8 @@ def make_key(
     merely the runtime. `num_ctx` truncates the prompt when it is too small and
     `num_predict` cuts the response short - both produce a genuinely different
     answer, so a cached result from one setting must never be served for
-    another. This is the same rule `prompt_version` exists to enforce, applied
-    to the parameters rather than the words.
+    another. The same rule the messages enforce for wording, applied to the
+    parameters rather than the words.
 
     sort_keys=True matters: Python preserves dict insertion order, so two
     logically identical schemas built in a different field order would otherwise
@@ -70,7 +82,6 @@ def make_key(
     payload = json.dumps(
         {
             "model": model,
-            "prompt_version": prompt_version,
             "messages": messages,
             "schema": schema,
             "options": options or {},

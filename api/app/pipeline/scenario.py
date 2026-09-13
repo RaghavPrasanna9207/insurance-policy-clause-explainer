@@ -42,12 +42,11 @@ from app.grounding import QuoteCheck, verify_citations
 from app.llm import client
 from app.llm.prompts import (
     FACTS_SYSTEM,
-    PROMPT_VERSION,
     REASON_SYSTEM,
     render_reasoning_request,
     render_scenario,
 )
-from app.pipeline import reduction, waiting
+from app.pipeline import reduction, waiting, window
 from app.taxonomy import Verdict
 
 log = logging.getLogger(__name__)
@@ -86,6 +85,20 @@ def policy_age_days(facts: dict[str, Any]) -> int | None:
     """
     value = facts.get("policy_age_value")
     unit = facts.get("policy_age_unit")
+    if not value or value <= 0 or unit not in _DAYS_PER_UNIT:
+        return None
+    return value * _DAYS_PER_UNIT[unit]
+
+
+def expense_offset_days(facts: dict[str, Any]) -> int | None:
+    """How many days before admission or after discharge an expense fell.
+
+    The same conversion as `policy_age_days`, applied to a different
+    measurement: this one counts from a hospital stay, not from the day the
+    policy began. None when unstated, never a default.
+    """
+    value = facts.get("expense_timing_value")
+    unit = facts.get("expense_timing_unit")
     if not value or value <= 0 or unit not in _DAYS_PER_UNIT:
         return None
     return value * _DAYS_PER_UNIT[unit]
@@ -143,6 +156,10 @@ class ShortlistClause:
     copay_min_age_at_inception: int | None = None
     cap_percent_of_sum_insured: int | None = None
     icu_cap_percent_of_sum_insured: int | None = None
+    # A cover window around one hospital stay, in days, and which side of the
+    # stay it counts from. See app/pipeline/window.py.
+    cover_window_days: int | None = None
+    cover_window_anchor: str | None = None
 
 
 @dataclass
@@ -222,6 +239,22 @@ FACTS_SCHEMA: dict[str, Any] = {
         # percentages of the same sum insured.
         "room_rent_per_day_inr": {"type": ["integer", "null"]},
         "room_is_icu": {"type": ["boolean", "null"]},
+        # WHEN AN EXPENSE FELL RELATIVE TO A HOSPITAL STAY: a value, a unit,
+        # and which side of the stay. "A scan 120 days after I was discharged"
+        # is (120, days, after_discharge). The model reports the sentence;
+        # window.py compares it against the policy's window. Kept apart from
+        # policy_age because the two count from different starting points,
+        # and the anchor is an enum so "after discharge" cannot be paraphrased
+        # into something the comparison does not recognise.
+        "expense_timing_value": {"type": ["integer", "null"]},
+        "expense_timing_unit": {
+            "type": ["string", "null"],
+            "enum": ["days", "weeks", "months", "years", None],
+        },
+        "expense_timing_anchor": {
+            "type": ["string", "null"],
+            "enum": ["before_admission", "after_discharge", None],
+        },
         "pre_existing_condition": {
             "type": "string",
             "enum": ["yes", "no", "unknown"],
@@ -234,6 +267,7 @@ FACTS_SCHEMA: dict[str, Any] = {
         "age", "age_at_policy_start", "hospitalised", "hours_since_admission",
         "estimated_cost_inr", "sum_insured_value", "sum_insured_unit",
         "room_rent_per_day_inr", "room_is_icu",
+        "expense_timing_value", "expense_timing_unit", "expense_timing_anchor",
         "pre_existing_condition", "notes",
     ],
 }
@@ -246,7 +280,6 @@ async def extract_facts(scenario: str) -> dict[str, Any]:
             {"role": "user", "content": render_scenario(scenario)},
         ],
         FACTS_SCHEMA,
-        prompt_version=PROMPT_VERSION,
     )
 
 
@@ -346,6 +379,7 @@ async def reason(
     clauses: list[ShortlistClause],
     *,
     nudge_citations: bool = False,
+    use_cache: bool = True,
 ) -> dict[str, Any]:
     ids = [c.clause_id for c in clauses]
     held = policy_age_days(facts)
@@ -360,6 +394,11 @@ async def reason(
     # whether it is paid IN FULL. Only the first question was being asked, so
     # a senior citizen was told "covered" while losing a fifth of the claim.
     cuts = reduction.evaluate(clauses, facts, held)
+    # The third family: whether an expense before admission or after discharge
+    # fell inside the policy's window. Silent unless the person raised it.
+    windows = window.evaluate(
+        clauses, facts.get("expense_timing_anchor"), expense_offset_days(facts)
+    )
     messages = [
         {"role": "system", "content": REASON_SYSTEM},
         {
@@ -367,6 +406,7 @@ async def reason(
             "content": render_reasoning_request(
                 scenario, facts, clauses,
                 waiting.render(checks), reduction.render(cuts),
+                window.render(windows),
             ),
         },
     ]
@@ -376,7 +416,7 @@ async def reason(
         # response that failed.
         messages.append({"role": "user", "content": CITATION_NUDGE})
     return await client.complete_json(
-        messages, _reasoning_schema(ids), prompt_version=PROMPT_VERSION
+        messages, _reasoning_schema(ids), use_cache=use_cache,
     )
 
 
@@ -392,9 +432,16 @@ insufficient_information."""
 
 
 async def run_scenario(
-    scenario: str, clauses: list[ShortlistClause]
+    scenario: str, clauses: list[ShortlistClause], *, resample: bool = False
 ) -> ScenarioResult:
-    """Answer one scenario against one policy."""
+    """Answer one scenario against one policy.
+
+    `resample` bypasses the cache for the REASONING step only, so the same
+    prompt is answered afresh while the facts stay as extracted. It exists for
+    the eval: a cached answer re-read is a copy, not a second opinion, and the
+    only way to learn whether a verdict is stable is to ask again. Nothing
+    resampled is written back, so the stored answer remains the baseline.
+    """
     facts = await extract_facts(scenario)
     missing = [k for k in DECISIVE_FACTS if facts.get(k) in (None, "", "unknown")]
 
@@ -407,7 +454,7 @@ async def run_scenario(
             missing_facts=missing,
         )
 
-    payload = await reason(scenario, facts, considered)
+    payload = await reason(scenario, facts, considered, use_cache=not resample)
 
     # 5d: verification. Every quotation must actually occur in the clause it
     # was attributed to.
@@ -440,7 +487,10 @@ async def run_scenario(
     # answer over a formatting slip. One pointed retry recovers it.
     if verdict != Verdict.INSUFFICIENT_INFORMATION and not citations:
         log.info("verdict %s arrived with no citations; retrying once", verdict)
-        payload = await reason(scenario, facts, considered, nudge_citations=True)
+        payload = await reason(
+            scenario, facts, considered, nudge_citations=True,
+            use_cache=not resample,
+        )
         raw_citations = payload.get("deciding_clauses", [])
         checks = verify_citations(raw_citations, source_by_id)
         citations = [

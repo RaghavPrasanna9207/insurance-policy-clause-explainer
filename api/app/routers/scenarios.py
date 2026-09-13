@@ -73,6 +73,8 @@ async def create_scenario(
                 icu_cap_percent_of_sum_insured=(
                     analysis.icu_cap_percent_of_sum_insured
                 ),
+                cover_window_days=analysis.cover_window_days,
+                cover_window_anchor=analysis.cover_window_anchor,
             )
         )
         meta[citation_id] = (clause.id, clause.number, clause.heading, clause.page_start + 1)
