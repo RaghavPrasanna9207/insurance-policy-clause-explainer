@@ -9,9 +9,12 @@ The obvious architecture for "answer a question about a document" is retrieval:
 embed the clauses, embed the question, fetch the top k. This project does not,
 and the reason is arithmetic rather than taste.
 
-A health policy has roughly 40 clauses averaging ~150 tokens, so the ENTIRE
-document is about 6,000 tokens. qwen2.5 has a 32,000-token context. Every clause
-that could possibly matter fits in a single prompt with room to spare.
+The synthetic golden policy has 39 clauses and is about 3,100 tokens. The
+context window is set to 8,192 (`settings.num_ctx`; qwen2.5 supports 32,768, but
+16,384 was measured to exhaust this machine's memory), leaving
+`settings.scenario_token_budget` for clause text. On that policy every clause
+that could possibly matter fits in a single prompt with room to spare. Whether
+that holds for a real insurer's wording has not yet been measured.
 
 Given that, retrieval could only make the answer worse. Top-k means choosing a
 k, and any k below "all of them" can drop the one clause that decides the case -
@@ -19,8 +22,8 @@ which in this domain means confidently telling someone they are covered because
 the exclusion did not make the cut. Retrieval solves a problem this document
 does not have, and introduces a failure mode it did not previously have.
 
-So `shortlist()` sorts by impact and takes everything that fits the budget. On a
-normal policy that is all of it. The impact ordering only starts to matter for a
+So `shortlist()` sorts by impact and takes everything that fits the budget. On the
+golden policy that is all of it. The impact ordering only starts to matter for a
 document large enough to overflow the context, and then it keeps the clauses
 most likely to cost the reader money.
 
@@ -340,9 +343,9 @@ def shortlist(
 ) -> list[ShortlistClause]:
     """Choose which clauses the reasoning step sees.
 
-    Sorted by impact, then truncated to fit the context budget. On a normal
+    Sorted by impact, then truncated to fit the context budget. On the golden
     policy nothing is dropped at all - the whole document fits. The ordering
-    exists so that if a very large document ever does overflow, what survives
+    exists so that if a larger document does overflow, what survives
     is the clauses most likely to cost the reader money, rather than whichever
     ones happened to come first.
 

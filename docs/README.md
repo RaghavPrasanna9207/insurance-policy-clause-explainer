@@ -186,6 +186,7 @@ Held-out scenario batches, and what they said: about 0.83-0.85 on unseen questio
 - **Failure 43: a retry that talked right answers out of themselves** - turned into a filter that removes an unsupported citation and can never change a verdict.
 - **Failure 44: a fallback that destroyed a corrected answer** - the retry fixed the verdict and not the label, and the safety fallback threw the answer away.
 - **Failure 45: blaming the last change for a drop that was sampling** - check a change can reach the cases that moved before attributing the movement to it.
+- **Failure 46: a report that misdescribed its own run** - a commit stamp that could not say the tree was dirty, and a generated sentence describing a cache key M10 had removed. Plus a check of the fix that ran the old code: setting up a clean tree had removed the change under test.
 
 ---
 

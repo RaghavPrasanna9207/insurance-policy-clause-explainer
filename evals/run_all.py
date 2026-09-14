@@ -40,12 +40,25 @@ REPORT_PATH = REPO_ROOT / "evals" / "REPORT.md"
 
 
 def _git_commit() -> str:
+    """The commit the numbers came from, marked `-dirty` if they did not.
+
+    A bare HEAD hash claims the run used exactly that commit's code. With
+    uncommitted edits it did not: the M14 report was stamped `2da3dd6` while
+    measuring M14 changes that only existed in the working tree.
+
+    REPORT.md itself is excluded, because this script rewrites it - otherwise
+    the second run on a clean commit would always call itself dirty.
+    """
     try:
-        out = subprocess.run(
+        head = subprocess.run(
             ["git", "rev-parse", "--short", "HEAD"],
             cwd=REPO_ROOT, capture_output=True, text=True, check=True,
-        )
-        return out.stdout.strip()
+        ).stdout.strip()
+        changes = subprocess.run(
+            ["git", "status", "--porcelain", "--", ".", ":(exclude)evals/REPORT.md"],
+            cwd=REPO_ROOT, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        return f"{head}-dirty" if changes else head
     except Exception:
         return "unknown"
 
@@ -55,8 +68,8 @@ def _cache_note(seconds: float) -> str:
 
     A report showing "0s" invites the reader to think this eval is free. It is
     not - a cold run is several minutes of local inference. It is only instant
-    because every response was already cached under an identical model, prompt
-    version, schema and decoding configuration.
+    because every response was already cached under an identical model,
+    messages, schema and decoding configuration.
     """
     if seconds < 20:
         return " (served from cache; a cold run takes several minutes)"
@@ -301,9 +314,11 @@ def build(classification: dict, scenario: dict, seconds: float,
         "",
         "The golden PDF is generated, not committed, so it is rebuilt from",
         "`evals/golden/build_synthetic_policy.py` if missing. Model responses are",
-        "cached by a hash of model, prompt version, messages, schema and decoding",
-        "settings, so a second run costs seconds - and changing any of those",
-        "recomputes rather than serving a stale answer.",
+        "cached by a hash of model, messages, schema and decoding settings, so a",
+        "second run costs seconds - and changing any of those recomputes rather",
+        "than serving a stale answer. The prompt version is a label, not part of",
+        "the key: an unchanged prompt replays its stored answer even after the",
+        "version is bumped, so only the cases a change reached are regenerated.",
         "",
     ]
     return "\n".join(lines)
