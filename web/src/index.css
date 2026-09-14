@@ -6,7 +6,8 @@
 @custom-variant dark (&:where(.dark, .dark *));
 
 /* ---------------------------------------------------------------------------
-   Design tokens. See DESIGN.md for the reasoning behind every value here.
+   Design tokens. The reasoning behind the palette and type is in the M4 entry
+   of docs/LEARNING-LOG.md.
 
    Defined as plain CSS variables on :root and overridden on .dark, then mapped
    into Tailwind with `@theme inline`. The `inline` keyword matters: it makes

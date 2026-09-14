@@ -49,7 +49,7 @@ export function RiskCard({
 
           {/* The severity signal: hue AND text AND a number, together.
               The number appears inline below `sm` because the rail is hidden
-              at that width - and DESIGN.md requires severity to always carry a
+              at that width - and the design rules require severity to always carry a
               numeral, so hiding the rail must not take the score with it. */}
           <p className={`mt-1 flex items-baseline gap-2 text-[12px] font-medium ${band.text}`}>
             {meta.consequence}

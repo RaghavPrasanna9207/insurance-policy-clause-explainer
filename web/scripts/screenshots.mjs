@@ -3,7 +3,7 @@
  * against a real policy.
  *
  * Why this is a committed script rather than a one-off: a design you have not
- * looked at has not been reviewed. DESIGN.md forbids a specific list of
+ * looked at has not been reviewed. The design system forbids a specific list of
  * anti-patterns, and the only way to check the built UI against that list is to
  * see it. Keeping this runnable means the check is repeatable after any change.
  *

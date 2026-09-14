@@ -17,9 +17,10 @@ cd ../api && .venv/Scripts/python.exe -m uvicorn app.main:app --port 8000
 
 ## Before changing anything visual
 
-Read **[`../DESIGN.md`](../DESIGN.md)**. It defines the aesthetic direction, the
-type scale, the colour tokens, the 2px radius, the motion policy, and a list of
-forbidden anti-patterns.
+The interface follows a fixed design system: a document-like aesthetic, a
+four-face type scale, the colour tokens in `src/index.css`, a 2px radius,
+minimal functional motion, and no gradients, glassmorphism, centered heroes,
+bubble radius or Inter.
 
 Two rules are easy to break by accident:
 

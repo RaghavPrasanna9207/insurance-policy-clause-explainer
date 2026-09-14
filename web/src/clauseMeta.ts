@@ -8,7 +8,7 @@ import type { ClauseSummary, ClauseType } from './types'
  * middle state between denied and covered, and colouring it as a halfway point
  * would misrepresent it.
  *
- * `consequence` exists to satisfy the rule in DESIGN.md that severity is never
+ * `consequence` exists to satisfy the design rule that severity is never
  * carried by colour alone: every indicator pairs its hue with this text and
  * with the numeric impact score. A risk product that fails a colourblind
  * reader is a broken risk product.

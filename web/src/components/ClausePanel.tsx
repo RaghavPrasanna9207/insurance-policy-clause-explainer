@@ -8,7 +8,7 @@ import { stripNumber } from './RiskCard'
 /**
  * The clause reading view: our explanation beside the policy's own words.
  *
- * The typographic rule from DESIGN.md does the labelling here. Everything the
+ * The typographic rule does the labelling here. Everything the
  * app says is set in Instrument Sans; the verbatim policy text is set in
  * Source Serif 4 via the `.verbatim` class. Because the two voices look
  * different, the panel needs no "original wording" caption - the reader can

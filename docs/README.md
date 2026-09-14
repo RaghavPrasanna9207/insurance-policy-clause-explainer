@@ -64,7 +64,7 @@ Four screens, built to a written design system rather than to defaults.
 - **Find the metaphor already in your data** - this product is a document arguing with another document, which is a critical edition. The API already pairs verbatim source with character offsets; the design makes that visible.
 - **Typography can carry meaning** - a document serif for the policy's words, a sans for the app's, so the side-by-side needs no labels.
 - **Colour must never be the only signal** - two semantic hues rather than a traffic light, always paired with a numeral and a text label.
-- **Failure 8: a rule enforced everywhere except where it mattered** - the severity numeral vanished below the `sm` breakpoint, breaking a rule from this project's own DESIGN.md.
+- **Failure 8: a rule enforced everywhere except where it mattered** - the severity numeral vanished below the `sm` breakpoint, breaking a rule from this project's own written design system.
 - **Failure 9: module resolution follows the file, not the shell** - the same bug as M0's `ModuleNotFoundError`, in a different language.
 - **You cannot review a design you have not looked at** - a committed Playwright script drives the real UI and captures every screen; it found bugs no typecheck or unit test could.
 
@@ -192,8 +192,6 @@ Held-out scenario batches, and what they said: about 0.83-0.85 on unseen questio
 
 ## Related documents
 
-- **[../DESIGN.md](../DESIGN.md)** - the design system: aesthetic direction, the four-face typography with its semantic rule, the colour tokens, and the list of forbidden anti-patterns.
-- **[../CLAUDE.md](../CLAUDE.md)** — the architecture, the deliberate omissions (no vector DB, no task queue, no LLM in the scoring path), and the conventions this project follows.
 - **[../evals/REPORT.md](../evals/REPORT.md)** - the consolidated results, stamped with the model, prompt version, decoding settings and commit that produced them. Regenerate with `python evals/run_all.py`.
 - **[../evals/](../evals/)** — the evaluation harness. Model and prompt changes in this project are justified by measurements, not by impressions.
 

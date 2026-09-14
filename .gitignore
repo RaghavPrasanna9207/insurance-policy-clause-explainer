@@ -23,10 +23,6 @@ web/dist/
 # Env
 .env
 
-# Local working documents, kept on disk but not published
-CLAUDE.md
-DESIGN.md
-
 # Screenshot output from `npm run shots`
 web/.screenshots/
 

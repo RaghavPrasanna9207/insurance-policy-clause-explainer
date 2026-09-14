@@ -137,8 +137,6 @@ No real insurer policy wordings are committed to this repository.
 
 **[`docs/LEARNING-LOG.md`](docs/LEARNING-LOG.md)** explains what each part of the system does, why it is built that way, and every non-obvious failure hit along the way — written to be read cold, without any other context. [`docs/README.md`](docs/README.md) is the reading-order index.
 
-[`DESIGN.md`](DESIGN.md) is the design system — aesthetic direction, the four-face typography and its semantic rule, colour tokens, and a list of forbidden anti-patterns. [`CLAUDE.md`](CLAUDE.md) records the architecture and conventions.
-
 ---
 
 ## Roadmap

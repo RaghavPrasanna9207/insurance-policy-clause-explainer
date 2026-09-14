@@ -804,7 +804,7 @@ Everything else followed:
 | Borders, never decorative shadows | Structure in a document is drawn with rules |
 | Minimal-functional motion only | This is an anxiety product; playful easing would be actively wrong |
 
-The full system is in `DESIGN.md`, including a list of forbidden anti-patterns that `CLAUDE.md` points at.
+The full system was written down before any screen was built, including a list of forbidden anti-patterns: gradients, glassmorphism, centered heroes, uniform bubble radius, and Inter as a typeface.
 
 ---
 
@@ -823,7 +823,7 @@ A document serif for the source, a neutral sans for the translation. In `ClauseP
 
 That is typography doing semantic work instead of decorating. Two more faces complete the set, each with a job rather than a mood: Instrument Serif for display, JetBrains Mono for anything numeric (clause numbers, page references, impact scores, with tabular figures so columns of numbers line up for comparison).
 
-The rule is written into `CLAUDE.md` because it is the sort of thing that erodes silently: *the policy's words are always Source Serif 4; everything the app says is always Instrument Sans; never mix them.*
+The rule is written down as a hard constraint because it is the sort of thing that erodes silently: *the policy's words are always Source Serif 4; everything the app says is always Instrument Sans; never mix them.*
 
 ---
 
@@ -836,7 +836,7 @@ Severity uses exactly two hues:
 
 Deliberately **not** a red/amber/green traffic light. A traffic light implies a scale from bad to good, but "reduces your payout" is not a midpoint between "denied" and "covered" — it is a **different kind of harm**. Encoding it as a middle state would misrepresent it.
 
-And the hard rule, from `DESIGN.md`:
+And the hard rule, from the design system:
 
 > **Severity is never carried by colour alone.** Every severity indicator pairs its hue with a numeral (the impact score) and a text label ("Can void your claim").
 
@@ -872,7 +872,7 @@ The impact score lived in a right-hand rail, which was hidden below the `sm` bre
 <div className="hidden w-[132px] shrink-0 pt-0.5 sm:block">
 ```
 
-Reasonable-looking, and wrong. On a phone the severity colour and its text label survived, but **the numeral disappeared entirely** — which is precisely the rule `DESIGN.md` states as non-negotiable, violated by the same person who wrote it, in the same week.
+Reasonable-looking, and wrong. On a phone the severity colour and its text label survived, but **the numeral disappeared entirely** — which is precisely the rule the design system states as non-negotiable, violated by the same person who wrote it, in the same week.
 
 It was invisible in code review and obvious in a screenshot at 430px wide.
 
@@ -900,7 +900,7 @@ Both bugs above were found the same way: by driving a real browser against a rea
 npm run shots
 ```
 
-This matters more than it sounds. `DESIGN.md` forbids a specific list of visual patterns, and there is no way to check a built interface against that list except by seeing it. A typecheck passes on a page with an invisible progress bar. A unit test passes on a layout with 500px of dead space. Neither can tell you the severity numeral vanished on a phone.
+This matters more than it sounds. The design system forbids a specific list of visual patterns, and there is no way to check a built interface against that list except by seeing it. A typecheck passes on a page with an invisible progress bar. A unit test passes on a layout with 500px of dead space. Neither can tell you the severity numeral vanished on a phone.
 
 Three things the screenshots caught that no other check could:
 1. The score disappearing at narrow widths (a stated rule, broken).
@@ -950,7 +950,7 @@ Four screens, in light and dark: upload, processing, the ranked report, and the 
                          sends you to other clauses to understand it
 ```
 
-Files added: `web/src/index.css` (design tokens), `clauseMeta.ts`, `api.ts`, `types.ts`, `components/Chrome.tsx`, `components/RiskCard.tsx`, `components/ClausePanel.tsx`, `routes/Upload.tsx`, `routes/Policy.tsx`, `scripts/screenshots.mjs`, plus `DESIGN.md` at the repo root.
+Files added: `web/src/index.css` (design tokens), `clauseMeta.ts`, `api.ts`, `types.ts`, `components/Chrome.tsx`, `components/RiskCard.tsx`, `components/ClausePanel.tsx`, `routes/Upload.tsx`, `routes/Policy.tsx`, `scripts/screenshots.mjs`.
 
 ---
 
@@ -1459,7 +1459,7 @@ The failures were specific:
 
 None of those is a language problem. Each is a comparison of two numbers.
 
-`CLAUDE.md` states the governing principle: *deterministic where possible, LLM only where language understanding is genuinely required.* Stage 2 (segmentation) and stage 4 (scoring) follow it — I specifically refused to let the model compute buriedness because that would be arithmetic. **Stage 5 had quietly broken the same rule**, and I had been calling the result a model limitation.
+The project's governing principle is: *deterministic where possible, LLM only where language understanding is genuinely required.* Stage 2 (segmentation) and stage 4 (scoring) follow it — I specifically refused to let the model compute buriedness because that would be arithmetic. **Stage 5 had quietly broken the same rule**, and I had been calling the result a model limitation.
 
 `api/app/pipeline/waiting.py` restores the split:
 
@@ -1748,8 +1748,8 @@ Both are the comparison of two numbers, in opposite directions.
 
 ## Concept 23: the same mistake, in a family nobody had noticed was the same
 
-This project's governing rule is stated in `CLAUDE.md`: *deterministic where
-possible, LLM only where language understanding is genuinely required.*
+This project's governing rule is: *deterministic where possible, LLM only where
+language understanding is genuinely required.*
 
 An earlier milestone had already found the scenario simulator breaking that
 rule, and fixed it. The module `api/app/pipeline/waiting.py` exists because the
@@ -4365,7 +4365,7 @@ One of them, Ayurvedic treatment at an unaccredited private clinic, cited the
 definition of a hospital. The AYUSH clause shares five unusual words with that
 question.
 
-This project deliberately has no retrieval (CLAUDE.md: no embeddings, no BM25),
+This project deliberately has no retrieval (no embeddings, no BM25; Concept 15),
 because ranking clauses and dropping the low-ranked ones could drop the one
 that decides the case. A hint is a different thing: every clause stays in the
 prompt, nothing is ranked, and code reports only a fact it can check ("these
@@ -4439,7 +4439,7 @@ and wrong in both fresh ones. Across every sample since the fix it is about 5 of
 
 ## Failure 40: a design promise the code never kept
 
-CLAUDE.md describes the grounding design as: a quotation that fails the
+The project's written grounding design says: a quotation that fails the
 verbatim check gets "one retry → otherwise shown as unverified". Reading the
 code for the two quotations that failed in every run showed that the retry had
 never been built. A failed quote was simply flagged.
