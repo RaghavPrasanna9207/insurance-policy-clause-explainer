@@ -12,6 +12,7 @@ from app.grounding import (
     EXCEPTION_MARKERS,
     MIN_QUOTE_CHARS,
     normalize,
+    verified_prefix,
     verify_citations,
     verify_exception,
     verify_quote,
@@ -164,6 +165,53 @@ def test_citing_a_clause_outside_the_document_fails_loudly():
     )
     assert not checks[0].verified
     assert "not in this document" in checks[0].reason
+
+
+# --- a true quotation with something appended ------------------------------
+
+POST_HOSP = (
+    "2.3 Post-hospitalisation Medical Expenses The Company shall indemnify Medical Expenses "
+    "incurred during the ninety days immediately following the date of discharge, provided "
+    "that such expenses relate to the same condition for which the Insured Person was "
+    "hospitalised and the in-patient claim has been accepted."
+)
+
+
+def test_words_spliced_onto_a_true_quotation_are_trimmed_off():
+    """The measured failure, in every run: clause 2.3 quoted exactly, then
+    "by the Company" from the clause before it. A retry repeated it byte for
+    byte. What is kept is the part that IS the clause's words, in the model's
+    own casing and line breaks."""
+    quote = (
+        "The Company shall indemnify Medical Expenses incurred during the ninety days "
+        "immediately following the date of discharge, provided that such expenses relate to "
+        "the same condition for which the Insured Person was hospitalised and the in-patient "
+        "claim has been accepted by the Company."
+    )
+    kept = verified_prefix(quote, POST_HOSP)
+    assert kept is not None and kept.endswith("has been accepted")
+    assert verify_quote(kept, POST_HOSP)[0]
+
+
+def test_an_annotation_copied_after_a_quotation_is_trimmed_off():
+    quote = (
+        "Expenses related to the treatment of a Pre-existing Disease and its direct "
+        "complications shall be excluded until the\nexpiry of thirty six months\n"
+        "EXCEPTIONS - this clause does NOT apply when: an accident"
+    )
+    assert verified_prefix(quote, CLAUSE).endswith("thirty six months")
+
+
+def test_a_mostly_invented_quotation_is_not_rescued_by_its_first_words():
+    """A true opening followed by a longer invention must stay unverified.
+    Keeping "Expenses related to the treatment of a Pre-existing Disease" and
+    dropping the rest would put a green tick on a quotation that was mostly
+    made up."""
+    quote = (
+        "Expenses related to the treatment of a Pre-existing Disease will be paid in full "
+        "from the first day of the policy with no waiting period of any kind whatsoever"
+    )
+    assert verified_prefix(quote, CLAUSE) is None
 
 
 # --- extracted exceptions --------------------------------------------------

@@ -275,7 +275,7 @@ def test_citing_a_ruled_out_reduction_is_a_contradiction():
     problems, irrelevant = find_contradictions(
         [_citation("5.1", "reduces")], "conditional", compute(facts, [room])
     )
-    assert "WITHIN" in problems[0]
+    assert "does NOT exceed" in problems[0]
     assert [c.clause_id for c in irrelevant] == ["5.1"]
 
 
@@ -312,6 +312,61 @@ def test_a_discretionary_refusal_alone_is_not_a_contradiction():
     assert find_contradictions([_citation("6.1", "denies")], "conditional", _computed(5)) == ([], [])
     cited = [_citation("4.1", "denies"), _citation("5.3", "reduces")]
     assert find_contradictions(cited, "not_covered", _computed(5)) == ([], [])
+
+
+DAY_CARE_TEXT = (
+    "2.4 Day Care Procedures The Company shall indemnify Medical Expenses incurred for "
+    "Day Care Treatment listed in Annexure II to this policy."
+)
+
+
+def test_an_annexure_referred_to_but_not_included_is_found():
+    from app.pipeline.scenario import ShortlistClause, absent_annexures
+
+    day_care = ShortlistClause("2.4", "t:1", "2.4", "coverage", DAY_CARE_TEXT, 1.0)
+    assert absent_annexures([day_care]) == {"2.4": ["Annexure II"]}
+
+    listed = ShortlistClause("(a)", "t:2", "(a)", "coverage", "(a) Cataract surgery", 1.0,
+                             section_path="ANNEXURE II - LIST OF DAY CARE PROCEDURES")
+    assert absent_annexures([day_care, listed]) == {}
+
+
+def test_paying_on_a_clause_whose_list_is_missing_is_questioned():
+    """`day-care-not-listed`: six hours on a drip, answered covered on the
+    strength of a clause that pays only for treatments on a list this document
+    does not contain."""
+    from app.pipeline.scenario import ShortlistClause, compute, find_contradictions
+
+    day_care = ShortlistClause("2.4", "t:1", "2.4", "coverage", DAY_CARE_TEXT, 1.0)
+    computed = compute({}, [day_care])
+    problems, irrelevant = find_contradictions([_citation("2.4", "permits")], "covered", computed)
+    assert "Annexure II" in problems[0] and "not included" in problems[0]
+    assert irrelevant == []  # unchecked is not the same as wrong
+
+
+def test_a_refusal_citing_that_clause_is_not_questioned():
+    """Non-medical items are refused by a clause that also refers to a missing
+    annexure. Refusing on the items it names outright needs no list."""
+    from app.pipeline.scenario import ShortlistClause, compute, find_contradictions
+
+    day_care = ShortlistClause("2.4", "t:1", "2.4", "coverage", DAY_CARE_TEXT, 1.0)
+    computed = compute({}, [day_care])
+    assert find_contradictions([_citation("2.4", "permits")], "not_covered", computed) == ([], [])
+
+
+def test_a_treatment_the_policy_names_elsewhere_is_not_questioned():
+    """`cataract-served`: a day-care cataract operation. The cataract sub-limit
+    names the treatment and so presupposes it is paid; the missing day-care
+    list is not what that answer rests on. Questioned anyway, the retry turned
+    a correct answer into a cosmetic-surgery refusal."""
+    from app.pipeline.scenario import ShortlistClause, compute, find_contradictions
+
+    day_care = ShortlistClause("2.4", "t:1", "2.4", "coverage", DAY_CARE_TEXT, 1.0)
+    cataract = ShortlistClause("5.4", "t:2", "5.4", "sub_limit",
+                               "5.4 Expenses in respect of treatment of cataract shall be limited.", 1.0)
+    computed = compute({"procedure": "cataract operation"}, [day_care, cataract])
+    cited = [_citation("2.4", "permits"), _citation("5.4", "reduces")]
+    assert find_contradictions(cited, "conditional", computed) == ([], [])
 
 
 def _fake_model(monkeypatch, answers):
@@ -378,6 +433,115 @@ def test_a_consistent_answer_makes_no_second_call(monkeypatch):
     sent = _fake_model(monkeypatch, [_answer("covered", "2.1", INPATIENT_QUOTE, "permits")])
     assert asyncio.run(run_scenario("held five years", _clauses())).verdict == "covered"
     assert len(sent) == 1
+
+
+def test_an_age_at_policy_start_needs_the_policy_to_have_started():
+    """"My father, 82, was admitted with pneumonia" came back as 82 AT POLICY
+    START - a senior-citizen co-payment for a man whose inception age nobody
+    mentioned. Two prompt fixes made it worse. The sentence says nothing about
+    buying or starting a policy, so the only age in it is his age now."""
+    from app.pipeline.scenario import correct_misfiled_age
+
+    misfiled = {"age": None, "age_at_policy_start": 82}
+    assert correct_misfiled_age(misfiled, "My father, 82, was admitted with pneumonia.") == {
+        "age": 82, "age_at_policy_start": None,
+    }
+
+
+def test_a_stated_inception_age_is_left_alone():
+    from app.pipeline.scenario import correct_misfiled_age
+
+    for said in (
+        "I bought this policy at 67 and I am claiming three years later.",
+        "My mother took this policy out at 61 and was hospitalised two years later.",
+        "I signed up for this insurance at 60. Two years later I had a heart attack.",
+    ):
+        facts = {"age": None, "age_at_policy_start": 61}
+        assert correct_misfiled_age(facts, said) == facts
+    # And both ages given: nothing to decide between.
+    both = {"age": 72, "age_at_policy_start": 70}
+    assert correct_misfiled_age(both, "I am 72 and was 70 back then.") == both
+
+
+AYUSH_TEXT = (
+    "2.6 AYUSH Treatment The Company shall indemnify in-patient expenses for Ayurveda, Unani, "
+    "Siddha and Homeopathy treatment taken in a government hospital or an institute accredited "
+    "by the Quality Council of India."
+)
+HOSPITAL_TEXT = "1.1 Hospital means any institution registered with the local authorities."
+
+
+def _policy(*texts):
+    from app.pipeline.scenario import ShortlistClause
+
+    return [ShortlistClause(t.split()[0], f"t:{i}", t.split()[0], "coverage", t, 1.0)
+            for i, t in enumerate(texts)]
+
+
+def test_a_clause_sharing_several_unusual_words_with_the_question_is_named():
+    """Regression test for `ayush-private-clinic`: Ayurvedic treatment at a clinic
+    with no Quality Council accreditation. The answer was right and cited the
+    definition of a hospital, every run on record, instead of the AYUSH clause
+    that decides it - even when asked for citations in a turn of its own."""
+    from app.pipeline.scenario import shared_words
+
+    question = ("I had in-patient Ayurvedic treatment at a private clinic that is not "
+                "government-run and has no Quality Council accreditation.")
+    shared = shared_words(question, _policy(AYUSH_TEXT, HOSPITAL_TEXT))
+    assert list(shared) == ["2.6"]
+    assert "ayurvedic" in shared["2.6"] and "accreditation" in shared["2.6"]
+
+
+def test_one_shared_word_or_a_common_word_is_not_enough():
+    """One rare word in common is a coincidence as often as a signal, and a
+    word most clauses use says nothing about which clause this is."""
+    from app.pipeline.scenario import shared_words
+
+    common = [f"{n} Every clause here mentions the hospital and the treatment." for n in
+              ("1.2", "1.3", "1.4")]
+    assert shared_words("I had treatment in hospital.", _policy(*common, AYUSH_TEXT)) == {}
+    assert shared_words("I went to a government office.", _policy(AYUSH_TEXT, HOSPITAL_TEXT)) == {}
+
+
+def test_shared_words_are_listed_above_the_clauses_and_drop_nothing():
+    from app.llm.prompts import render_reasoning_request
+
+    question = "Ayurvedic treatment, no Quality Council accreditation."
+    rendered = render_reasoning_request(question, {}, _policy(AYUSH_TEXT, HOSPITAL_TEXT))
+    head, clauses = rendered.split("POLICY CLAUSES AVAILABLE TO YOU:")
+    assert "clause 2.6" in head
+    assert "1.1 Hospital means" in clauses  # every clause is still shown
+
+
+def test_words_spliced_onto_a_true_quotation_are_trimmed_with_no_second_call(monkeypatch):
+    """`post-hospitalisation-too-late` quoted clause 2.3 with "by the Company"
+    spliced on from clause 2.2, in every run, and a retry repeated it byte for
+    byte. The true part is kept; nothing is asked again; the verdict is untouched."""
+    import asyncio
+
+    from app.pipeline.scenario import run_scenario
+
+    spliced = {"clause_id": "2.1", "quote": INPATIENT_QUOTE + " by the Company", "effect": "permits"}
+    sent = _fake_model(monkeypatch, [
+        _answer("covered", "2.1", INPATIENT_QUOTE, "permits") | {"deciding_clauses": [spliced]},
+    ])
+    result = asyncio.run(run_scenario("held five years", _clauses()))
+
+    assert len(sent) == 1
+    assert result.verdict == "covered"
+    assert [(c.quote, c.verified) for c in result.citations] == [(INPATIENT_QUOTE, True)]
+
+
+def test_an_invented_quotation_stays_flagged(monkeypatch):
+    import asyncio
+
+    from app.pipeline.scenario import run_scenario
+
+    bad = {"clause_id": "2.1", "quote": "The Company shall pay for absolutely everything", "effect": "permits"}
+    _fake_model(monkeypatch, [_answer("covered", "2.1", INPATIENT_QUOTE, "permits") | {"deciding_clauses": [bad]}])
+    result = asyncio.run(run_scenario("held five years", _clauses()))
+    assert not result.citations[0].verified
+    assert not result.verified
 
 
 def test_the_policy_duration_field_is_not_named_like_an_age():

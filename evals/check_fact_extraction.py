@@ -38,9 +38,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "api"))
 
-from app.llm import client  # noqa: E402
-from app.llm.prompts import FACTS_SYSTEM, PROMPT_VERSION, render_scenario  # noqa: E402
-from app.pipeline.scenario import FACTS_SCHEMA  # noqa: E402
+from app.llm.prompts import PROMPT_VERSION  # noqa: E402
+from app.pipeline.scenario import extract_facts  # noqa: E402
 
 CASES = {
     c["id"]: c["scenario"]
@@ -109,15 +108,10 @@ async def main() -> None:
     print(f"prompt version: {PROMPT_VERSION}\n")
     score = {group: [0, 0] for group, *_ in SENTENCES}
     for group, label, sentence, expected in SENTENCES:
-        facts = await client.complete_json(
-            [
-                {"role": "system", "content": FACTS_SYSTEM},
-                {"role": "user", "content": render_scenario(sentence)},
-            ],
-            FACTS_SCHEMA,
-            # A cached answer re-read is a copy of an old sample, not a check.
-            use_cache=False,
-        )
+        # The facts the pipeline actually uses, including the checks code runs
+        # on the model's extraction afterwards. A cached answer re-read is a
+        # copy of an old sample, not a check.
+        facts = await extract_facts(sentence, use_cache=False)
         wrong = {k: facts.get(k) for k, v in expected.items() if facts.get(k) != v}
         score[group][0] += not wrong
         score[group][1] += 1

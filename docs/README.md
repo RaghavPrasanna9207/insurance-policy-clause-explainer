@@ -166,6 +166,17 @@ Working through the remaining failures one measured change at a time. Verdict ac
 - **Failure 37: two attempts at third-person ages, both worse** - a key name is an instruction, but a guessed rename is only an experiment.
 - **Concept 34: majority of three** - a strict majority per case, run in chunks, with a replay check that proved three reverts were complete.
 
+### M13 - The last failures, and the answer key itself
+Majority-of-three verdict accuracy 0.925 to 0.975, failed quotations to zero, and an honest qualification of that number.
+
+- **Failure 38: computed lines that said more than was computed** - "the co-payment applies, so this claim is paid at 80%" for a refused claim, and a room cap ruled out without its reason.
+- **Fix: a misfiled age, checked against its source words**, and **Failure 39: a prediction made from stale data** - the check found two "I am 55" misreadings in the eval nobody had noticed.
+- **When the answer key is wrong** - two expected answers that contradicted the file's own rule, changed only by the project owner and recorded inside the cases.
+- **Concept 35: a lookup reported as a lookup** - shared unusual words as a hint, not retrieval: every clause stays in the prompt. A noisy first version hinted at 38 of 40 questions; the final one at 8, all correct, with the fitting caveat stated.
+- **A missing annexure, checked only where an answer leans on it** - and the refinement after it broke a correct answer.
+- **Failure 40: a design promise the code never kept** - the documented quote retry did not exist; built, it fixed 0 of 2; replaced by trimming appended words, with a guard against rescuing inventions.
+- **Failure 41: the test question inside the prompt** - the reasoning prompt's example is an eval case. Replacing it broke 8 cases, so the headline score depends on it. Open.
+
 ---
 
 ## Related documents

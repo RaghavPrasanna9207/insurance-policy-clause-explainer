@@ -4143,3 +4143,466 @@ by knowing the right verdict, and that is the one thing code does not know here.
 What code does know is which statements inside an answer contradict arithmetic
 it has already done, so that is what it checks.
 </details>
+
+---
+
+# M13 — The last failures, and the answer key itself
+
+## The starting position
+
+The scenario simulator answers a what-if question about an Indian health
+policy with one of four verdicts and the clauses that decide it. It is measured
+by 40 hand-written cases in `evals/golden/scenarios.json`. Since M12 the
+headline figure is a **majority of three samples per case**, because the model
+does not answer identically twice and a single run moves by two or three cases
+on its own.
+
+At the end of M12 that figure was 0.925 (37 of 40). Still open:
+
+- wrong in every sample: `senior-but-excluded`, `room-rent-within-cap`,
+  `day-care-not-listed`;
+- right in two samples of three: `cataract-served`, `oral-chemo-limit`,
+  `copay-unknown-inception-age`;
+- seven cases missing the clause that decides them, and one citing a clause it
+  must not rely on;
+- the fact extractor filing "my father, 82" as his age when the policy began.
+
+The method was the same as M12's: diagnose from evidence, one change at a
+time, predict how many cases the change reaches (the cache replays every case
+whose prompt did not change), three samples before calling anything fixed, and
+revert what is net negative.
+
+---
+
+## A theory disproven in seconds
+
+The deciding clauses the model kept failing to cite (ambulance, AYUSH,
+contribution) are low-impact clauses. The prompt includes only as many clauses
+as fit a size budget, ranked by impact, and the citation id list is built from
+that same set. If they were being cut, the model could not cite them at all.
+
+Checked without a model call: the budget keeps all 40 clauses, including every
+one it was failing to cite. The misses are the model's reading, not missing
+text. That took one command, and it was worth running before building anything
+on the assumption.
+
+---
+
+## Failure 38: computed lines that said more than was computed
+
+Two of the three always-wrong cases failed for the same reason, and the reason
+was in text this project's own code writes. Printing exactly what the model was
+shown made both visible.
+
+**`senior-but-excluded`**: bought the policy at 70, then a nose job for
+appearance, refused outright by the cosmetic exclusion. The reduction block
+said:
+
+```
+- APPLIES: clause 5.3: aged 70 at inception against a threshold of 60 -> the
+  20% co-payment DOES apply, so this claim is paid at 80% of the admissible amount
+```
+
+The arithmetic established one thing: the person was over 60 when the policy
+began. "So this claim is paid" was never computed, and here it is false. The
+model took the line at its word and answered `conditional`. It is the same
+mistake M7 recorded ("correct facts can still mislead"), where a line said a
+waiting period "does NOT block the claim". The fix makes the line say only what
+was computed:
+
+```python
+# api/app/pipeline/reduction.py, _copay_check()
+f"aged {inception_age} at inception against a threshold of "
+f"{threshold} -> the {percent}% co-payment DOES apply to this "
+f"person. IF this claim is payable at all, it is paid at "
+f"{100 - percent}% of the admissible amount",
+```
+
+**`room-rent-within-cap`**: sum insured 10 lakh, a room at 8,000 a night.
+Code had computed that 1% of 10 lakh is 10,000, so the room is within the cap,
+but printed only this:
+
+```
+- Ruled out by the numbers, so IRRELEVANT here and not worth citing: 5.1
+```
+
+Without the reason, the model redid the comparison itself and answered "paid at
+80% of 8,000". That is the proportionate-deduction clause applied backwards.
+Clause 5.2 applies only "where … room rent **exceeds the limit specified in
+Clause 5.1**". The ruled-out line had been collapsed to an id on purpose (M8: a
+line per non-event adds emphasis that costs cases), but a room cap is only
+computed when the person named their room rate, so it is the subject of their
+question. It now gets its own line, in the words clause 5.2 is written in:
+
+```
+- WITHIN THE LIMIT: clause 5.1: 1% of 10 lakh is 10,000 rupees per day; room
+  rent of 8,000 rupees per day does NOT exceed that limit, so this cap costs nothing here
+```
+
+**Predicted reach:** 5 cases (the four with an applying co-payment, plus this
+one). **Measured:** 35 replayed, 5 regenerated. Both targets ✓ ✓ ✓; the three
+co-payment cases that must stay `conditional` stayed ✓ ✓ ✓.
+
+Two existing tests failed after the change, and both were pinning the old
+wording or layout. They were rewritten to keep guarding their original point
+(non-events still collapse, just not a room within its cap), not deleted.
+
+---
+
+## Fix: a misfiled age, checked against the words it came from
+
+M12 tried two prompt fixes for "My father, 82" being filed as 82 **at policy
+start** (which fires a senior-citizen co-payment nobody established). Both made
+it worse. This time the extraction is checked against its source text, the way
+M11 checks extracted exceptions: an age at policy start is only something a
+person can have said if they mentioned the policy starting.
+
+```python
+# api/app/pipeline/scenario.py
+_POLICY_START = re.compile(
+    r"\b(bought|buy|purchased?|took|taken|take|got|started?|began|begin|"
+    r"signed|joined|inception|enrolled|insured me)\b",
+    re.IGNORECASE,
+)
+
+def correct_misfiled_age(facts, scenario):
+    start_age = facts.get("age_at_policy_start")
+    if start_age and not facts.get("age") and not _POLICY_START.search(scenario):
+        return facts | {"age": start_age, "age_at_policy_start": None}
+    return facts
+```
+
+It only moves a value, never invents one, and it leaves both ages alone when
+both were given. `evals/check_fact_extraction.py` was changed to measure the
+facts the pipeline actually uses, after this correction, and scored eval
+sentences 18/18 and held-out 18/19. The held-out set includes five third-person
+sentences written before the change, one of which does state an age at the
+start ("My mother took this policy out at 61"), so the correction cannot pass by
+never filling that field.
+
+## Failure 39: a prediction made from stale data
+
+The prediction for the eval was 0 regenerated cases: no eval question has an
+age at policy start without words about buying or starting. **Measured: 2.**
+Both were questions that say "I am 55" and "I am 50", and the stored
+extraction had filed those as **age at policy start** too: first person,
+present tense, no third person involved.
+
+The prediction was wrong because it was checked against a printout of the facts
+taken before M11 changed the fact prompt. Those two misreadings had been
+invisible: both ages are under 60, so the co-payment check gave the same answer
+either way. The correction fixed two real errors nobody had spotted.
+
+It also moved one answer the wrong way. `oral-chemo-limit` went from two
+samples of three right to zero of three, with the correct fact in place. It
+was kept anyway, because it removes a false statement the pipeline had been
+making ("age at policy start: 50" for someone who said "I am 50"), and it
+fixed third-person ages. `oral-chemo-limit` then needed its own fix.
+
+---
+
+## When the answer key is wrong
+
+Fixing `oral-chemo-limit` exposed an inconsistency in the golden answers
+themselves. The file states its rule for sub-limits: a reduction that
+definitely applies on the facts described makes the verdict `conditional`.
+`oral-chemo-limit` and `robotic-surgery-limit` follow it, since clause 5.5 caps
+those treatments by name. `cataract-served` has the same shape (clause 5.4 caps
+"treatment of cataract") and expected `covered`. Any fix that pointed the model
+at a sub-limit naming the treatment would fix one and break the other.
+
+Expected answers were written before any measuring, which is what stops them
+being rewritten to match whatever the system outputs. So the question went to
+the project owner rather than being decided here, with the evidence. Two
+changes were approved, and each is recorded inside the case itself:
+
+- `cataract-served`: `covered` → `conditional`, with clause 5.4 added as its
+  deciding clause, matching how `oral-chemo-limit` lists 5.5;
+- `room-rent-within-cap`: citing 5.1 is no longer forbidden, because citing the
+  limit the room stays within is a fair reason for `covered`, while relying on
+  the proportionate deduction (5.2) is still wrong.
+
+A label change moves the score without any code changing, so the log says
+exactly which answers moved and why.
+
+---
+
+## Fix: a sub-limit that names the described treatment
+
+`oral-chemo-limit`: someone on oral chemotherapy, and clause 5.5 restricts "oral
+chemotherapy" by name. The reduction block told the model only "Also capped by
+5.2, 5.4, 5.5, but only for the treatments those clauses name. Read them", and
+the model answered that no sub-limit applied. Whether a clause's text contains
+a word the person used is a lookup, so code does it:
+
+```python
+# api/app/pipeline/reduction.py
+def _named_in(clause_text, facts):
+    described = " ".join(str(facts.get(k) or "") for k in ("procedure", "condition"))
+    mine = {w for w in re.findall(r"[a-z]{4,}", described.lower()) if w not in _GENERIC_WORDS}
+    return sorted(mine & set(re.findall(r"[a-z]{4,}", clause_text.lower())))
+```
+
+`_GENERIC_WORDS` holds words like "operation", "surgery" and "treatment", so a
+gallbladder operation does not "name" the clause about "operation theatre
+charges". The match uses the extracted procedure and condition, not the whole
+question, so "sum insured" can never match anything. A matched clause gets a
+line of its own ("NAMES THIS TREATMENT: clause 5.5 mentions 'chemotherapy' …
+whether it caps this claim is your call"). The line "Nothing here reduces this
+claim" is suppressed beside it, since the two would contradict each other.
+
+**Predicted reach**, checked against the current stored facts this time: 3
+cases. **Measured:** 3 regenerated. `oral-chemo-limit`, `cataract-served` and
+`cataract-sublimit-amount` ✓ ✓ ✓, each citing its sub-limit.
+
+---
+
+## Concept 35: a lookup reported as a lookup
+
+Seven cases reached the right verdict with the wrong citation, and M12 showed
+the model chose the same wrong clause even when asked for citations separately.
+One of them, Ayurvedic treatment at an unaccredited private clinic, cited the
+definition of a hospital. The AYUSH clause shares five unusual words with that
+question.
+
+This project deliberately has no retrieval (CLAUDE.md: no embeddings, no BM25),
+because ranking clauses and dropping the low-ranked ones could drop the one
+that decides the case. A hint is a different thing: every clause stays in the
+prompt, nothing is ranked, and code reports only a fact it can check ("these
+words appear in both"). What a shared word means stays with the model.
+
+The first version shows why the details matter. A word counted if at most two
+of the 40 clauses used it. That hinted at **38 of 40** questions, because
+everyday words like "years", "after" and "rupees" are rare inside a policy. It
+even pointed two questions at the co-payment clause they must not cite
+("years"). The final version drops standard English function words and names a
+clause only when it shares **at least two** such words:
+
+```python
+# api/app/pipeline/scenario.py, shared_words()
+rare_mine = {s for s in mine if 0 < used_by[s] <= _RARE_IN_POLICY}   # used by <= 2 clauses
+for clause_id, stems in per_clause.items():
+    common = rare_mine & stems.keys()
+    if len(common) >= _MIN_SHARED:                                    # at least 2 words
+        shared[clause_id] = sorted(mine[s] for s in common)
+```
+
+Words are compared by their first six letters, so "Ayurvedic" meets "Ayurveda".
+That reached **8 of 40** questions, and in all 8 named exactly the clause the
+case requires. **Caveat, stated in the code too:** both thresholds were chosen
+after seeing the noisy version on the same 40 questions, so 8 of 8 is partly
+fitted. That is why the hint only names clauses and never sets anything.
+
+**Measured:** 8 regenerated. Citation recall 0.781 → 0.844 (`ayush-private-clinic`
+now cites 2.6, `cosmetic-after-accident` cites 4.1), verdicts unchanged, both
+resamples 8/8 verdicts and 8/8 required citations. It cannot help
+`breach-of-law` ("shoplifting" shares no word with "breach of law") or
+`ambulance-admissible` (only one shared word).
+
+---
+
+## Fix: a missing annexure, checked only where an answer leans on it
+
+`day-care-not-listed`: six hours on a drip. Day care is paid for treatment
+"listed in Annexure II", and the document has no Annexure II, so the honest
+answer is that it cannot be checked. M12 printed a note under that clause in
+every prompt and reverted it: it did not fix this case and moved four unrelated
+ones.
+
+This time the note is not in any prompt. It is a fourth rule in the
+consistency check (Concept 33), which fires only on an answer that relies on
+such a clause to pay:
+
+```python
+# api/app/pipeline/scenario.py, find_contradictions()
+names_treatment = any(c.named for c in computed.reductions)
+if verdict in (Verdict.COVERED, Verdict.CONDITIONAL) and not names_treatment:
+    for citation in citations:
+        names = computed.absent.get(citation.clause_id)
+        if citation.effect == "permits" and names:
+            problems.append(...)   # "refers to Annexure II, which is not included ..."
+```
+
+Predicted reach was 2 answers: the target, and `cataract-served`, which also
+cites the day-care clause. The first version fixed the target ✓ ✓ ✓ and broke
+`cataract-served` in both resamples: the retry turned it into a cosmetic-surgery
+refusal. The refinement is the `names_treatment` condition. "Treatment of
+cataract shall be limited to 25,000" presupposes cataract treatment is paid, so
+the missing list is not what that answer rests on. Nothing in the policy names
+a six-hour drip. After the refinement both were right in both resamples.
+
+In the final majority run, `day-care-not-listed` was right in the stored sample
+and wrong in both fresh ones. Across every sample since the fix it is about 5 of
+7. It is fixed most of the time, not reliably.
+
+---
+
+## Failure 40: a design promise the code never kept
+
+CLAUDE.md describes the grounding design as: a quotation that fails the
+verbatim check gets "one retry → otherwise shown as unverified". Reading the
+code for the two quotations that failed in every run showed that the retry had
+never been built. A failed quote was simply flagged.
+
+The retry was built, and measured: **it fixed 0 of 2.** Printing both attempts
+side by side showed why. The model repeated each failed quotation almost byte
+for byte. Both had the same shape: the clause's own words, exactly, with
+something appended:
+
+```
+clause 2.3: "... and the in-patient claim has been accepted by the Company."
+            (clause 2.3 ends at "accepted"; "by the Company" is from clause 2.2)
+
+clause 4.1: "4.1 Cosmetic and Plastic Surgery ... to be medically necessary.
+             EXCEPTIONS - this clause does NOT apply when: ..."
+            (the whole clause, then the pipeline's own annotation line)
+```
+
+Asking again cannot fix a mistake that is repeated deterministically. But the
+true part is already there to keep. The retry was removed (code that measurably
+does not help is not left in) and replaced by a trim:
+
+```python
+# api/app/grounding.py
+def verified_prefix(quote, source_text):
+    tokens = quote.split()
+    haystack = normalize(source_text)
+    whole = len(normalize(quote))
+    for k in range(len(tokens) - 1, 0, -1):
+        kept = " ".join(tokens[:k]).rstrip(" ,;:")
+        needle = normalize(kept)
+        if len(needle) < MIN_QUOTE_CHARS or len(needle) < MIN_KEPT_SHARE * whole:
+            return None
+        if needle in haystack:
+            return kept
+    return None
+```
+
+It keeps the longest leading part of the quotation that appears word for word
+in the clause, only if that part is at least 60% of the quotation and at least
+25 characters long. The first condition is the guard. Without it, a true opening
+followed by a longer invention would become a verified quotation once the
+invention was thrown away. It generalises a tolerance the verifier already had
+for a trailing "[3.2]" tag, under the same rule: what is kept must match exactly.
+
+**Measured:** failed quotations 2 → 0 with no model call, and detection
+integrity 1.000. That figure comes from the eval re-verifying every displayed
+quotation independently of the pipeline's own flag, so the trimmed quotations
+were checked, not trusted.
+
+---
+
+## Failure 41: the test question inside the prompt
+
+Two of the remaining citation misses cite the cosmetic exclusion, 4.1, for IVF
+and for an undisclosed thyroid condition. Looking for why 4.1 stands out
+turned up something that should have been caught long ago. The reasoning
+prompt's only example of a carve-out is:
+
+```
+A burn treated with reconstructive surgery falls inside "unless necessitated
+by an Accident, Burn or Cancer"; that claim is covered, not refused.
+```
+
+That is the eval case `cosmetic-after-accident`, written into the instructions.
+A test case inside the prompt inflates that case's score and draws attention to
+one clause in every question.
+
+It was replaced with an example matching no clause in the policy ("an exclusion
+of hearing aids 'unless prescribed after an injury' …"). One sample: verdict
+accuracy **1.000 → 0.800**, with 8 cases broken. Seven of the eight had nothing
+to do with cosmetic surgery, and `ped-waiting-served` started citing 4.1. Eight
+simultaneous breaks is far beyond the two or three cases a run moves on its
+own, so it was reverted without spending more samples.
+
+Two readings fit and this run cannot separate them. Either the prompt depends
+on that example much more than one test case would explain, or the system
+prompt is fragile enough that any new example in that section disrupts it, the
+non-local effect seen in Failure 28. Either way, the current score depends on
+an instruction that copies a test question. That is recorded as an open problem
+rather than a solved one, and it qualifies the headline number below.
+
+---
+
+## Where this leaves the numbers
+
+| | End of M12 (majority) | Now, sample 1 | Sample 2 | Sample 3 | **Now, majority of 3** |
+|---|---|---|---|---|---|
+| Verdict accuracy | 0.925 (37/40) | 1.000 | 0.975 | 0.925 | **0.975** (39/40) |
+| Citation recall | 0.774 average, of 31 | 0.844 | 0.813 | 0.844 | of 32 |
+| False citations | 0.200 average | 0 of 5 | 1 of 5 | 1 of 5 | |
+| Failed quotations | 0–1 | 0 | 0 | 0 | |
+| Detection integrity | 1.000 | 1.000 | 1.000 | 1.000 | |
+
+37 of 40 cases gave the same verdict in all three samples. Sample 1 replays the
+stored answers and reproduced the last single run exactly (40 of 40), which
+confirms the reverts were complete. Clause classification (macro-F1 1.000) and
+ranking (8 of 9) did not move.
+
+The two label changes affect how these compare with M12: `cataract-served` now
+needs a citation, so 32 cases require one instead of 31. The two verdict gains
+(`senior-but-excluded`, `room-rent-within-cap`) are fixes, not relabels.
+
+**Kept:** the co-payment and room-cap wording, the misfiled-age correction,
+named sub-limits, shared-word hints, the missing-annexure check with its
+refinement, quote trimming. **Reverted:** the quote retry (replaced by
+trimming), replacing the prompt's test-case example.
+
+**Still open:**
+
+- `day-care-not-listed`: right about 5 samples of 7, and wrong in the final
+  majority;
+- five citations the model gets wrong after every approach tried: 4.4, 6.3,
+  6.6, 2.5, 4.5;
+- two samples of three: `dental-no-accident`, `copay-unknown-inception-age`;
+- in samples 2 and 3, one of the four guarded cases in the second chunk cited a
+  clause it must not rely on. The majority summary prints only the rate, so
+  which case it was is not on record;
+- the reasoning prompt's carve-out example is a copy of an eval question, and
+  removing it cost 8 cases;
+- `documents-late` also cites 5.1 and 5.3 beside its correct 6.2: not
+  forbidden, but noise;
+- the fact extractor sometimes subtracts two stated ages itself (accepted).
+
+---
+
+## Check it yourself
+
+```bash
+cd api && .venv/Scripts/python.exe -m pytest -q          # 191 tests
+python evals/run_scenario_eval.py                        # one run
+python evals/run_scenario_eval.py --repeats 3 --only day-care-not-listed,ayush-private-clinic
+python evals/check_fact_extraction.py                    # the fact extractor alone
+```
+
+**Question to sit with:** clause 3.2 ends "…excluded until the expiry of thirty
+six months of continuous coverage…". The model quotes it as:
+
+> *"Expenses related to the treatment of a Pre-existing Disease and its direct
+> complications shall be excluded until the expiry of thirty six months, except
+> for diabetes"*
+
+Before opening the answer: does `verified_prefix` trim this into a verified
+quotation? And if it does, what has it fixed, and what has it not?
+
+<details>
+<summary>Answer</summary>
+
+**It trims it.** The leading part up to "thirty six months" appears in the
+clause word for word, and it is well over 60% of the quotation, so it is kept
+and marked verified. ", except for diabetes" is gone. (Checked by running the
+function on this exact text: it returns the quotation up to "thirty six
+months", while the untrimmed quotation fails verification.)
+
+**What it fixed:** the reader no longer sees "except for diabetes" presented as
+the policy's words. Every quotation shown is text the policy contains, which is
+the grounding guarantee.
+
+**What it did not fix:** if the model's *reasoning* relied on that invented
+exception, for instance to answer `covered` for a diabetic, the verdict is
+still built on it. Trimming makes a quotation true; it cannot make the
+reasoning behind it true. That is why the consistency check and the rest of the
+arithmetic exist beside the quote check rather than instead of it, and why a
+short true opening attached to a long invention is left unverified: there, what
+was invented is most of what was said.
+</details>

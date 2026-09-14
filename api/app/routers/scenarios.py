@@ -75,6 +75,7 @@ async def create_scenario(
                 ),
                 cover_window_days=analysis.cover_window_days,
                 cover_window_anchor=analysis.cover_window_anchor,
+                section_path=clause.section_path,
             )
         )
         meta[citation_id] = (clause.id, clause.number, clause.heading, clause.page_start + 1)

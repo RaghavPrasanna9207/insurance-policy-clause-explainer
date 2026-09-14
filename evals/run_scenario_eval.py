@@ -89,6 +89,7 @@ async def build_clauses() -> list[ShortlistClause]:
                 icu_cap_percent_of_sum_insured=analysis.icu_cap_percent_of_sum_insured,
                 cover_window_days=analysis.cover_window_days,
                 cover_window_anchor=analysis.cover_window_anchor,
+                section_path=seg.section_path,
             )
         )
     return clauses

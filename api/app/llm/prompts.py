@@ -39,7 +39,7 @@ coverage, it just happens to be describing its ceiling.
 from app.grounding import normalize
 from app.taxonomy import ClauseType
 
-PROMPT_VERSION = "v22-consistency-retry"
+PROMPT_VERSION = "v31-quote-trim"
 
 CLASSIFY_SYSTEM = """\
 You are an expert on Indian (IRDAI-regulated) health insurance policy wordings.
@@ -486,7 +486,7 @@ def render_reasoning_request(
         del known["notes"]
     # Imported rather than redeclared: the model's list and the user's list are
     # the same list. See DECISIVE_FACTS in pipeline/scenario.py for why.
-    from app.pipeline.scenario import DECISIVE_FACTS
+    from app.pipeline.scenario import DECISIVE_FACTS, shared_words
 
     missing = [k for k in DECISIVE_FACTS if facts.get(k) in (None, "", "unknown")]
 
@@ -519,6 +519,21 @@ def render_reasoning_request(
     # nothing is paid at all.
     if reduction_block:
         lines += ["", reduction_block]
+
+    # Last before the clauses, and silent unless something is shared: most
+    # questions share no unusual words with any clause and see nothing here.
+    shared = shared_words(scenario, clauses)
+    if shared:
+        lines += ["", "WORDS THIS QUESTION SHARES WITH A CLAUSE (a lookup, not a judgement)."]
+        lines += [
+            f"- clause {clause_id} uses these words from the question, or forms of them: "
+            f"{', '.join(words)}"
+            for clause_id, words in shared.items()
+        ]
+        lines.append(
+            "Read these clauses closely before choosing what to cite. Sharing words "
+            "does not by itself mean a clause applies."
+        )
 
     lines += ["", "POLICY CLAUSES AVAILABLE TO YOU:", ""]
     for clause in clauses:

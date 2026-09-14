@@ -177,9 +177,9 @@
     {
       "id": "cataract-served",
       "scenario": "I had a cataract operation as day care 4 years after buying the policy, and I am 40.",
-      "expected_verdict": "covered",
-      "must_cite": [],
-      "why": "24-month specified-disease waiting period served; day care is covered; under 60 so no co-payment. A sub-limit caps the amount but does not deny the claim."
+      "expected_verdict": "conditional",
+      "must_cite": ["5.4"],
+      "why": "24-month specified-disease waiting period served; under 60 so no co-payment. Cataract treatment is capped by the cataract sub-limit, which definitely applies to a cataract operation, so by this file's convention the claim is paid but not necessarily in full: conditional. LABEL CHANGED in M13 from covered: it contradicted the stated convention and the matching cases oral-chemo-limit and robotic-surgery-limit, which expect conditional for a sub-limit naming the treatment with no cost given."
     },
     {
       "id": "copay-applies-emergency",
@@ -224,8 +224,8 @@
       "scenario": "My sum insured is 10 lakh and I stayed in a room at 8,000 rupees a night for hernia surgery. I have held the policy three years.",
       "expected_verdict": "covered",
       "must_cite": [],
-      "must_not_cite": ["5.1", "5.2"],
-      "why": "1% of 10 lakh is 10,000/day and the room cost 8,000, so the cap is not breached and no proportionate deduction follows. Hernia's 24-month bar is served at three years."
+      "must_not_cite": ["5.2"],
+      "why": "1% of 10 lakh is 10,000/day and the room cost 8,000, so the cap is not breached and no proportionate deduction follows. Hernia's 24-month bar is served at three years. LABEL CHANGED in M13: 5.1 removed from must_not_cite. Citing the room limit as the one the room stays within is a fair justification for covered; relying on the proportionate deduction (5.2) is still wrong."
     },
     {
       "id": "icu-rate-breach",

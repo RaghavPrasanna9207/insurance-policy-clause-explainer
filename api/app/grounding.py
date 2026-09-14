@@ -107,6 +107,42 @@ def verify_quote(quote: str, source_text: str) -> tuple[bool, str]:
     return False, "quote does not appear in the cited clause"
 
 
+# How much of a quotation must survive trimming for the trimmed part to stand.
+MIN_KEPT_SHARE = 0.6
+
+
+def verified_prefix(quote: str, source_text: str) -> str | None:
+    """The longest leading part of `quote` that the clause really contains, or None.
+
+    WHY. Two quotations failed verification in every run, and both had the same
+    shape: the clause's own words, exactly, with something of the model's
+    appended - "…has been accepted BY THE COMPANY" (three words from the clause
+    before), and a whole clause followed by the pipeline's own "EXCEPTIONS - …"
+    annotation. A retry repeated both byte for byte, so asking again does not
+    fix this; the true part is already there to keep.
+
+    Same principle as _TRAILING_REF, generalised: what is kept must match
+    exactly, so nothing invented can hide in it. And it must be most of the
+    quotation - at least MIN_KEPT_SHARE of it, and never shorter than
+    MIN_QUOTE_CHARS - so a true opening followed by a longer invention is not
+    turned into a verified quotation by throwing the invention away.
+
+    Returns the kept words as the model wrote them (its casing and line breaks),
+    so what the reader sees is still a copy of the model's quotation, shortened.
+    """
+    tokens = quote.split()
+    haystack = normalize(source_text)
+    whole = len(normalize(quote))
+    for k in range(len(tokens) - 1, 0, -1):
+        kept = " ".join(tokens[:k]).rstrip(" ,;:")
+        needle = normalize(kept)
+        if len(needle) < MIN_QUOTE_CHARS or len(needle) < MIN_KEPT_SHARE * whole:
+            return None
+        if needle in haystack:
+            return kept
+    return None
+
+
 def verify_citations(
     citations: list[dict], clause_text_by_id: dict[str, str]
 ) -> list[QuoteCheck]:

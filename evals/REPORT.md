@@ -6,11 +6,11 @@ one run against the code and settings stated here.
 | | |
 |---|---|
 | Model | `qwen2.5:7b-instruct-q4_K_M` |
-| Prompt version | `v22-consistency-retry` |
+| Prompt version | `v31-quote-trim` |
 | Decoding | num_ctx 8192, num_predict 1600, temperature 0.0 |
 | Analysis batch size | 1 |
-| Commit | `b2886f5` |
-| Generated | 2026-09-14 08:45 UTC |
+| Commit | `8644da4` |
+| Generated | 2026-09-14 10:09 UTC |
 | Total wall time | 0s (served from cache; a cold run takes several minutes) |
 
 The golden set is a 39-clause synthetic IRDAI-style policy authored for
@@ -25,10 +25,10 @@ cannot drift apart. No real insurer wording is used.
 |---|---:|---|
 | Clause classification (macro-F1) | **1.000** | quality |
 | Risk ranking expectations | **8/9** | quality |
-| Scenario verdict accuracy | **0.875** | quality |
-| Scenario citation recall | **0.742** | quality |
-| Scenario false citation rate | **0.200** | quality |
-| Quote fabrication rate | **0.025** | quality |
+| Scenario verdict accuracy | **1.000** | quality |
+| Scenario citation recall | **0.844** | quality |
+| Scenario false citation rate | **0.000** | quality |
+| Quote fabrication rate | **0.000** | quality |
 | **Citation detection integrity** | **1.000** | **guarantee** |
 
 ### Only one of these is a promise
@@ -93,14 +93,14 @@ inspected, so the metric tests the system rather than rationalising it.
 
 ## 3. Scenario simulator
 
-**Verdict accuracy 0.875** (35/40) · citation recall 0.742 · detection integrity 1.000
+**Verdict accuracy 1.000** (40/40) · citation recall 0.844 · detection integrity 1.000
 
 | Case | Expected | Got | Cited | Quotes verified |
 |---|---|---|---|---|
 | `ped-waiting-not-served` | not_covered | not_covered | 3.2 | yes |
 | `ped-waiting-served` | covered | covered | 2.1, 3.2 | yes |
 | `cosmetic-exclusion` | not_covered | not_covered | 4.1 | yes |
-| `cosmetic-after-accident` | covered | covered | 2.1 (missing 4.1) | yes |
+| `cosmetic-after-accident` | covered | covered | 4.1 | yes |
 | `no-timing-given` | insufficient_information | insufficient_information | 3.1, 3.2, 3.3, 4.3 | yes |
 | `late-notice` | conditional | conditional | 6.1 | yes |
 | `room-rent-breach` | conditional | conditional | 5.1 | yes |
@@ -112,52 +112,31 @@ inspected, so the metric tests the system rather than rationalising it.
 | `dental-no-accident` | not_covered | not_covered | 4.6 | yes |
 | `non-medical-items` | not_covered | not_covered | 4.7 | yes |
 | `not-in-document` | insufficient_information | insufficient_information | — | yes |
-| `cataract-served` | covered | conditional ⚠ | 4.1 | yes |
-| `copay-applies-emergency` | conditional | conditional | 5.3 | yes |
+| `cataract-served` | conditional | conditional | 2.4, 5.4 | yes |
+| `copay-applies-emergency` | conditional | conditional | 2.1, 5.3 | yes |
 | `copay-just-under-sixty` | covered | covered | 2.1 | yes |
 | `copay-unknown-inception-age` | insufficient_information | insufficient_information | 3.1 | yes |
 | `copay-and-room-breach` | conditional | conditional | 5.1, 5.3 | yes |
-| `senior-but-excluded` | not_covered | conditional ⚠ | 4.1, 5.3 | yes |
-| `room-rent-within-cap` | covered | insufficient_information ⚠ | — | yes |
+| `senior-but-excluded` | not_covered | not_covered | 4.1 | yes |
+| `room-rent-within-cap` | covered | covered | 5.1 | yes |
 | `icu-rate-breach` | conditional | conditional | 5.1 | yes |
 | `proportionate-deduction` | conditional | conditional | 5.2 | yes |
-| `cataract-sublimit-amount` | conditional | conditional | 4.1, 5.4 | **flagged** |
+| `cataract-sublimit-amount` | conditional | conditional | 5.4 | yes |
 | `robotic-surgery-limit` | conditional | conditional | 5.5 | yes |
-| `oral-chemo-limit` | conditional | covered ⚠ | 2.1, 4.1 (missing 5.5) | yes |
+| `oral-chemo-limit` | conditional | conditional | 5.5 | yes |
 | `intoxication-injury` | not_covered | not_covered | 4.2 | yes |
 | `infertility-ivf` | not_covered | not_covered | 4.1 (missing 4.5) | yes |
 | `breach-of-law` | not_covered | not_covered | 4.3 (missing 4.4) | yes |
-| `documents-late` | conditional | conditional | 6.2 | yes |
+| `documents-late` | conditional | conditional | 5.1, 5.3, 6.2 | yes |
 | `no-preauth-cashless` | conditional | conditional | 6.4 | yes |
 | `non-disclosure` | not_covered | not_covered | 4.1 (missing 6.3) | yes |
 | `other-policy-contribution` | conditional | conditional | 2.1, 5.1 (missing 6.6) | yes |
 | `pre-hospitalisation-window` | covered | covered | 2.2 | yes |
 | `post-hospitalisation-too-late` | not_covered | not_covered | 2.3 | yes |
-| `ayush-private-clinic` | not_covered | not_covered | 1.1 (missing 2.6) | yes |
+| `ayush-private-clinic` | not_covered | not_covered | 2.6 | yes |
 | `ambulance-admissible` | covered | covered | 2.1 (missing 2.5) | yes |
-| `day-care-not-listed` | insufficient_information | conditional ⚠ | 2.4, 5.1 | yes |
+| `day-care-not-listed` | insufficient_information | insufficient_information | — | yes |
 | `dependant-not-addressed` | insufficient_information | insufficient_information | 3.1, 3.2, 3.3, 3.4 | yes |
-
-### What the misses actually need
-
-These are not random. Read them together:
-
-- **`cataract-served`** — expected `covered`, got `conditional`. 24-month specified-disease waiting period served; day care is covered; under 60 so no co-payment. A sub-limit caps the amount but does not deny the claim.
-- **`senior-but-excluded`** — expected `not_covered`, got `conditional`. Cosmetic surgery for appearance pays zero, and a co-payment reduces an ADMISSIBLE claim. There is nothing to take 20% of. A reduction must never soften a refusal into 'conditional'.
-- **`room-rent-within-cap`** — expected `covered`, got `insufficient_information`. 1% of 10 lakh is 10,000/day and the room cost 8,000, so the cap is not breached and no proportionate deduction follows. Hernia's 24-month bar is served at three years.
-- **`oral-chemo-limit`** — expected `conditional`, got `covered`. Oral chemotherapy is named in the modern treatment limit, restricted to 50% of sum insured per policy year.
-- **`day-care-not-listed`** — expected `insufficient_information`, got `conditional`. In-patient cover needs more than twenty four consecutive hours, so 2.1 does not apply. Day care cover applies only to treatments listed in Annexure II, and this document does not contain that annexure - so whether a six-hour drip qualifies cannot be answered from what is here.
-
-Most require either date arithmetic (is 5 years more than 36 months?)
-or following an exception inside a clause ("unless necessitated by an
-Accident"). That is multi-hop reasoning over interacting rules, which
-is where a 7B model is weakest.
-
-Single-clause classification scores macro-F1 1.000. Combining three interacting rules
-scores 0.875. **The gap between those two
-numbers is the finding**, and it is the case for measuring a hosted
-frontier model on this same set before assuming a bigger model is or
-is not worth it.
 
 ---
 

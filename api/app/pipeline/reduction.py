@@ -74,7 +74,8 @@ because most descriptions mention neither a room nor a sum insured. See
 render() for what that did to the numbers.
 """
 
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
@@ -150,9 +151,41 @@ class ReductionCheck:
     kind: ReductionKind
     status: ReductionStatus
     detail: str
+    # For a JUDGEMENT clause: words of the described treatment that its own
+    # text contains. A lookup, not a decision - see _named_in.
+    named: list[str] = field(default_factory=list)
 
     def describe(self) -> str:
         return f"clause {self.clause_id}: {self.detail}"
+
+
+# Words too general to say WHICH treatment a clause is about. "Gallbladder
+# operation" shares "operation" with "operation theatre charges", and that is
+# not the proportionate-deduction clause naming gallbladder surgery.
+_GENERIC_WORDS = frozenset({
+    "surgery", "surgeries", "treatment", "treatments", "procedure", "procedures",
+    "operation", "therapy", "hospital", "hospitalisation", "hospitalization",
+    "admission", "admitted", "care", "medical", "expenses", "room", "rent", "policy",
+    "claim", "charges", "condition", "disease", "illness", "injury", "health",
+    "unknown", "insured", "person",
+})
+
+
+def _named_in(clause_text: str, facts: dict[str, Any]) -> list[str]:
+    """Words of the person's described treatment that this clause's text contains.
+
+    Measured case: oral chemotherapy, and the modern-treatment clause caps "oral
+    chemotherapy" by name - yet the model, told only to "read" the sub-limit
+    clauses, answered that none applied, three samples of three. Whether a
+    clause mentions a word the person used is a lookup, so code does it.
+    Whether that clause caps this claim stays with the model.
+
+    Uses the extracted procedure and condition rather than the whole question,
+    so "sum insured" and "held the policy" cannot match anything.
+    """
+    described = " ".join(str(facts.get(k) or "") for k in ("procedure", "condition"))
+    mine = {w for w in re.findall(r"[a-z]{4,}", described.lower()) if w not in _GENERIC_WORDS}
+    return sorted(mine & set(re.findall(r"[a-z]{4,}", clause_text.lower())))
 
 
 def _human_rupees(amount: int) -> str:
@@ -206,11 +239,18 @@ def _copay_check(clause, facts, policy_age_days) -> ReductionCheck | None:
         )
 
     if inception_age >= threshold:
+        # "IF this claim is payable at all" is load-bearing. This used to say
+        # "so this claim is paid at 80%", which asserts the one thing the
+        # arithmetic never established - that the claim is paid. Asked about a
+        # nose job bought at 70, the model took the line at its word and
+        # answered conditional over the cosmetic exclusion, three times of
+        # three.
         return ReductionCheck(
             clause.clause_id, ReductionKind.COPAY, ReductionStatus.APPLIES,
             f"aged {inception_age} at inception against a threshold of "
-            f"{threshold} -> the {percent}% co-payment DOES apply, so this "
-            f"claim is paid at {100 - percent}% of the admissible amount",
+            f"{threshold} -> the {percent}% co-payment DOES apply to this "
+            f"person. IF this claim is payable at all, it is paid at "
+            f"{100 - percent}% of the admissible amount",
         )
 
     return ReductionCheck(
@@ -264,11 +304,15 @@ def _room_cap_check(clause, facts) -> ReductionCheck | None:
             f"not paid",
         )
 
+    # "does NOT exceed that limit" on purpose: it is the condition the
+    # proportionate-deduction clause is written in ("where the room rent
+    # exceeds the limit specified in Clause 5.1"), so the model can match the
+    # result to that clause without code having to interpret it.
     return ReductionCheck(
         clause.clause_id, ReductionKind.ROOM_CAP, ReductionStatus.DOES_NOT_APPLY,
         f"{percent}% of {_human_rupees(sum_insured)} is "
         f"{_human_rupees(limit)} per day; {label} of {_human_rupees(charged)} "
-        f"per day are WITHIN that, so this cap costs nothing here",
+        f"per day does NOT exceed that limit, so this cap costs nothing here",
     )
 
 
@@ -302,6 +346,7 @@ def evaluate(clauses, facts: dict[str, Any], policy_age_days: int | None
                     ReductionStatus.JUDGEMENT,
                     "caps or reduces what is paid for certain treatments - "
                     "decide from the clause text whether it covers this one",
+                    named=_named_in(getattr(clause, "text", ""), facts),
                 )
             )
     return checks
@@ -371,7 +416,11 @@ def render(checks: list[ReductionCheck]) -> str:
     # a confident, correct refusal without it and `insufficient_information`
     # with it. A line that adds no information still adds emphasis, and
     # emphasis is not free.
-    computed = applies or unknown or ruled_out
+    # A sub-limit whose own text names the described treatment is a finding
+    # too - a lookup rather than arithmetic, but not a bare reminder.
+    named = [c for c in judgement if c.named]
+    unnamed = [c for c in judgement if not c.named]
+    computed = applies or unknown or ruled_out or named
     if not computed:
         return ""
 
@@ -394,8 +443,17 @@ def render(checks: list[ReductionCheck]) -> str:
     for check in unknown:
         lines.append(f"- CANNOT TELL: {check.describe()}")
 
-    if ruled_out:
-        ids = ", ".join(c.clause_id for c in ruled_out)
+    # A room within its cap gets its own line with the numbers. Every other
+    # ruled-out reduction stays collapsed to its id, for the reason above - but
+    # a room cap is only ever computed when the person named their room rate,
+    # so the room is what they are asking about, and a bare "5.1" left the
+    # model to redo the comparison: "paid at 80% of 8,000", three times of three.
+    within_room = [c for c in ruled_out if c.kind is ReductionKind.ROOM_CAP]
+    collapsed = [c for c in ruled_out if c.kind is not ReductionKind.ROOM_CAP]
+    for check in within_room:
+        lines.append(f"- WITHIN THE LIMIT: {check.describe()}")
+    if collapsed:
+        ids = ", ".join(c.clause_id for c in collapsed)
         lines.append(
             f"- Ruled out by the numbers, so IRRELEVANT here and not worth "
             f"citing: {ids}"
@@ -404,15 +462,24 @@ def render(checks: list[ReductionCheck]) -> str:
     # One line, not one line each. These carry no computed finding - they are
     # a reminder to read a clause that is already in the prompt - and three
     # separate "YOUR CALL" lines gave a reminder the visual weight of a result.
-    if judgement:
-        ids = ", ".join(c.clause_id for c in judgement)
+    for check in named:
+        words = ", ".join(f'"{w}"' for w in check.named)
+        lines.append(
+            f"- NAMES THIS TREATMENT: clause {check.clause_id} mentions {words}, "
+            f"which is in what the person described. Read it: whether it caps "
+            f"this claim is your call from the clause text."
+        )
+    if unnamed:
+        ids = ", ".join(c.clause_id for c in unnamed)
         lines.append(
             f"- Also capped by {ids}, but only for the treatments those clauses "
             f"name. Read them; if this treatment is not one of them, they "
             f"decide nothing here."
         )
 
-    if not applies and not unknown:
+    # Not said beside a named sub-limit: "nothing reduces this claim" right
+    # under "this clause names your treatment" is two lines disagreeing.
+    if not applies and not unknown and not named:
         lines.append(
             "- Nothing here reduces this claim. Some other clause decides it."
         )

@@ -34,11 +34,13 @@ inspectable null that the reasoning prompt is then told about by name.
 """
 
 import logging
+import re
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
 
 from app.config import settings
-from app.grounding import QuoteCheck, verify_citations
+from app.grounding import QuoteCheck, verified_prefix, verify_citations
 from app.llm import client
 from app.llm.prompts import (
     FACTS_SYSTEM,
@@ -160,6 +162,9 @@ class ShortlistClause:
     # stay it counts from. See app/pipeline/window.py.
     cover_window_days: int | None = None
     cover_window_anchor: str | None = None
+    # The section this clause was segmented under. Used to tell whether an
+    # annexure another clause refers to is part of the document at all.
+    section_path: str = ""
 
 
 @dataclass
@@ -285,14 +290,46 @@ FACTS_SCHEMA: dict[str, Any] = {
 }
 
 
-async def extract_facts(scenario: str) -> dict[str, Any]:
-    return await client.complete_json(
+# Words that tie an age to the START of a policy. An age at policy start is
+# only something a person can have said if they talked about the policy
+# beginning at all.
+_POLICY_START = re.compile(
+    r"\b(bought|buy|purchased?|took|taken|take|got|started?|began|begin|"
+    r"signed|joined|inception|enrolled|insured me)\b",
+    re.IGNORECASE,
+)
+
+
+def correct_misfiled_age(facts: dict[str, Any], scenario: str) -> dict[str, Any]:
+    """Move an age filed as "at policy start" to "now" when nothing says the policy started.
+
+    Measured: "My mother, who is 75" and "My father, 82" came back with the age
+    in `age_at_policy_start` and `age` empty - which fires a senior-citizen
+    co-payment at someone whose age at inception was never mentioned. A prompt
+    example made it worse; renaming the `age` field made every third-person
+    sentence fail. So the extraction is checked against the words it came from,
+    the way exceptions are (app/grounding.py): if the question never mentions
+    the policy beginning, the only age it can contain is the age now.
+
+    Only moves; never invents. Both ages given, or start words present -> left
+    exactly as extracted.
+    """
+    start_age = facts.get("age_at_policy_start")
+    if start_age and not facts.get("age") and not _POLICY_START.search(scenario):
+        return facts | {"age": start_age, "age_at_policy_start": None}
+    return facts
+
+
+async def extract_facts(scenario: str, *, use_cache: bool = True) -> dict[str, Any]:
+    facts = await client.complete_json(
         [
             {"role": "system", "content": FACTS_SYSTEM},
             {"role": "user", "content": render_scenario(scenario)},
         ],
         FACTS_SCHEMA,
+        use_cache=use_cache,
     )
+    return correct_misfiled_age(facts, scenario)
 
 
 # --- 5b: shortlist (no LLM) ----------------------------------------------
@@ -329,6 +366,87 @@ def shortlist(
 
     kept.sort(key=lambda c: _sort_key(c.number))
     return kept
+
+
+# Standard English function words: long enough to pass the length filter,
+# meaningless as evidence of what a clause is about. Not tuned to any policy.
+_FUNCTION_WORDS = frozenset({
+    "after", "before", "because", "another", "itself", "taken", "taking", "their",
+    "there", "these", "those", "which", "while", "would", "could", "should", "about",
+    "again", "other", "under", "until", "being", "having", "every", "where", "whose",
+    "since", "though",
+})
+# A word shared with the question counts only if at most this many clauses use it.
+_RARE_IN_POLICY = 2
+_MIN_SHARED = 2
+
+
+def _stems(text: str) -> dict[str, str]:
+    """Six-letter stems of the words in `text`, each mapped to a word it came from.
+
+    Six letters, so "Ayurvedic" meets "Ayurveda" and "accreditation" meets
+    "accredited", without a stemming library for one comparison.
+    """
+    out: dict[str, str] = {}
+    for word in re.findall(r"[a-z]{5,}", text.lower()):
+        if word not in _FUNCTION_WORDS:
+            out.setdefault(word[:6], word)
+    return out
+
+
+def shared_words(scenario: str, clauses: list[ShortlistClause]) -> dict[str, list[str]]:
+    """Clauses that share several unusual words with the question.
+
+    Measured case: Ayurvedic treatment at an unaccredited private clinic. The
+    verdict was right and the citation was the definition of a hospital, in
+    every run on record - and again when the model was asked for citations in a
+    separate turn, so it was not a slip. The AYUSH clause shares five unusual
+    words with that question.
+
+    NOT RETRIEVAL. This project deliberately has none: every clause is still in
+    the prompt, and nothing is ranked or dropped. It is a lookup reported as a
+    lookup - these words appear in both - and deciding what a shared word means
+    stays with the model.
+
+    Precision over recall, on purpose. A word counts only if at most two
+    clauses use it, and a clause is named only with at least two such words:
+    measured on the 40 eval questions, a single shared word hinted at 38 of
+    them, including clauses they must not cite ("years" appears in the
+    co-payment clause). Two words hinted at 8, each the clause that decides the
+    case. Those thresholds were chosen on that same set, so 8 of 8 is partly
+    fitted - which is why the hint only names clauses and never sets anything.
+    """
+    per_clause = {c.clause_id: _stems(c.text) for c in clauses}
+    used_by = Counter(s for stems in per_clause.values() for s in stems)
+    mine = _stems(scenario)
+    rare_mine = {s for s in mine if 0 < used_by[s] <= _RARE_IN_POLICY}
+
+    shared: dict[str, list[str]] = {}
+    for clause_id, stems in per_clause.items():
+        common = rare_mine & stems.keys()
+        if len(common) >= _MIN_SHARED:
+            shared[clause_id] = sorted(mine[s] for s in common)
+    return shared
+
+
+_ANNEXURE = re.compile(r"\bannexure\s+([ivxl]+|\d+)\b", re.IGNORECASE)
+
+
+def absent_annexures(clauses: list[ShortlistClause]) -> dict[str, list[str]]:
+    """Clauses that refer to an annexure the document does not contain.
+
+    An annexure counts as present only if some clause was segmented under a
+    heading naming it (segment.py recognises "ANNEXURE <n>" as a section head).
+    Whether a section exists is a lookup; what it would have said is not, so
+    this reports only the absence.
+    """
+    present = {m.group(1).upper() for c in clauses for m in _ANNEXURE.finditer(c.section_path)}
+    absent: dict[str, list[str]] = {}
+    for clause in clauses:
+        labels = sorted({m.group(1).upper() for m in _ANNEXURE.finditer(clause.text)} - present)
+        if labels:
+            absent[clause.clause_id] = [f"Annexure {label}" for label in labels]
+    return absent
 
 
 def _sort_key(number: str) -> tuple:
@@ -396,11 +514,14 @@ class Computed:
     waiting: list[waiting.WaitingCheck]
     reductions: list[reduction.ReductionCheck]
     windows: list[window.WindowCheck]
+    # Clause id -> annexures it refers to that the document does not contain.
+    absent: dict[str, list[str]] = field(default_factory=dict)
 
 
 def compute(facts: dict[str, Any], clauses: list[ShortlistClause]) -> Computed:
     held = policy_age_days(facts)
     return Computed(
+        absent=absent_annexures(clauses),
         # Every waiting period compared against the stated policy age, in
         # Python, before the model sees anything. Nothing is guessed: if the
         # person said nothing, every waiting period comes back UNKNOWN rather
@@ -529,6 +650,33 @@ def find_contradictions(
             f"co-payment, cap or sub-limit reduces a claim that IS paid, and a "
             f"refused claim has nothing to reduce. Decide first whether it is refused."
         )
+
+    # Paying a claim on the strength of a clause that points to a list this
+    # document does not contain. Measured on `day-care-not-listed`: day care is
+    # paid for treatment "listed in Annexure II", there is no Annexure II, and
+    # the model answered that six hours on a drip is covered. A note printed
+    # under the clause in every prompt was tried first, and reverted: it did
+    # not fix this case and moved four unrelated ones. Checking only answers
+    # that actually lean on such a clause reaches only those answers. Nothing
+    # is dropped - the absence proves the answer unchecked, not wrong.
+    #
+    # Not asked when a sub-limit elsewhere names the described treatment. "Treatment
+    # of cataract shall be limited to 25,000" presupposes cataract treatment is
+    # paid, so the missing day-care list is not what the answer rests on. Asked
+    # anyway, the retry turned a correct cataract answer into a cosmetic-surgery
+    # refusal, two samples of two.
+    names_treatment = any(c.named for c in computed.reductions)
+    if verdict in (Verdict.COVERED, Verdict.CONDITIONAL) and not names_treatment:
+        for citation in citations:
+            names = computed.absent.get(citation.clause_id)
+            if citation.effect == "permits" and names:
+                listed = " and ".join(names)
+                problems.append(
+                    f"- You relied on clause {citation.clause_id} to pay this claim. "
+                    f"Clause {citation.clause_id} refers to {listed}, which is not "
+                    f"included in this document, so anything that depends on what "
+                    f"{listed} lists cannot be checked here."
+                )
     return problems, irrelevant
 
 
@@ -538,16 +686,22 @@ def _read_answer(
     """The model's citations, each verified against its clause, and its verdict."""
     raw_citations = payload.get("deciding_clauses", [])
     checks: list[QuoteCheck] = verify_citations(raw_citations, source_by_id)
-    citations = [
-        Citation(
+    citations = []
+    for raw, check in zip(raw_citations, checks):
+        quote, verified, reason_text = raw.get("quote", ""), check.verified, check.reason
+        if not verified:
+            # The clause's own words with something appended: keep the words.
+            # See grounding.verified_prefix for why a retry could not do this.
+            kept = verified_prefix(quote, source_by_id.get(check.clause_id, ""))
+            if kept is not None:
+                quote, verified, reason_text = kept, True, ""
+        citations.append(Citation(
             clause_id=check.clause_id,
-            quote=raw.get("quote", ""),
+            quote=quote,
             effect=raw.get("effect", "permits"),
-            verified=check.verified,
-            unverified_reason=check.reason,
-        )
-        for raw, check in zip(raw_citations, checks)
-    ]
+            verified=verified,
+            unverified_reason=reason_text,
+        ))
     return citations, payload.get("verdict", Verdict.INSUFFICIENT_INFORMATION)
 
 

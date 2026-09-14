@@ -50,6 +50,20 @@ def test_over_the_age_threshold_at_inception_applies():
     assert "80%" in checks[0].detail
 
 
+def test_an_applicable_copay_does_not_claim_the_claim_is_paid():
+    """Regression test for `senior-but-excluded`.
+
+    Bought at 70, then a nose job for appearance: refused outright by the
+    cosmetic exclusion. The line said the co-payment applies "so this claim is
+    paid at 80%" - but the arithmetic only established the AGE condition.
+    Whether this claim is paid at all was never computed, and here it is not.
+    The model answered conditional, three samples of three. A computed line
+    must not state more than was computed."""
+    detail = evaluate([COPAY], {"age_at_policy_start": 70}, policy_age_days=1095)[0].detail
+    assert "so this claim is paid" not in detail
+    assert "IF this claim is payable at all" in detail
+
+
 def test_under_the_age_threshold_does_not_apply():
     """The false-positive direction, which matters just as much. A system
     pushed to hunt for co-payments will start finding them for people who do
@@ -118,6 +132,25 @@ def test_a_room_within_the_cap_does_not_apply():
     assert checks[0].status is ReductionStatus.DOES_NOT_APPLY
 
 
+def test_a_room_within_the_cap_is_stated_with_its_numbers():
+    """Regression test for `room-rent-within-cap`.
+
+    Collapsed to "Ruled out ...: 5.1", the finding reached the model without its
+    reason, and the model did its own proportion - "paid at 80% of 8,000" -
+    reading the proportionate-deduction clause, which applies only "where the
+    room rent EXCEEDS the limit specified in Clause 5.1". The room is what this
+    person asked about, so the result gets its own line, in the same words the
+    dependent clause uses."""
+    facts = {
+        "sum_insured_value": 10, "sum_insured_unit": "lakh",
+        "room_rent_per_day_inr": 8000,
+    }
+    block = render(evaluate([ROOM, COPAY], facts | {"age_at_policy_start": 40}, 1095))
+    assert "does NOT exceed" in block and "10,000" in block and "8,000" in block
+    # A ruled-out co-payment is still a non-event, collapsed to its id.
+    assert "not worth citing: 5.3" in block
+
+
 def test_icu_is_compared_against_the_icu_rate():
     """2% of 5 lakh is 10,000, so 12,000 a day in intensive care exceeds it -
     while the same charge against the 1% ROOM rate would be a different
@@ -180,15 +213,22 @@ def test_ruled_out_reductions_collapse_to_one_line():
     while the arithmetic behind those lines was perfect.
 
     So reductions that bite lead and get a line each; ones ruled out share a
-    single line naming them as irrelevant."""
+    single line naming them as irrelevant.
+
+    One exception, measured: a room within its cap gets its own line with the
+    numbers (see test_a_room_within_the_cap_is_stated_with_its_numbers),
+    because a room cap is only computed when the person named their room rate
+    - it is the subject of their question, not a non-event."""
+    other_copay = FakeClause("5.6", copay_percent=10, copay_min_age_at_inception=65)
     facts = {
         "age_at_policy_start": 50,
         "sum_insured_value": 10, "sum_insured_unit": "lakh",
         "room_rent_per_day_inr": 8000,
     }
-    block = render(evaluate([COPAY, ROOM], facts, 1460))
+    block = render(evaluate([COPAY, other_copay, ROOM], facts, 1460))
     assert block.count("APPLIES") == 0
-    assert "5.1, 5.3" in block or "5.3, 5.1" in block
+    assert "not worth citing: 5.3, 5.6" in block
+    assert "WITHIN THE LIMIT: clause 5.1" in block
 
 
 def test_the_block_says_a_reduction_never_refuses_a_claim():
@@ -269,3 +309,57 @@ def test_judgement_clauses_share_one_line_when_something_was_computed():
     block = render(evaluate(clauses, {"age_at_policy_start": 67}, 1095))
     assert "5.2, 5.4, 5.5" in block
     assert block.count("Also capped by") == 1
+
+
+@dataclass
+class TextClause(FakeClause):
+    text: str = ""
+
+
+CATARACT = TextClause(
+    "5.4", text="5.4 Cataract Sub-limit Expenses in respect of treatment of cataract shall be "
+                "limited to twenty five thousand rupees per eye."
+)
+MODERN = TextClause(
+    "5.5", text="5.5 Modern Treatment Limit Expenses incurred on advanced treatment methods "
+                "including robotic surgery, stem cell therapy, oral chemotherapy and deep brain "
+                "stimulation shall be restricted to fifty percent of the Sum Insured."
+)
+PROPORTIONATE = TextClause(
+    "5.2", text="5.2 Proportionate Deduction Where the Insured Person is admitted to a room "
+                "category whose rent exceeds the limit, surgeon fees and operation theatre "
+                "charges shall be reduced."
+)
+
+
+def test_a_sub_limit_naming_the_described_treatment_says_so():
+    """Regression test for `oral-chemo-limit`.
+
+    Oral chemotherapy, and clause 5.5 caps "oral chemotherapy" by name. The
+    block said only "Also capped by 5.2, 5.4, 5.5, but only for the treatments
+    those clauses name. Read them" - and the model answered that no sub-limit
+    applied, three samples of three. Whether a clause's text contains a word
+    the person used is a lookup, so code does it; whether the cap bites is
+    still the model's call."""
+    facts = {"procedure": "oral chemotherapy", "age_at_policy_start": 41}
+    block = render(evaluate([COPAY, PROPORTIONATE, CATARACT, MODERN], facts, 3285))
+    assert "NAMES THIS TREATMENT: clause 5.5" in block
+    assert "chemotherapy" in block
+    assert "Also capped by 5.2, 5.4," in block  # the others stay on the shared line
+    assert "Nothing here reduces this claim" not in block
+
+
+def test_generic_words_do_not_count_as_naming_a_treatment():
+    """"Gallbladder operation" shares the word "operation" with "operation
+    theatre charges". That is not the proportionate-deduction clause naming
+    gallbladder surgery."""
+    facts = {"procedure": "gallbladder operation", "condition": "unknown"}
+    checks = evaluate([PROPORTIONATE, CATARACT, MODERN], facts, 1460)
+    assert all(not c.named for c in checks)
+
+
+def test_a_named_sub_limit_is_worth_saying_even_when_nothing_else_was_computed():
+    """The silence rule above is for blocks with no finding. A clause whose
+    text names the described treatment is a finding."""
+    block = render(evaluate([CATARACT], {"procedure": "cataract operation"}, 1460))
+    assert "NAMES THIS TREATMENT: clause 5.4" in block
