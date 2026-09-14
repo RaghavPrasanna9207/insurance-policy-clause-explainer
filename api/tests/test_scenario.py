@@ -354,6 +354,163 @@ def test_a_refusal_citing_that_clause_is_not_questioned():
     assert find_contradictions([_citation("2.4", "permits")], "not_covered", computed) == ([], [])
 
 
+ROOM_TEXT = "5.1 Room Rent Limit Room rent shall be limited to one percent of the Sum Insured per day."
+
+
+def test_covered_while_citing_a_reduction_that_applies_is_a_contradiction():
+    """ICU at 9,000 a day against a 6,000 cap, three fresh samples of three:
+    answered covered, citing the cap as reducing the claim. The arithmetic
+    agrees it reduces - which is exactly why the answer cannot be covered."""
+    from app.pipeline.scenario import ShortlistClause, compute, find_contradictions
+
+    room = ShortlistClause("5.1", "t:1", "5.1", "sub_limit", ROOM_TEXT, 1.0,
+                           cap_percent_of_sum_insured=1)
+    facts = {"sum_insured_value": 5, "sum_insured_unit": "lakh", "room_rent_per_day_inr": 9000}
+    cited = [_citation("5.1", "reduces")]
+    problems, irrelevant = find_contradictions(cited, "covered", compute(facts, [room]))
+    assert "EXCEED" in problems[0] and "conditional" in problems[0]
+    assert irrelevant == []  # the citation is right; the verdict disagrees with it
+    assert find_contradictions(cited, "conditional", compute(facts, [room])) == ([], [])
+
+
+def test_a_reduction_nobody_raised_cited_as_reducing_is_found():
+    """`documents-late` cited the room cap and the senior co-payment as reducing
+    a claim about late paperwork; a held-out war injury did the same. The person
+    mentioned no room and no age, and the arithmetic says exactly that."""
+    from app.pipeline.scenario import ShortlistClause, compute, unraised_reductions
+
+    room = ShortlistClause("5.1", "t:1", "5.1", "sub_limit", ROOM_TEXT, 1.0,
+                           cap_percent_of_sum_insured=1)
+    cited = _citation("5.1", "reduces")
+    assert unraised_reductions([cited], compute({}, [room])) == [cited]
+
+    facts = {"sum_insured_value": 5, "sum_insured_unit": "lakh", "room_rent_per_day_inr": 9000}
+    assert unraised_reductions([cited], compute(facts, [room])) == []
+
+
+def test_an_unraised_reduction_is_filtered_not_retried(monkeypatch):
+    """Retrying on it pushed right answers to insufficient_information, so it is
+    removed quietly - and only when another citation still stands."""
+    import asyncio
+
+    from app.pipeline.scenario import ShortlistClause, run_scenario
+
+    clauses = _clauses() + [ShortlistClause("5.1", "t:9", "5.1", "sub_limit", ROOM_TEXT, 1.0,
+                                            cap_percent_of_sum_insured=1)]
+    answer = {
+        "verdict": "covered", "reasoning": "r", "missing_information": [],
+        "deciding_clauses": [
+            {"clause_id": "2.1", "quote": INPATIENT_QUOTE, "effect": "permits"},
+            {"clause_id": "5.1", "quote": "Room rent shall be limited to one percent", "effect": "reduces"},
+        ],
+    }
+    sent = _fake_model(monkeypatch, [answer])
+    result = asyncio.run(run_scenario("held five years", clauses))
+    assert len(sent) == 1
+    assert [c.clause_id for c in result.citations] == ["2.1"]
+
+    alone = answer | {"verdict": "conditional", "deciding_clauses": [answer["deciding_clauses"][1]]}
+    _fake_model(monkeypatch, [alone])
+    result = asyncio.run(run_scenario("held five years", clauses))
+    assert [c.clause_id for c in result.citations] == ["5.1"] and result.verdict == "conditional"
+
+
+def test_leaning_on_a_missing_list_is_questioned_whatever_the_effect_label():
+    """A held-out short procedure cited the day-care clause as "delays", not
+    "permits", and slipped past a check that looked only for "permits"."""
+    from app.pipeline.scenario import ShortlistClause, compute, find_contradictions
+
+    day_care = ShortlistClause("2.4", "t:1", "2.4", "coverage", DAY_CARE_TEXT, 1.0)
+    problems, _ = find_contradictions([_citation("2.4", "delays")], "conditional",
+                                      compute({}, [day_care]))
+    assert "Annexure II" in problems[0]
+
+
+def test_a_claim_resting_only_on_a_missing_list_is_downgraded_after_the_retry(monkeypatch):
+    """Asked again, the answer still pays on nothing but a clause whose list is
+    not in the document (and a definition). That is an answer with nothing
+    checkable behind it - the same case as an answer with no citations - so it
+    goes the same safe way."""
+    import asyncio
+
+    from app.pipeline.scenario import ShortlistClause, run_scenario
+
+    clauses = [
+        ShortlistClause("1.4", "t:0", "1.4", "definition", "1.4 Day Care Treatment means treatment under twenty four hours.", 1.0),
+        ShortlistClause("2.4", "t:1", "2.4", "coverage", DAY_CARE_TEXT, 1.0),
+    ]
+    leaning = {
+        "verdict": "conditional", "reasoning": "r", "missing_information": [],
+        "deciding_clauses": [
+            {"clause_id": "1.4", "quote": "Day Care Treatment means treatment under twenty four hours", "effect": "permits"},
+            {"clause_id": "2.4", "quote": "Day Care Treatment listed in Annexure II", "effect": "delays"},
+        ],
+    }
+    sent = _fake_model(monkeypatch, [leaning, leaning])
+    result = asyncio.run(run_scenario("three hours, home the same day", clauses))
+    assert len(sent) == 2
+    assert result.verdict == "insufficient_information"
+
+
+def test_a_refusal_that_abandons_the_missing_list_names_no_refusing_clause(monkeypatch):
+    """`day-care-not-listed`, four fresh samples of four: told the day-care list
+    is missing, the retry answered not_covered "because in-patient cover needs
+    24 hours", citing that cover clause as permitting. A refusal with no clause
+    refusing is as unsupported as a payment resting on a missing list."""
+    import asyncio
+
+    from app.pipeline.scenario import run_scenario
+
+    clauses = _clauses() + [_day_care_clause()]
+    first = {
+        "verdict": "conditional", "reasoning": "r", "missing_information": [],
+        "deciding_clauses": [{"clause_id": "2.4", "quote": "Day Care Treatment listed in Annexure II", "effect": "permits"}],
+    }
+    abandoned = _answer("not_covered", "2.1", INPATIENT_QUOTE, "permits")
+    _fake_model(monkeypatch, [first, abandoned])
+    assert asyncio.run(run_scenario("six hours on a drip", clauses)).verdict == "insufficient_information"
+
+
+def test_a_refusal_naming_a_refusing_clause_stands(monkeypatch):
+    import asyncio
+
+    from app.pipeline.scenario import ShortlistClause, run_scenario
+
+    exclusion = ShortlistClause("4.9", "t:8", "4.9", "exclusion",
+                                "4.9 Drips are not covered under this policy at all.", 1.0)
+    clauses = _clauses() + [_day_care_clause(), exclusion]
+    first = {
+        "verdict": "conditional", "reasoning": "r", "missing_information": [],
+        "deciding_clauses": [{"clause_id": "2.4", "quote": "Day Care Treatment listed in Annexure II", "effect": "permits"}],
+    }
+    refused = _answer("not_covered", "4.9", "Drips are not covered under this policy", "denies")
+    _fake_model(monkeypatch, [first, refused])
+    assert asyncio.run(run_scenario("six hours on a drip", clauses)).verdict == "not_covered"
+
+
+def _day_care_clause():
+    from app.pipeline.scenario import ShortlistClause
+
+    return ShortlistClause("2.4", "t:7", "2.4", "coverage", DAY_CARE_TEXT, 1.0)
+
+
+def test_a_claim_with_another_basis_is_not_downgraded(monkeypatch):
+    import asyncio
+
+    from app.pipeline.scenario import ShortlistClause, run_scenario
+
+    clauses = _clauses() + [ShortlistClause("2.4", "t:9", "2.4", "coverage", DAY_CARE_TEXT, 1.0)]
+    both = {
+        "verdict": "covered", "reasoning": "r", "missing_information": [],
+        "deciding_clauses": [
+            {"clause_id": "2.1", "quote": INPATIENT_QUOTE, "effect": "permits"},
+            {"clause_id": "2.4", "quote": "Day Care Treatment listed in Annexure II", "effect": "permits"},
+        ],
+    }
+    _fake_model(monkeypatch, [both, both])
+    assert asyncio.run(run_scenario("held five years", clauses)).verdict == "covered"
+
+
 def test_a_treatment_the_policy_names_elsewhere_is_not_questioned():
     """`cataract-served`: a day-care cataract operation. The cataract sub-limit
     names the treatment and so presupposes it is paid; the missing day-care
@@ -423,6 +580,24 @@ def test_a_citation_still_contradicting_after_the_retry_is_dropped(monkeypatch):
     assert len(sent) == 2  # one retry, not a loop
     assert result.citations == []
     assert result.verdict == "insufficient_information"
+
+
+def test_a_covered_answer_keeps_a_cleared_clause_relabelled_as_permitting(monkeypatch):
+    """`room-rent-within-cap`, four fresh samples of four: the retry answered
+    covered with the right reason and still labelled the room cap "reduces".
+    Dropping it left a right answer with nothing behind it, and the downgrade
+    turned it into insufficient_information."""
+    import asyncio
+
+    from app.pipeline.scenario import run_scenario
+
+    _fake_model(monkeypatch, [
+        _answer("not_covered", "3.2", PED_QUOTE, "denies"),
+        _answer("covered", "3.2", PED_QUOTE, "denies"),
+    ])
+    result = asyncio.run(run_scenario("held five years", _clauses()))
+    assert result.verdict == "covered"
+    assert [(c.clause_id, c.effect) for c in result.citations] == [("3.2", "permits")]
 
 
 def test_a_consistent_answer_makes_no_second_call(monkeypatch):

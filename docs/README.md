@@ -177,6 +177,16 @@ Majority-of-three verdict accuracy 0.925 to 0.975, failed quotations to zero, an
 - **Failure 40: a design promise the code never kept** - the documented quote retry did not exist; built, it fixed 0 of 2; replaced by trimming appended words, with a guard against rescuing inventions.
 - **Failure 41: the test question inside the prompt** - the reasoning prompt's example is an eval case. Replacing it broke 8 cases, so the headline score depends on it. Open.
 
+### M14 - A score on questions it has never seen
+Held-out scenario batches, and what they said: about 0.83-0.85 on unseen questions against 0.95 on the tuned set. **If you only read one entry about evaluation, read Concept 36.**
+
+- **Concept 36: a score on the cases you tuned against** - hundreds of reasonable keep-or-revert decisions fit a system to its test set. The first held-out batch scored 0.750 against 0.975. Once held-out failures are read, the batch is no longer held out; a second batch was written before it was run.
+- **Failure 42: "unknown is the honest answer", and it answered nothing else** - one sentence stopped the fact extractor reading. The fix improved the extractor and cost six main-set cases, so it was reverted: the end-to-end measurement decides.
+- **A missing list, finished** - an effect label that slipped past a check, a downgrade when the retry rests on nothing checkable, and a refusal that names no refusing clause.
+- **Failure 43: a retry that talked right answers out of themselves** - turned into a filter that removes an unsupported citation and can never change a verdict.
+- **Failure 44: a fallback that destroyed a corrected answer** - the retry fixed the verdict and not the label, and the safety fallback threw the answer away.
+- **Failure 45: blaming the last change for a drop that was sampling** - check a change can reach the cases that moved before attributing the movement to it.
+
 ---
 
 ## Related documents

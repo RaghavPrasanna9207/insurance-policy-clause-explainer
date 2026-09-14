@@ -12,6 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "evals"))
 
 from run_scenario_eval import (  # noqa: E402
+    citation_problems,
     compare_with_previous,
     majority,
     stability_section,
@@ -158,3 +159,21 @@ def test_a_three_way_split_has_no_majority_and_counts_as_wrong():
     out = majority(samples({"a": "covered"}, {"a": "conditional"}, {"a": "not_covered"}))
     assert out[0]["majority"] is None
     assert not out[0]["ok"]
+
+
+def test_citation_problems_name_the_case_and_how_often():
+    """A rate says one guarded case in five cited a forbidden clause. Which
+    case, and in how many samples, is what anyone fixing it needs - and a
+    summary that printed only the rate left that unrecorded."""
+    def cited(cid, cites, required=(), forbidden=()):
+        return {"id": cid, "cited": sorted(cites), "required": sorted(required),
+                "wrongly_cited": sorted(set(cites) & set(forbidden))}
+
+    runs = [
+        {"rows": [cited("a", {"5.3"}, forbidden={"5.3"}), cited("b", {"2.1"}, required={"6.6"})]},
+        {"rows": [cited("a", set(), forbidden={"5.3"}), cited("b", {"2.1"}, required={"6.6"})]},
+    ]
+    assert citation_problems(runs) == {
+        "a": ["cited forbidden 5.3 in 1/2"],
+        "b": ["missing 6.6 in 2/2"],
+    }

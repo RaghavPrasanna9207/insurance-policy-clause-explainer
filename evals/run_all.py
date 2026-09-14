@@ -63,7 +63,17 @@ def _cache_note(seconds: float) -> str:
     return ""
 
 
-def build(classification: dict, scenario: dict, seconds: float) -> str:
+# What each held-out batch has been exposed to, stated beside its number. A
+# held-out score is only as clean as its history, and the history is the point.
+HELDOUT_NOTES = {
+    "1": "read while diagnosing M14 failures - no longer clean",
+    "2": "written before running; one case read while diagnosing",
+}
+
+
+def build(classification: dict, scenario: dict, seconds: float,
+          heldout: dict[str, dict] | None = None) -> str:
+    heldout = heldout or {}
     rank = classification.get("ranking") or {}
 
     lines = [
@@ -102,6 +112,14 @@ def build(classification: dict, scenario: dict, seconds: float) -> str:
         )
     lines += [
         f"| Scenario verdict accuracy | **{scenario['verdict_accuracy']:.3f}** | quality |",
+    ]
+    for batch, res in heldout.items():
+        lines.append(
+            f"| Scenario verdict accuracy, held-out batch {batch} ({res['total']} cases, "
+            f"{HELDOUT_NOTES.get(batch, 'never tuned on')}) | **{res['verdict_accuracy']:.3f}** "
+            f"| quality |"
+        )
+    lines += [
         f"| Scenario citation recall | **{scenario['citation_recall']:.3f}** | quality |",
         f"| Scenario false citation rate | "
         f"**{scenario['false_citation_rate']:.3f}** | quality |",
@@ -239,6 +257,35 @@ def build(classification: dict, scenario: dict, seconds: float) -> str:
             "is not worth it.",
         ]
 
+    if heldout:
+        lines += [
+            "",
+            "---",
+            "",
+            "## 3b. Held-out scenarios",
+            "",
+            "The main 40 cases have been used to make many keep-or-revert decisions, and",
+            "the reasoning prompt contains one of them as its example. A score on cases",
+            "you tuned against measures how well the system fits them. These batches",
+            "were written separately and are run only to measure, so the gap between",
+            "their score and the main set's is an estimate of how much of the main",
+            "score is fit rather than skill. Single run each; see the learning log for",
+            "the majority-of-three figures.",
+            "",
+        ]
+        for batch, res in heldout.items():
+            lines.append(
+                f"**Batch {batch}** ({HELDOUT_NOTES.get(batch, 'never tuned on')}): "
+                f"verdict accuracy {res['verdict_accuracy']:.3f} "
+                f"({sum(r['verdict_ok'] for r in res['rows'])}/{res['total']}), "
+                f"citation recall {res['citation_recall']:.3f}, "
+                f"detection integrity {res['detection_integrity']:.3f}"
+            )
+            for row in res["rows"]:
+                if not row["verdict_ok"]:
+                    lines.append(f"- `{row['id']}`: expected `{row['expected']}`, got `{row['got']}`")
+            lines.append("")
+
     lines += [
         "",
         "---",
@@ -289,8 +336,15 @@ def main() -> None:
     )
     run_scenario_eval.record_run(scenario)
 
+    # Held-out batches: measured, never recorded into the history the main
+    # set's comparisons and watchlist are computed from.
+    heldout = {
+        batch: asyncio.run(run_scenario_eval.run(use_cache=use_cache, cases_path=path))
+        for batch, path in run_scenario_eval.HELDOUT_PATHS.items()
+    }
+
     seconds = time.perf_counter() - started
-    REPORT_PATH.write_text(build(classification, scenario, seconds), encoding="utf-8")
+    REPORT_PATH.write_text(build(classification, scenario, seconds, heldout), encoding="utf-8")
 
     print()
     print("=" * 60)
@@ -299,6 +353,8 @@ def main() -> None:
     if rank:
         print(f"  ranking expectations    : {rank['passed']}/{rank['total']}")
     print(f"  scenario verdict acc.   : {scenario['verdict_accuracy']:.3f}")
+    for batch, res in heldout.items():
+        print(f"  held-out batch {batch}      : {res['verdict_accuracy']:.3f}")
     print(f"  citation recall         : {scenario['citation_recall']:.3f}")
     print(f"  fabrication rate        : {scenario['fabrication_rate']:.3f}")
     print(f"  DETECTION INTEGRITY     : {scenario['detection_integrity']:.3f}  "
@@ -311,7 +367,7 @@ def main() -> None:
     # A non-zero exit if the guarantee is broken, so this can gate a pipeline.
     # The quality numbers deliberately do NOT gate: they are allowed to be poor,
     # and a threshold on them would only invite tuning to the threshold.
-    if scenario["detection_integrity"] < 1.0:
+    if any(r["detection_integrity"] < 1.0 for r in [scenario, *heldout.values()]):
         sys.exit(1)
 
 

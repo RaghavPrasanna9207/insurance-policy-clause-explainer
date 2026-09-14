@@ -6,11 +6,11 @@ one run against the code and settings stated here.
 | | |
 |---|---|
 | Model | `qwen2.5:7b-instruct-q4_K_M` |
-| Prompt version | `v31-quote-trim` |
+| Prompt version | `v38-covered-but-reduced` |
 | Decoding | num_ctx 8192, num_predict 1600, temperature 0.0 |
 | Analysis batch size | 1 |
-| Commit | `8644da4` |
-| Generated | 2026-09-14 10:09 UTC |
+| Commit | `2da3dd6` |
+| Generated | 2026-09-14 12:35 UTC |
 | Total wall time | 0s (served from cache; a cold run takes several minutes) |
 
 The golden set is a 39-clause synthetic IRDAI-style policy authored for
@@ -26,6 +26,8 @@ cannot drift apart. No real insurer wording is used.
 | Clause classification (macro-F1) | **1.000** | quality |
 | Risk ranking expectations | **8/9** | quality |
 | Scenario verdict accuracy | **1.000** | quality |
+| Scenario verdict accuracy, held-out batch 1 (16 cases, read while diagnosing M14 failures - no longer clean) | **0.812** | quality |
+| Scenario verdict accuracy, held-out batch 2 (13 cases, written before running; one case read while diagnosing) | **0.846** | quality |
 | Scenario citation recall | **0.844** | quality |
 | Scenario false citation rate | **0.000** | quality |
 | Quote fabrication rate | **0.000** | quality |
@@ -127,16 +129,38 @@ inspected, so the metric tests the system rather than rationalising it.
 | `intoxication-injury` | not_covered | not_covered | 4.2 | yes |
 | `infertility-ivf` | not_covered | not_covered | 4.1 (missing 4.5) | yes |
 | `breach-of-law` | not_covered | not_covered | 4.3 (missing 4.4) | yes |
-| `documents-late` | conditional | conditional | 5.1, 5.3, 6.2 | yes |
+| `documents-late` | conditional | conditional | 6.2 | yes |
 | `no-preauth-cashless` | conditional | conditional | 6.4 | yes |
 | `non-disclosure` | not_covered | not_covered | 4.1 (missing 6.3) | yes |
-| `other-policy-contribution` | conditional | conditional | 2.1, 5.1 (missing 6.6) | yes |
+| `other-policy-contribution` | conditional | conditional | 2.1 (missing 6.6) | yes |
 | `pre-hospitalisation-window` | covered | covered | 2.2 | yes |
 | `post-hospitalisation-too-late` | not_covered | not_covered | 2.3 | yes |
 | `ayush-private-clinic` | not_covered | not_covered | 2.6 | yes |
 | `ambulance-admissible` | covered | covered | 2.1 (missing 2.5) | yes |
 | `day-care-not-listed` | insufficient_information | insufficient_information | — | yes |
 | `dependant-not-addressed` | insufficient_information | insufficient_information | 3.1, 3.2, 3.3, 3.4 | yes |
+
+---
+
+## 3b. Held-out scenarios
+
+The main 40 cases have been used to make many keep-or-revert decisions, and
+the reasoning prompt contains one of them as its example. A score on cases
+you tuned against measures how well the system fits them. These batches
+were written separately and are run only to measure, so the gap between
+their score and the main set's is an estimate of how much of the main
+score is fit rather than skill. Single run each; see the learning log for
+the majority-of-three figures.
+
+**Batch 1** (read while diagnosing M14 failures - no longer clean): verdict accuracy 0.812 (13/16), citation recall 0.583, detection integrity 1.000
+- `ho-war-injury`: expected `not_covered`, got `covered`
+- `ho-knee-replacement-served`: expected `covered`, got `not_covered`
+- `ho-copay-derived-age`: expected `conditional`, got `not_covered`
+
+**Batch 2** (written before running; one case read while diagnosing): verdict accuracy 0.846 (11/13), citation recall 1.000, detection integrity 1.000
+- `ho2-emergency-notice-on-time`: expected `covered`, got `conditional`
+- `ho2-gallbladder-no-timing`: expected `insufficient_information`, got `conditional`
+
 
 ---
 

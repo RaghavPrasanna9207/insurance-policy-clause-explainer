@@ -36,7 +36,7 @@ inspectable null that the reasoning prompt is then told about by name.
 import logging
 import re
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from app.config import settings
@@ -621,7 +621,6 @@ def find_contradictions(
         c.clause_id: c for c in computed.reductions
         if c.status is reduction.ReductionStatus.DOES_NOT_APPLY
     }
-
     problems: list[str] = []
     irrelevant: list[Citation] = []
     for citation in citations:
@@ -641,6 +640,24 @@ def find_contradictions(
     # contradiction for a nose job bought at 70 - "not covered ... however the
     # 20% co-payment applies" - and answered conditional. No arithmetic is
     # involved, so nothing is dropped; the model is asked to decide.
+    # Covered, while citing a reduction the arithmetic says DOES apply. The
+    # citation and the calculation agree the claim is cut; only the verdict
+    # disagrees. Measured on an ICU stay at 9,000 a day against a 6,000 cap,
+    # three fresh samples of three. Nothing is dropped: the citation is right.
+    if verdict == Verdict.COVERED:
+        applies = {
+            c.clause_id: c for c in computed.reductions
+            if c.status is reduction.ReductionStatus.APPLIES
+        }
+        for citation in citations:
+            check = applies.get(citation.clause_id)
+            if citation.effect == "reduces" and check is not None:
+                problems.append(
+                    f"- You cited clause {citation.clause_id} as reducing this claim, "
+                    f"and it was calculated that it does: {check.describe()}. A claim "
+                    f"paid less than in full is conditional, not covered."
+                )
+
     denying = [c.clause_id for c in citations if c.effect == "denies"]
     reducing = [c.clause_id for c in citations if c.effect == "reduces"]
     if denying and reducing and verdict != Verdict.NOT_COVERED:
@@ -669,7 +686,9 @@ def find_contradictions(
     if verdict in (Verdict.COVERED, Verdict.CONDITIONAL) and not names_treatment:
         for citation in citations:
             names = computed.absent.get(citation.clause_id)
-            if citation.effect == "permits" and names:
+            # Any effect but "denies": a held-out case leaned on the day-care
+            # clause labelled "delays" and slipped past a check for "permits".
+            if citation.effect != "denies" and names:
                 listed = " and ".join(names)
                 problems.append(
                     f"- You relied on clause {citation.clause_id} to pay this claim. "
@@ -678,6 +697,67 @@ def find_contradictions(
                     f"{listed} lists cannot be checked here."
                 )
     return problems, irrelevant
+
+
+def unraised_reductions(citations: list[Citation], computed: Computed) -> list[Citation]:
+    """Citations of a reduction as REDUCING this claim when nothing described bears on it.
+
+    No room, no sum insured, no age: the arithmetic comes back NOT_RAISED, and a
+    room cap or co-payment cited as cutting this claim is a reduction asserted
+    with no described fact behind it. Measured on a claim about late paperwork
+    (cited beside the documents clause that decides it) and on a held-out war
+    injury "subject to the room rent limit and the senior co-payment".
+
+    These are FILTERED, not retried. A retry that told the model "nothing the
+    person described bears on this" was measured, and it pushed right answers
+    to insufficient_information - a held-out late-notice case, and two main
+    cases to two samples of three. Filtering changes no verdict.
+    """
+    not_raised = {
+        c.clause_id for c in computed.reductions
+        if c.status is reduction.ReductionStatus.NOT_RAISED
+    }
+    return [c for c in citations if c.effect == "reduces" and c.clause_id in not_raised]
+
+
+def _names_a_refusal(citations: list[Citation], clauses: list[ShortlistClause]) -> bool:
+    """True if some cited exclusion, waiting period or condition is said to refuse or delay."""
+    refusing_types = {"exclusion", "waiting_period", "condition"}
+    types = {c.clause_id: c.clause_type for c in clauses}
+    return any(
+        c.effect in ("denies", "delays") and types.get(c.clause_id) in refusing_types
+        for c in citations
+    )
+
+
+def _rests_only_on_a_missing_list(
+    citations: list[Citation], verdict: str, computed: Computed,
+    clauses: list[ShortlistClause],
+) -> bool:
+    """True if a paying answer has nothing behind it but a list the document lacks.
+
+    Checked only after the model has been told about the missing annexure and
+    asked again. If every clause it still relies on to pay is one that points to
+    that list - or a definition, which explains a word and pays nothing - then
+    nothing checkable supports the answer. That is the same position as an
+    answer with no citations at all, and it goes the same safe way: downgraded
+    to insufficient_information. A held-out short procedure and the main set's
+    six hours on a drip both answered conditional "on the procedure being listed
+    in Annexure II" - true, and exactly what insufficient_information means.
+
+    Not when a sub-limit names the described treatment: that clause presupposes
+    the treatment is paid, so the missing list is not what the answer rests on.
+    """
+    if verdict not in (Verdict.COVERED, Verdict.CONDITIONAL):
+        return False
+    if any(c.named for c in computed.reductions):
+        return False
+    definitions = {c.clause_id for c in clauses if c.clause_type == "definition"}
+    noise = unraised_reductions(citations, computed)
+    basis = [c for c in citations if c.effect != "denies" and c not in noise]
+    return any(c.clause_id in computed.absent for c in basis) and all(
+        c.clause_id in computed.absent or c.clause_id in definitions for c in basis
+    )
 
 
 def _read_answer(
@@ -770,6 +850,11 @@ async def run_scenario(
     # worked out, and a contradiction gets one retry with the calculation in
     # front of the model - the same shape as the citation retry above.
     problems, _ = find_contradictions(citations, verdict, computed)
+    # Remembered before the retry, because the retry can drop the clause that
+    # pointed to the missing list - and still not have answered the question.
+    leaned_on_missing_list = verdict in (Verdict.COVERED, Verdict.CONDITIONAL) and any(
+        c.clause_id in computed.absent and c.effect != "denies" for c in citations
+    )
     if problems:
         log.info("answer contradicts computed results; retrying once: %s", problems)
         payload = await reason(
@@ -779,16 +864,55 @@ async def run_scenario(
         )
         citations, verdict = _read_answer(payload, source_by_id)
 
-        # Still citing a clause the arithmetic cleared: that citation is
-        # provably wrong, so it goes. The verdict is left alone - code can show
-        # a citation is wrong, but not what the right answer is.
+        # Still citing a clause the arithmetic cleared. Under a COVERED verdict
+        # that is a wrong label, not a wrong clause: the answer says nothing is
+        # cut or refused, the arithmetic says the clause cuts nothing, and both
+        # agree it permits. Measured on `room-rent-within-cap`, four fresh
+        # samples of four: the retry answered covered - "8,000 does not exceed
+        # the 10,000 limit ... paid in full" - and still labelled clause 5.1
+        # "reduces". Dropping that citation left a right answer with nothing
+        # behind it, and the downgrade below turned it into
+        # insufficient_information. So it is relabelled instead.
+        #
+        # Under any other verdict the citation is doing work the arithmetic
+        # rules out, so it goes. Either way the verdict is left alone - code
+        # can show a citation is wrong, but not what the right answer is.
         _, irrelevant = find_contradictions(citations, verdict, computed)
-        if irrelevant:
+        if irrelevant and verdict == Verdict.COVERED:
+            citations = [
+                replace(c, effect="permits") if c in irrelevant else c for c in citations
+            ]
+        elif irrelevant:
             log.warning("dropping citation(s) the arithmetic rules out: %s",
                         [c.clause_id for c in irrelevant])
             citations = [c for c in citations if c not in irrelevant]
             if verdict != Verdict.INSUFFICIENT_INFORMATION and not citations:
                 verdict = Verdict.INSUFFICIENT_INFORMATION
+
+        if _rests_only_on_a_missing_list(citations, verdict, computed, considered):
+            log.warning("verdict %s rests only on a list this document lacks; downgrading", verdict)
+            verdict = Verdict.INSUFFICIENT_INFORMATION
+        elif (
+            leaned_on_missing_list
+            and verdict == Verdict.NOT_COVERED
+            and not _names_a_refusal(citations, considered)
+        ):
+            # Measured on `day-care-not-listed`, four fresh samples of four: told
+            # the day-care list is missing, the retry answered not_covered
+            # "because in-patient cover needs 24 hours", citing that cover clause
+            # as permitting. That abandons the question rather than answering
+            # it: no exclusion, waiting period or condition is named as refusing.
+            # Scoped to answers that leaned on a missing list, because elsewhere
+            # right refusals carry sloppy labels too - a refusal on a cover
+            # window cites the window clause as "permits".
+            log.warning("refusal after the missing-list retry names no refusing clause; downgrading")
+            verdict = Verdict.INSUFFICIENT_INFORMATION
+
+    # Only when something else still stands: a verdict is never left with nothing
+    # behind it by this filter, so it can never trigger a downgrade.
+    noise = unraised_reductions(citations, computed)
+    if noise and len(noise) < len(citations):
+        citations = [c for c in citations if c not in noise]
 
     return ScenarioResult(
         verdict=verdict,

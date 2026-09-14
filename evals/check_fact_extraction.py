@@ -101,6 +101,15 @@ SENTENCES = [
     ("heldout", "wife-58", "My wife is 58; she was diagnosed with breast cancer last month.", expect(age=58, age_at_policy_start=None)),
     ("heldout", "grandmother-90", "My grandmother, aged 90, fractured her wrist.", expect(age=90, age_at_policy_start=None)),
     ("heldout", "mother-took-it-at-61", "My mother took this policy out at 61 and was hospitalised two years later.", expect(2, "years", age_at_policy_start=61)),
+    # Whether a condition is pre-existing, written before the prompt change
+    # they test. Diagnosed from two held-out scenario failures, whose own
+    # sentences are kept in the tuned group below.
+    ("heldout", "back-pain-began-later", "My back pain began a year after my cover started.", expect(1, "years", pre_existing_condition="no")),
+    ("heldout", "asthma-before", "I was diagnosed with asthma long before I bought this policy, and was admitted for it last week.", expect(pre_existing_condition="yes")),
+    ("heldout", "fever-no-history", "I was admitted with a fever.", expect(pre_existing_condition="unknown")),
+    ("heldout", "migraines-new", "The migraines are new - I never suffered from them until last year. I have held the policy for six years.", expect(6, "years", pre_existing_condition="no")),
+    ("tuned", "ho-knee-replacement", "I needed a knee replacement thirty months after my policy began. The knee trouble only started after I took the policy out.", expect(30, "months", pre_existing_condition="no")),
+    ("tuned", "ho-kidney-stone", "I am 66 and have held this policy for two years. I was admitted for a kidney stone, which I never had before taking the policy.", expect(2, "years", age=66, pre_existing_condition="no")),
 ]
 
 

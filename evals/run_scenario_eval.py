@@ -57,6 +57,12 @@ from app.pipeline.segment import segment  # noqa: E402
 GOLDEN_DIR = REPO_ROOT / "evals" / "golden"
 GOLDEN_PDF = GOLDEN_DIR / "synthetic-health-policy.pdf"
 CASES_PATH = GOLDEN_DIR / "scenarios.json"
+# Held-out batches, by number. Each is run only to measure, never to tune; see
+# the _why at the top of each file for when it was written and what it has seen.
+HELDOUT_PATHS = {
+    "1": GOLDEN_DIR / "scenarios-heldout.json",
+    "2": GOLDEN_DIR / "scenarios-heldout-2.json",
+}
 REPORT_PATH = REPO_ROOT / "evals" / "scenario-report.md"
 
 
@@ -96,12 +102,13 @@ async def build_clauses() -> list[ShortlistClause]:
 
 
 async def run(
-    use_cache: bool, only: list[str] | None = None, resample: bool = False
+    use_cache: bool, only: list[str] | None = None, resample: bool = False,
+    cases_path: Path = CASES_PATH,
 ) -> dict:
     if not use_cache:
         cache.clear()
 
-    cases = json.loads(CASES_PATH.read_text(encoding="utf-8"))["cases"]
+    cases = json.loads(cases_path.read_text(encoding="utf-8"))["cases"]
     if only is not None:
         known = {c["id"] for c in cases}
         unknown = [i for i in only if i not in known]
@@ -193,7 +200,9 @@ async def run(
         "num_predict": settings.num_predict,
         "seconds": round(elapsed, 1),
         "rows": rows,
-        "subset": only is not None,
+        # Another case file is never the report's 40 cases, so it is recorded
+        # like a subset and never overwrites the main report.
+        "subset": only is not None or cases_path != CASES_PATH,
         "verdict_accuracy": sum(r["verdict_ok"] for r in rows) / max(total, 1),
         "citation_recall": (
             sum(r["citation_ok"] for r in citable) / len(citable) if citable else 1.0
@@ -585,6 +594,27 @@ def majority(samples: list[dict]) -> list[dict]:
     return out
 
 
+def citation_problems(samples: list[dict]) -> dict[str, list[str]]:
+    """Per case: each missing or forbidden citation, and in how many samples.
+
+    The per-sample rates say HOW MANY cases cited wrongly; this says WHICH, so
+    a wrong citation seen in two samples of three is on record by name.
+    """
+    counts: dict[str, Counter] = {}
+    for res in samples:
+        for r in res["rows"]:
+            missing = sorted(set(r["required"]) - set(r["cited"]))
+            for clause_id in missing:
+                counts.setdefault(r["id"], Counter())[f"missing {clause_id}"] += 1
+            for clause_id in r["wrongly_cited"]:
+                counts.setdefault(r["id"], Counter())[f"cited forbidden {clause_id}"] += 1
+    n = len(samples)
+    return {
+        case_id: [f"{problem} in {times}/{n}" for problem, times in sorted(c.items())]
+        for case_id, c in counts.items()
+    }
+
+
 def render_majority(samples: list[dict]) -> str:
     rows = majority(samples)
     n = len(samples)
@@ -610,14 +640,22 @@ def render_majority(samples: list[dict]) -> str:
             f"   {res['false_citation_rate']:.3f}      {res['fabricated_quotes']}"
             f"              {res['detection_integrity']:.3f}"
         )
+    problems = citation_problems(samples)
+    if problems:
+        lines += ["", "  citation problems:"]
+        lines += [f"    {cid}: {'; '.join(p)}" for cid, p in problems.items()]
     return "\n".join(lines)
 
 
-async def run_repeats(n: int, use_cache: bool, only: list[str] | None) -> list[dict]:
+async def run_repeats(
+    n: int, use_cache: bool, only: list[str] | None, cases_path: Path = CASES_PATH
+) -> list[dict]:
     """The first sample may replay the cache; every later one is asked afresh."""
-    results = [await run(use_cache=use_cache, only=only)]
+    results = [await run(use_cache=use_cache, only=only, cases_path=cases_path)]
     for _ in range(n - 1):
-        results.append(await run(use_cache=use_cache, only=only, resample=True))
+        results.append(
+            await run(use_cache=use_cache, only=only, resample=True, cases_path=cases_path)
+        )
     return results
 
 
@@ -639,6 +677,10 @@ def main() -> None:
         help="run only the cases that failed or wobbled in the recorded history",
     )
     parser.add_argument(
+        "--heldout", choices=sorted(HELDOUT_PATHS), default=None,
+        help="run a held-out batch (1 or 2) instead of the main 40; never tune on these",
+    )
+    parser.add_argument(
         "--repeats", type=int, default=1,
         help="ask each case N times (first may replay the cache, the rest afresh) "
              "and score the majority verdict; combine with --only to split a long run",
@@ -648,7 +690,8 @@ def main() -> None:
     # Read before this run is recorded: the comparison is against what came
     # BEFORE, and the watchlist is chosen from it.
     history = load_history()
-    cases = json.loads(CASES_PATH.read_text(encoding="utf-8"))["cases"]
+    cases_path = HELDOUT_PATHS[args.heldout] if args.heldout else CASES_PATH
+    cases = json.loads(cases_path.read_text(encoding="utf-8"))["cases"]
 
     only = None
     if args.only:
@@ -661,7 +704,7 @@ def main() -> None:
         print(f"watchlist: {len(only)} of {len(cases)} cases\n")
 
     if args.repeats > 1:
-        results = asyncio.run(run_repeats(args.repeats, not args.no_cache, only))
+        results = asyncio.run(run_repeats(args.repeats, not args.no_cache, only, cases_path))
         print()
         print(render_majority(results))
         if not args.no_report:
@@ -673,7 +716,8 @@ def main() -> None:
         return
 
     res = asyncio.run(
-        run(use_cache=not args.no_cache, only=only, resample=args.resample)
+        run(use_cache=not args.no_cache, only=only, resample=args.resample,
+            cases_path=cases_path)
     )
 
     print()

@@ -4606,3 +4606,377 @@ arithmetic exist beside the quote check rather than instead of it, and why a
 short true opening attached to a long invention is left unverified: there, what
 was invented is most of what was said.
 </details>
+
+---
+
+# M14 — A score on questions it has never seen
+
+## The starting position
+
+The scenario simulator answers a what-if question about an Indian health
+policy with one of four verdicts and the clauses that decide it. It is measured
+on 40 hand-written cases in `evals/golden/scenarios.json`, and since M12 the
+headline is a majority of three samples per case, because the model does not
+answer identically twice.
+
+At the end of M13 that figure was 0.975 (39 of 40). Two problems were judged
+major:
+
+1. **The headline could not be fully trusted.** The reasoning prompt's only
+   example of a carve-out is one of the 40 eval questions, written into the
+   instructions, and replacing it broke eight cases.
+2. **`day-care-not-listed`** — six hours on a drip, where day care is paid only
+   for treatments "listed in Annexure II" and the document has no Annexure II —
+   still answered "covered" in about two samples of seven. A confident wrong
+   answer where the honest one is "the document cannot tell".
+
+Also open: five cases citing the wrong clause, two wobbling cases, and one
+wrong citation the eval summary could not name.
+
+The work was committed first (`2da3dd6`), so that every experiment below started
+from a recorded state.
+
+---
+
+## Naming the case behind a rate
+
+The majority-of-three summary printed a false-citation *rate* per sample, so
+"one guarded case in five cited a forbidden clause" was on record and which case
+it was was not. A small function now lists, per case, each missing or forbidden
+citation and in how many samples it happened:
+
+```
+citation problems:
+  copay-unknown-inception-age: cited forbidden 5.3 in 1/3
+  breach-of-law: missing 4.4 in 3/3
+```
+
+A measurement you cannot act on is only half a measurement. Every later step in
+this milestone used this output.
+
+---
+
+## Concept 36: a score on the cases you tuned against
+
+Every decision in M10–M13 — keep this change, revert that one — was made by
+looking at how the same 40 cases moved. Each decision was reasonable. But a
+system chosen by hundreds of small decisions against one set of questions will
+fit that set, the same way a model trained and tested on the same data scores
+well on it. The prompt containing one of the test questions is the visible
+instance of a much more general effect.
+
+The only way to know how much of 0.975 was fit rather than skill is to ask
+questions the system was never shaped around. So a **held-out batch** of 16 new
+cases was written against the same policy and conventions — cancer
+reconstruction (testing the same carve-out as the prompt's burn example, without
+being it), war, a hysterectomy too soon, scuba diving, surrogacy, an ICU rate
+within its cap, a co-payment where the age at inception has to be derived, stem
+cell therapy, late notice of planned surgery, tests too early before admission,
+a dental accident, lost luggage, a short procedure — and run with the current
+system before anything else changed.
+
+**Result: 12 of 16 = 0.750**, every case unanimous across three samples, against
+0.975 on the main set.
+
+That gap is the finding of this milestone. Twelve of the sixteen answers were
+right; four were confident and wrong, and no main-set case would have shown any
+of them.
+
+**The discipline that follows** is easy to state and easy to break. The moment
+held-out failures are read to decide what to fix, that batch is no longer held
+out: any fix designed while looking at it will tend to fix it. So:
+
+- the first batch became a *diagnostic* set once its failures were read;
+- a **second batch** of 13 cases (`scenarios-heldout-2.json`) was written after
+  the first round of fixes existed and before any run of it — mountaineering,
+  contraception, a cataract too soon, maternity after the wait, drink-driving,
+  an ICU rate over its cap, a co-payment that does not apply, notice given in
+  time, physiotherapy inside the post-discharge window, deep brain stimulation,
+  vet bills, loose-skin removal, gallbladder removal with no timing;
+- each file's header records what it has been exposed to, and
+  `evals/REPORT.md` now prints both held-out scores beside the main one, with
+  that history next to each.
+
+The batches are written by the same author as the fixes, so they are not fully
+independent. Cases written by someone who has never seen the prompt would be a
+stronger test, and that is recorded as a limitation rather than hidden.
+
+---
+
+## What the held-out failures had in common
+
+Reading the four failures' own reasoning found general causes rather than
+four accidents:
+
+| Case | What happened | Cause |
+|---|---|---|
+| knee replacement 30 months in, "the knee trouble only started after I took the policy out" | refused under the 36-month pre-existing-disease wait | the fact extractor recorded pre-existing as "unknown" |
+| kidney stone "which I never had before taking the policy" | the same refusal | the same extraction |
+| minor procedure, home after three hours | "conditional on the procedure being listed in Annexure II" | the missing-annexure check only looked for citations labelled "permits"; this one was labelled "delays" |
+| shelling during a war | "covered … subject to the room rent limit and the senior co-payment" | the war exclusion was never read, and two caps the person never raised were cited as reducing the claim |
+
+---
+
+## Failure 42: "unknown is the honest answer", and it answered nothing else
+
+A check of the fact extractor alone (`evals/check_fact_extraction.py`) was given
+new sentences about whether a condition was pre-existing, worded unlike any
+eval question. On the current prompt all five came back "unknown" — including
+*"I was diagnosed with asthma long before I bought this policy"*.
+
+The cause was one sentence in the fact prompt, written earlier to stop the
+extractor guessing:
+
+```
+For pre_existing_condition, answer "unknown" unless the description makes it
+clear either way. "Unknown" is the honest answer far more often than not.
+```
+
+It stopped guessing, and it stopped reading. Replaced with a direct question
+and two examples (worded unlike any eval sentence), the extractor went from five
+failures on those sentences to two.
+
+The main set then lost **six cases, each three samples of three** — in places
+with nothing to do with pre-existing conditions (an ICU rate, a breach of law,
+pre-hospitalisation expenses). The fact prompt feeds every reasoning prompt;
+changing what it says about one fact changed many answers. Reverted, and
+recorded as open: the extractor still never answers "no", and the two held-out
+refusals remain.
+
+> **The lesson:** a correct fix to one stage can be a net loss for the system.
+> The extractor check said better; the end-to-end measurement said worse; the
+> end-to-end measurement is the one that decides.
+
+---
+
+## A missing list, finished
+
+M13's missing-annexure check fired on an answer that paid on a clause referring
+to an absent annexure. Three gaps were found and closed:
+
+**1. The effect label.** The held-out short procedure cited the day-care clause
+as "delays", so a check for "permits" never fired. It now fires on any label
+but "denies".
+
+**2. What happens after the retry.** When the retry still leans on nothing but
+that clause — plus definitions, which explain a word and pay nothing — the
+answer has nothing checkable behind it. That is the same position as an answer
+with no citations, and it goes the same way:
+
+```python
+# api/app/pipeline/scenario.py
+def _rests_only_on_a_missing_list(citations, verdict, computed, clauses):
+    ...
+    definitions = {c.clause_id for c in clauses if c.clause_type == "definition"}
+    noise = unraised_reductions(citations, computed)
+    basis = [c for c in citations if c.effect != "denies" and c not in noise]
+    return any(c.clause_id in computed.absent for c in basis) and all(
+        c.clause_id in computed.absent or c.clause_id in definitions for c in basis
+    )
+```
+
+**3. A refusal that answers a different question.** Four fresh samples of
+`day-care-not-listed`, printed side by side, all did this after being told the
+list was missing:
+
+```
+first  conditional  [2.4 permits, 5.1 reduces]
+retry  not_covered  [2.1 permits]
+       "not covered ... Clause 2.1 ... hospitalisation exceeding 24 consecutive hours"
+```
+
+A refusal that names no clause refusing it has abandoned the question rather than
+answered it. For answers that leaned on a missing list before the retry, a
+refusal that cites no exclusion, waiting period or condition as denying is also
+downgraded. It is scoped that narrowly on purpose: elsewhere, *correct* refusals
+carry sloppy labels too — a refusal on a cover window cites the window clause as
+"permits" — and a general rule would catch them.
+
+Result: `day-care-not-listed` three samples of three in the final run, including
+both fresh ones; the held-out short procedure two of three.
+
+---
+
+## Failure 43: a retry that talked right answers out of themselves
+
+Two caps the person never raised — no room, no age — were being cited as
+reducing claims: a late-paperwork claim cited the room cap and the co-payment
+beside the documents clause that decided it, and the held-out war injury cited
+both. The arithmetic already says NOT_RAISED for exactly these.
+
+First version: treat it as a contradiction and retry, telling the model
+"nothing the person described bears on it". It reached 4 main-set cases,
+exactly as predicted from the stored answers. Measured:
+
+- the late-paperwork citations were cleaned up;
+- **a held-out case whose right answer was `conditional` became "not enough
+  information"** — its only citation had been the unraised co-payment, and
+  without it the model lost its way;
+- two main cases dropped to two samples of three.
+
+Telling a model its reason is unsupported cannot tell it whether the verdict was
+right for some *other* reason, and code cannot know that either. So the retry
+became a **filter**: the unsupported citation is removed silently, never
+retried, and only when another citation still stands — so it can never leave a
+verdict with nothing behind it and trigger a downgrade.
+
+```python
+# api/app/pipeline/scenario.py, run_scenario()
+noise = unraised_reductions(citations, computed)
+if noise and len(noise) < len(citations):
+    citations = [c for c in citations if c not in noise]
+```
+
+Every stored main-set answer then replayed exactly (0 of 40 fresh), the
+paperwork case kept its single correct citation, and the held-out late-notice
+case was right again.
+
+---
+
+## Failure 44: a fallback that destroyed a corrected answer
+
+In the final main run `room-rent-within-cap` — a room at 8,000 within a 10,000
+cap — answered "insufficient information" in both fresh samples. Printing four
+fresh first answers and retries side by side:
+
+```
+first  conditional  [5.1 reduces]
+retry  covered      [5.1 reduces]
+       "... 8,000 rupees per night does not exceed ... (10,000 rupees per day).
+        Therefore, the claim is paid in full."
+```
+
+Four of four. The retry *fixed the verdict*, with exactly the right reason — and
+kept the label "reduces" on the room cap. The code then saw a cleared clause
+cited as reducing, dropped it (Concept 33), found no citations left, and
+downgraded the corrected answer.
+
+The label was wrong, not the clause. Under a `covered` verdict, the answer and
+the arithmetic agree the clause cuts nothing, so it permits. The fallback now
+relabels in that case and still drops under any other verdict:
+
+```python
+if irrelevant and verdict == Verdict.COVERED:
+    citations = [replace(c, effect="permits") if c in irrelevant else c for c in citations]
+elif irrelevant:
+    ...  # dropped, as before
+```
+
+Three fresh samples of three afterwards, for this case and the two others that
+pass through the same fallback.
+
+> **The lesson:** a safety fallback is code too, and it can be the bug. This one
+> was measured working (M12) on answers where the model repeated its mistake; it
+> had never met an answer where the model fixed the verdict and not the label.
+
+---
+
+## One more contradiction, and what finding it cost
+
+A held-out batch 2 case — intensive care at 9,000 a day against a 6,000 cap —
+answered `covered` while citing the ICU cap as *reducing* the claim, three
+samples of three. The arithmetic had already computed that the cap applies. The
+citation and the calculation agree the claim is cut; only the verdict disagrees.
+That is now a fourth consistency rule, with one retry that shows the
+calculation and ends "a claim paid less than in full is conditional, not
+covered". It reached no stored main-set answer, and the case went to three
+samples of three.
+
+It was found by reading a batch 2 failure, so that one case is no longer clean
+evidence of generalisation, and the report says so.
+
+---
+
+## Failure 45: blaming the last change for a drop that was sampling
+
+Batch 2 scored 12 of 13 when first run and 10 of 13 on the version after three
+more changes. The obvious story: those changes hurt generalisation — and one of
+them had just replaced a retry with a filter, which would fit.
+
+Before believing it, the two cases that moved were probed directly:
+
+- one's fresh first answers cited nothing any of the three changes acts on — no
+  code path had changed for it at all;
+- the other went through a rule present, unchanged, in both versions.
+
+So the drop was the model's variance, not the changes: thirteen cases at three
+samples each moves by one or two on its own. The obvious story was wrong, and
+it would have led to reverting a change that was not responsible.
+
+> **The lesson:** before attributing a movement to a change, check the change
+> can even reach the cases that moved. It is usually a two-minute probe.
+
+---
+
+## Where this leaves the numbers
+
+Majority of three samples per case:
+
+| Set | End of M13 | End of M14 |
+|---|---|---|
+| Main 40 (tuned on) | 0.975 (39/40) | **0.950** (38/40) |
+| Held-out batch 1 (16, read while fixing) | 0.750 before any M14 change | **0.813** (13/16) |
+| Held-out batch 2 (13, written before running) | — | **0.846** (11/13) |
+
+Detection integrity was 1.000 in every sample of every set. Clause
+classification (macro-F1 1.000) and ranking (8 of 9) did not move.
+
+Two notes on how these were run, because they bound what the numbers can claim.
+The main chunks ran across the last three versions; each later change was shown
+to reach no stored main-set answer, and the only fresh-sample effect of the last
+one could be to turn a wrongly `covered` capped claim into `conditional`.
+Batch 2's second chunk ran one version before the last, which has no case the
+final rule can reach.
+
+**The honest headline** is therefore not 0.950. On questions this system was not
+tuned on it answers about **83–85%** correctly, and every quotation it shows is
+verified. That is the number to quote.
+
+**Still open:**
+
+- the fact extractor never records a condition as *not* pre-existing, so two
+  held-out claims for new conditions are refused under the pre-existing wait;
+  the prompt fix for it cost six main-set cases;
+- the war exclusion is never read (held-out);
+- `breach-of-law` answers `covered` in some fresh samples;
+- held-out misses `gallbladder-no-timing` and `emergency-notice-on-time`;
+- citations the model gets wrong after every approach: five on the main set,
+  several on the held-out batches (4.1, 4.8, 4.6, 5.3, 6.1);
+- the reasoning prompt still contains an eval question as its example — now
+  measured around rather than removed;
+- the batches were written by the same author as the fixes.
+
+---
+
+## Check it yourself
+
+```bash
+cd api && .venv/Scripts/python.exe -m pytest -q          # 201 tests
+python evals/run_all.py                                  # main + both held-out batches
+python evals/run_scenario_eval.py --heldout 2 --repeats 3 --only ho2-icu-over-cap,ho2-vet-bills
+```
+
+**Question to sit with:** you change the fact prompt, and the main set loses six
+cases three times out of three — but the fact extractor's own check improves from
+five failures to two. Before opening the answer: which result decides whether
+the change stays, and what would you need to see to change that decision?
+
+<details>
+<summary>Answer</summary>
+
+**The end-to-end result decides, and the change goes.** The extractor check
+measures one stage; the product is the verdict a person reads. A stage getting
+more accurate while the verdicts get worse means the stage's output is used in
+ways the stage check cannot see — here, a fact that appears in every reasoning
+prompt shifted answers to questions that had nothing to do with it.
+
+What could change the decision is not a better extractor score. It would be
+end-to-end evidence that the six breaks are recovered without losing the gain —
+for example, the same fact given to the reasoning step in a way that does not
+alter every prompt (only when a pre-existing wait is actually at issue), measured
+on the main set *and* on a held-out batch, three samples each.
+
+The general shape is worth keeping: a component metric is a diagnostic. It can
+tell you where to look and whether a stage improved. It cannot tell you whether
+the system did.
+</details>
