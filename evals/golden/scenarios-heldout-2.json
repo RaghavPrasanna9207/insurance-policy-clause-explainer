@@ -1,0 +1,112 @@
+{
+  "_why": [
+    "SECOND held-out batch. Never used to choose or tune a change.",
+    "",
+    "The first held-out batch (scenarios-heldout.json) was run once as a",
+    "baseline and scored 0.750 against the main set's 0.975. Its failures were",
+    "then read to diagnose general causes, and two consistency rules were",
+    "designed partly from that reading - which makes that batch tuned, in the",
+    "same way the main 40 are. A batch you have looked at while fixing things",
+    "can no longer measure generalisation.",
+    "",
+    "So this batch was written after those two rules existed and BEFORE any run",
+    "of it, and before the first batch was re-run. It is the clean measurement",
+    "for the M14 changes. Same synthetic policy, same conventions as",
+    "scenarios.json, same author as the fixes (so not fully independent), and",
+    "situations that appear in neither the main set nor the first batch."
+  ],
+  "cases": [
+    {
+      "id": "ho2-mountaineering",
+      "scenario": "I fractured my ankle while mountaineering in the Himalayas and needed surgery. I have held the policy seven years.",
+      "expected_verdict": "not_covered",
+      "must_cite": ["4.3"],
+      "why": "Treatment necessitated by hazardous or adventure sports is excluded, and mountaineering is named."
+    },
+    {
+      "id": "ho2-contraceptive-implant",
+      "scenario": "I want the policy to pay for a contraceptive implant. I have held it three years.",
+      "expected_verdict": "not_covered",
+      "must_cite": ["4.5"],
+      "why": "Any form of contraception is excluded."
+    },
+    {
+      "id": "ho2-cataract-too-soon",
+      "scenario": "I had cataract surgery a year after buying the policy.",
+      "expected_verdict": "not_covered",
+      "must_cite": ["3.3"],
+      "why": "Cataract is a specified disease with a twenty four month waiting period; a year is short of it."
+    },
+    {
+      "id": "ho2-maternity-after-wait",
+      "scenario": "I gave birth four years after taking out the policy. It was my first delivery.",
+      "expected_verdict": "covered",
+      "must_cite": ["3.4"],
+      "why": "Maternity is covered after thirty six months of continuous cover, limited to two deliveries in a lifetime. Four years clears the wait and this is the first delivery."
+    },
+    {
+      "id": "ho2-drunk-scooter",
+      "scenario": "I crashed my scooter while drunk and broke my wrist. I have held the policy six years.",
+      "expected_verdict": "not_covered",
+      "must_cite": ["4.2"],
+      "why": "Expenses attributable to the use of alcohol are excluded."
+    },
+    {
+      "id": "ho2-icu-over-cap",
+      "scenario": "My sum insured is 3 lakh and I was in intensive care for two days at 9,000 rupees a day. I have held the policy six years.",
+      "expected_verdict": "conditional",
+      "must_cite": ["5.1"],
+      "why": "ICU charges are capped at 2% of the sum insured per day, which is 6,000; 9,000 exceeds it, so the excess is not paid."
+    },
+    {
+      "id": "ho2-copay-bought-at-57",
+      "scenario": "I bought the policy when I was 57, six years ago, and was admitted for pneumonia last week.",
+      "expected_verdict": "covered",
+      "must_cite": [],
+      "must_not_cite": ["5.3"],
+      "why": "The co-payment applies only to someone who had completed sixty at inception; 57 had not. Six years clears every waiting period and pneumonia is not excluded."
+    },
+    {
+      "id": "ho2-emergency-notice-on-time",
+      "scenario": "I was admitted in an emergency and my family informed the insurer within twelve hours. I have held the policy five years.",
+      "expected_verdict": "covered",
+      "must_cite": [],
+      "why": "Emergency admissions need notice within twenty four hours; twelve hours meets it. Nothing described is excluded or capped."
+    },
+    {
+      "id": "ho2-physio-within-window",
+      "scenario": "I had physiotherapy sixty days after being discharged, for the same condition, and my in-patient claim was accepted. I have held the policy four years.",
+      "expected_verdict": "covered",
+      "must_cite": ["2.3"],
+      "why": "Post-hospitalisation expenses are covered for ninety days after discharge, for the same condition, where the in-patient claim was accepted. Sixty days is inside the window."
+    },
+    {
+      "id": "ho2-deep-brain-stimulation",
+      "scenario": "I need deep brain stimulation for Parkinson's disease. My sum insured is 10 lakh and I have held the policy eight years.",
+      "expected_verdict": "conditional",
+      "must_cite": ["5.5"],
+      "why": "Deep brain stimulation is named in the modern treatment limit, restricted to 50% of the sum insured per policy year."
+    },
+    {
+      "id": "ho2-vet-bills",
+      "scenario": "Does this policy cover vet bills for my dog?",
+      "expected_verdict": "insufficient_information",
+      "must_cite": [],
+      "why": "A health policy for people does not address animals at all. The document is silent, not negative."
+    },
+    {
+      "id": "ho2-loose-skin-removal",
+      "scenario": "After losing a lot of weight I had surgery to remove loose skin because I disliked how it looked. I have held the policy four years.",
+      "expected_verdict": "not_covered",
+      "must_cite": ["4.1"],
+      "why": "Surgery to change appearance is excluded; it was not necessitated by an Accident, Burn or Cancer."
+    },
+    {
+      "id": "ho2-gallbladder-no-timing",
+      "scenario": "I had my gallbladder removed. I'm 45.",
+      "expected_verdict": "insufficient_information",
+      "must_cite": [],
+      "why": "Nothing is said about how long the policy has been held, and a thirty-day initial waiting period applies to any illness in the first month, so whether the claim is payable turns on a fact not given."
+    }
+  ]
+}

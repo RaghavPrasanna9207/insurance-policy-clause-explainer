@@ -9,9 +9,12 @@ The obvious architecture for "answer a question about a document" is retrieval:
 embed the clauses, embed the question, fetch the top k. This project does not,
 and the reason is arithmetic rather than taste.
 
-A health policy has roughly 40 clauses averaging ~150 tokens, so the ENTIRE
-document is about 6,000 tokens. qwen2.5 has a 32,000-token context. Every clause
-that could possibly matter fits in a single prompt with room to spare.
+The synthetic golden policy has 39 clauses and is about 3,100 tokens. The
+context window is set to 8,192 (`settings.num_ctx`; qwen2.5 supports 32,768, but
+16,384 was measured to exhaust this machine's memory), leaving
+`settings.scenario_token_budget` for clause text. On that policy every clause
+that could possibly matter fits in a single prompt with room to spare. Whether
+that holds for a real insurer's wording has not yet been measured.
 
 Given that, retrieval could only make the answer worse. Top-k means choosing a
 k, and any k below "all of them" can drop the one clause that decides the case -
@@ -19,8 +22,8 @@ which in this domain means confidently telling someone they are covered because
 the exclusion did not make the cut. Retrieval solves a problem this document
 does not have, and introduces a failure mode it did not previously have.
 
-So `shortlist()` sorts by impact and takes everything that fits the budget. On a
-normal policy that is all of it. The impact ordering only starts to matter for a
+So `shortlist()` sorts by impact and takes everything that fits the budget. On the
+golden policy that is all of it. The impact ordering only starts to matter for a
 document large enough to overflow the context, and then it keeps the clauses
 most likely to cost the reader money.
 
@@ -34,20 +37,21 @@ inspectable null that the reasoning prompt is then told about by name.
 """
 
 import logging
-from dataclasses import dataclass, field
+import re
+from collections import Counter
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from app.config import settings
-from app.grounding import QuoteCheck, verify_citations
+from app.grounding import QuoteCheck, verified_prefix, verify_citations
 from app.llm import client
 from app.llm.prompts import (
     FACTS_SYSTEM,
-    PROMPT_VERSION,
     REASON_SYSTEM,
     render_reasoning_request,
     render_scenario,
 )
-from app.pipeline import waiting
+from app.pipeline import reduction, waiting, window
 from app.taxonomy import Verdict
 
 log = logging.getLogger(__name__)
@@ -84,8 +88,22 @@ def policy_age_days(facts: dict[str, Any]) -> int | None:
     waiting period then comes back UNKNOWN, which is what lets the verdict
     be insufficient_information rather than a guess.
     """
-    value = facts.get("policy_age_value")
-    unit = facts.get("policy_age_unit")
+    value = facts.get("time_since_policy_start_value")
+    unit = facts.get("time_since_policy_start_unit")
+    if not value or value <= 0 or unit not in _DAYS_PER_UNIT:
+        return None
+    return value * _DAYS_PER_UNIT[unit]
+
+
+def expense_offset_days(facts: dict[str, Any]) -> int | None:
+    """How many days before admission or after discharge an expense fell.
+
+    The same conversion as `policy_age_days`, applied to a different
+    measurement: this one counts from a hospital stay, not from the day the
+    policy began. None when unstated, never a default.
+    """
+    value = facts.get("expense_timing_value")
+    unit = facts.get("expense_timing_unit")
     if not value or value <= 0 or unit not in _DAYS_PER_UNIT:
         return None
     return value * _DAYS_PER_UNIT[unit]
@@ -99,7 +117,7 @@ def policy_age_days(facts: dict[str, Any]) -> int | None:
 # lists that must agree should not be two lists - the same rule that applies to
 # the context window and its token budget.
 DECISIVE_FACTS = (
-    "policy_age_value",
+    "time_since_policy_start_value",
     "age",
     "pre_existing_condition",
     "hospitalised",
@@ -137,6 +155,19 @@ class ShortlistClause:
     # them arithmetically instead of asking the model to re-read the prose.
     waiting_period_days: int | None = None
     exceptions: list[str] = field(default_factory=list)
+    # The operands a reduction is computed from, carried through from analysis.
+    # See app/pipeline/reduction.py for what is done with them.
+    copay_percent: int | None = None
+    copay_min_age_at_inception: int | None = None
+    cap_percent_of_sum_insured: int | None = None
+    icu_cap_percent_of_sum_insured: int | None = None
+    # A cover window around one hospital stay, in days, and which side of the
+    # stay it counts from. See app/pipeline/window.py.
+    cover_window_days: int | None = None
+    cover_window_anchor: str | None = None
+    # The section this clause was segmented under. Used to tell whether an
+    # annexure another clause refers to is part of the document at all.
+    section_path: str = ""
 
 
 @dataclass
@@ -185,15 +216,65 @@ FACTS_SCHEMA: dict[str, Any] = {
         # other side of the same comparison. Converting units is arithmetic
         # and belongs to Python; reporting what the sentence said is
         # reading, and belongs to the model.
-        "policy_age_value": {"type": ["integer", "null"]},
-        "policy_age_unit": {
+        #
+        # THE NAME IS PART OF THE INSTRUCTION. This was `policy_age_value`,
+        # and the model read "policy age" as "age at the policy": for "I
+        # bought this policy at 67 and am claiming three years later" it wrote
+        # 67 here with no unit, and the three years were lost. Renamed to
+        # `policy_held_for_value`, the ages stopped landing here - and "ten
+        # days after my policy started" stopped landing here too, because
+        # "held for" only matched "I have held it for". With the same prompt
+        # examples, this name read 31 of 33 test sentences in both orderings
+        # tried; the old name read 29 and 30, most of its misses a subtraction
+        # between two ages that nobody asked it to do. A schema key is the
+        # last thing the model reads before it writes the value.
+        "time_since_policy_start_value": {"type": ["integer", "null"]},
+        "time_since_policy_start_unit": {
             "type": ["string", "null"],
             "enum": ["days", "weeks", "months", "years", None],
         },
         "age": {"type": ["integer", "null"]},
+        # AGE WHEN THE POLICY STARTED, which is a different number from `age`
+        # and is the one a senior-citizen co-payment actually keys on. Someone
+        # 68 today may have bought the policy at 50; treating the two as
+        # interchangeable fires a 20% co-payment at a person who does not owe
+        # one. Where only one of the two is stated, Python derives the other
+        # from the policy's age - see reduction.age_at_inception.
+        "age_at_policy_start": {"type": ["integer", "null"]},
         "hospitalised": {"type": ["boolean", "null"]},
         "hours_since_admission": {"type": ["integer", "null"]},
         "estimated_cost_inr": {"type": ["integer", "null"]},
+        # THE SUM INSURED, as a value and a unit. Indian policy schedules are
+        # written "5 lakh", never 500000, and asking the model for the rupee
+        # figure is asking it to multiply - the same mistake that read
+        # "two weeks" as two months on the other side of a waiting-period
+        # comparison. It reports what the sentence said; Python multiplies.
+        "sum_insured_value": {"type": ["integer", "null"]},
+        "sum_insured_unit": {
+            "type": ["string", "null"],
+            "enum": ["rupees", "thousand", "lakh", "crore", None],
+        },
+        # The per-day accommodation charge, in plain rupees, and whether it was
+        # intensive care - because the room cap and the ICU cap are different
+        # percentages of the same sum insured.
+        "room_rent_per_day_inr": {"type": ["integer", "null"]},
+        "room_is_icu": {"type": ["boolean", "null"]},
+        # WHEN AN EXPENSE FELL RELATIVE TO A HOSPITAL STAY: a value, a unit,
+        # and which side of the stay. "A scan 120 days after I was discharged"
+        # is (120, days, after_discharge). The model reports the sentence;
+        # window.py compares it against the policy's window. Kept apart from
+        # policy_age because the two count from different starting points,
+        # and the anchor is an enum so "after discharge" cannot be paraphrased
+        # into something the comparison does not recognise.
+        "expense_timing_value": {"type": ["integer", "null"]},
+        "expense_timing_unit": {
+            "type": ["string", "null"],
+            "enum": ["days", "weeks", "months", "years", None],
+        },
+        "expense_timing_anchor": {
+            "type": ["string", "null"],
+            "enum": ["before_admission", "after_discharge", None],
+        },
         "pre_existing_condition": {
             "type": "string",
             "enum": ["yes", "no", "unknown"],
@@ -202,22 +283,56 @@ FACTS_SCHEMA: dict[str, Any] = {
     },
     "required": [
         "procedure", "condition", "body_system",
-        "policy_age_value", "policy_age_unit",
-        "age", "hospitalised", "hours_since_admission", "estimated_cost_inr",
+        "time_since_policy_start_value", "time_since_policy_start_unit",
+        "age", "age_at_policy_start", "hospitalised", "hours_since_admission",
+        "estimated_cost_inr", "sum_insured_value", "sum_insured_unit",
+        "room_rent_per_day_inr", "room_is_icu",
+        "expense_timing_value", "expense_timing_unit", "expense_timing_anchor",
         "pre_existing_condition", "notes",
     ],
 }
 
 
-async def extract_facts(scenario: str) -> dict[str, Any]:
-    return await client.complete_json(
+# Words that tie an age to the START of a policy. An age at policy start is
+# only something a person can have said if they talked about the policy
+# beginning at all.
+_POLICY_START = re.compile(
+    r"\b(bought|buy|purchased?|took|taken|take|got|started?|began|begin|"
+    r"signed|joined|inception|enrolled|insured me)\b",
+    re.IGNORECASE,
+)
+
+
+def correct_misfiled_age(facts: dict[str, Any], scenario: str) -> dict[str, Any]:
+    """Move an age filed as "at policy start" to "now" when nothing says the policy started.
+
+    Measured: "My mother, who is 75" and "My father, 82" came back with the age
+    in `age_at_policy_start` and `age` empty - which fires a senior-citizen
+    co-payment at someone whose age at inception was never mentioned. A prompt
+    example made it worse; renaming the `age` field made every third-person
+    sentence fail. So the extraction is checked against the words it came from,
+    the way exceptions are (app/grounding.py): if the question never mentions
+    the policy beginning, the only age it can contain is the age now.
+
+    Only moves; never invents. Both ages given, or start words present -> left
+    exactly as extracted.
+    """
+    start_age = facts.get("age_at_policy_start")
+    if start_age and not facts.get("age") and not _POLICY_START.search(scenario):
+        return facts | {"age": start_age, "age_at_policy_start": None}
+    return facts
+
+
+async def extract_facts(scenario: str, *, use_cache: bool = True) -> dict[str, Any]:
+    facts = await client.complete_json(
         [
             {"role": "system", "content": FACTS_SYSTEM},
             {"role": "user", "content": render_scenario(scenario)},
         ],
         FACTS_SCHEMA,
-        prompt_version=PROMPT_VERSION,
+        use_cache=use_cache,
     )
+    return correct_misfiled_age(facts, scenario)
 
 
 # --- 5b: shortlist (no LLM) ----------------------------------------------
@@ -228,9 +343,9 @@ def shortlist(
 ) -> list[ShortlistClause]:
     """Choose which clauses the reasoning step sees.
 
-    Sorted by impact, then truncated to fit the context budget. On a normal
+    Sorted by impact, then truncated to fit the context budget. On the golden
     policy nothing is dropped at all - the whole document fits. The ordering
-    exists so that if a very large document ever does overflow, what survives
+    exists so that if a larger document does overflow, what survives
     is the clauses most likely to cost the reader money, rather than whichever
     ones happened to come first.
 
@@ -254,6 +369,87 @@ def shortlist(
 
     kept.sort(key=lambda c: _sort_key(c.number))
     return kept
+
+
+# Standard English function words: long enough to pass the length filter,
+# meaningless as evidence of what a clause is about. Not tuned to any policy.
+_FUNCTION_WORDS = frozenset({
+    "after", "before", "because", "another", "itself", "taken", "taking", "their",
+    "there", "these", "those", "which", "while", "would", "could", "should", "about",
+    "again", "other", "under", "until", "being", "having", "every", "where", "whose",
+    "since", "though",
+})
+# A word shared with the question counts only if at most this many clauses use it.
+_RARE_IN_POLICY = 2
+_MIN_SHARED = 2
+
+
+def _stems(text: str) -> dict[str, str]:
+    """Six-letter stems of the words in `text`, each mapped to a word it came from.
+
+    Six letters, so "Ayurvedic" meets "Ayurveda" and "accreditation" meets
+    "accredited", without a stemming library for one comparison.
+    """
+    out: dict[str, str] = {}
+    for word in re.findall(r"[a-z]{5,}", text.lower()):
+        if word not in _FUNCTION_WORDS:
+            out.setdefault(word[:6], word)
+    return out
+
+
+def shared_words(scenario: str, clauses: list[ShortlistClause]) -> dict[str, list[str]]:
+    """Clauses that share several unusual words with the question.
+
+    Measured case: Ayurvedic treatment at an unaccredited private clinic. The
+    verdict was right and the citation was the definition of a hospital, in
+    every run on record - and again when the model was asked for citations in a
+    separate turn, so it was not a slip. The AYUSH clause shares five unusual
+    words with that question.
+
+    NOT RETRIEVAL. This project deliberately has none: every clause is still in
+    the prompt, and nothing is ranked or dropped. It is a lookup reported as a
+    lookup - these words appear in both - and deciding what a shared word means
+    stays with the model.
+
+    Precision over recall, on purpose. A word counts only if at most two
+    clauses use it, and a clause is named only with at least two such words:
+    measured on the 40 eval questions, a single shared word hinted at 38 of
+    them, including clauses they must not cite ("years" appears in the
+    co-payment clause). Two words hinted at 8, each the clause that decides the
+    case. Those thresholds were chosen on that same set, so 8 of 8 is partly
+    fitted - which is why the hint only names clauses and never sets anything.
+    """
+    per_clause = {c.clause_id: _stems(c.text) for c in clauses}
+    used_by = Counter(s for stems in per_clause.values() for s in stems)
+    mine = _stems(scenario)
+    rare_mine = {s for s in mine if 0 < used_by[s] <= _RARE_IN_POLICY}
+
+    shared: dict[str, list[str]] = {}
+    for clause_id, stems in per_clause.items():
+        common = rare_mine & stems.keys()
+        if len(common) >= _MIN_SHARED:
+            shared[clause_id] = sorted(mine[s] for s in common)
+    return shared
+
+
+_ANNEXURE = re.compile(r"\bannexure\s+([ivxl]+|\d+)\b", re.IGNORECASE)
+
+
+def absent_annexures(clauses: list[ShortlistClause]) -> dict[str, list[str]]:
+    """Clauses that refer to an annexure the document does not contain.
+
+    An annexure counts as present only if some clause was segmented under a
+    heading naming it (segment.py recognises "ANNEXURE <n>" as a section head).
+    Whether a section exists is a lookup; what it would have said is not, so
+    this reports only the absence.
+    """
+    present = {m.group(1).upper() for c in clauses for m in _ANNEXURE.finditer(c.section_path)}
+    absent: dict[str, list[str]] = {}
+    for clause in clauses:
+        labels = sorted({m.group(1).upper() for m in _ANNEXURE.finditer(clause.text)} - present)
+        if labels:
+            absent[clause.clause_id] = [f"Annexure {label}" for label in labels]
+    return absent
 
 
 def _sort_key(number: str) -> tuple:
@@ -310,36 +506,73 @@ def _reasoning_schema(clause_ids: list[str]) -> dict[str, Any]:
     }
 
 
+@dataclass
+class Computed:
+    """Everything worked out in Python before the model sees the question.
+
+    Computed once and shared: the reasoning prompt is rendered from it, and the
+    model's answer is checked against it afterwards (find_contradictions).
+    """
+
+    waiting: list[waiting.WaitingCheck]
+    reductions: list[reduction.ReductionCheck]
+    windows: list[window.WindowCheck]
+    # Clause id -> annexures it refers to that the document does not contain.
+    absent: dict[str, list[str]] = field(default_factory=dict)
+
+
+def compute(facts: dict[str, Any], clauses: list[ShortlistClause]) -> Computed:
+    held = policy_age_days(facts)
+    return Computed(
+        absent=absent_annexures(clauses),
+        # Every waiting period compared against the stated policy age, in
+        # Python, before the model sees anything. Nothing is guessed: if the
+        # person said nothing, every waiting period comes back UNKNOWN rather
+        # than being compared against an invented figure.
+        waiting=waiting.evaluate(clauses, held),
+        # And the second family of comparisons, added after the first was
+        # fixed: a waiting period decides whether the claim is PAID, a
+        # reduction decides whether it is paid IN FULL. Only the first question
+        # was being asked, so a senior citizen was told "covered" while losing
+        # a fifth of the claim.
+        reductions=reduction.evaluate(clauses, facts, held),
+        # The third family: whether an expense before admission or after
+        # discharge fell inside the policy's window. Silent unless raised.
+        windows=window.evaluate(
+            clauses, facts.get("expense_timing_anchor"), expense_offset_days(facts)
+        ),
+    )
+
+
 async def reason(
     scenario: str,
     facts: dict[str, Any],
     clauses: list[ShortlistClause],
+    computed: Computed,
     *,
-    nudge_citations: bool = False,
+    nudge: str | None = None,
+    use_cache: bool = True,
 ) -> dict[str, Any]:
     ids = [c.clause_id for c in clauses]
-    # Every waiting period compared against the stated policy age, in Python,
-    # before the model sees anything. The result is handed over as settled fact.
-    # Prefer days when stated, else convert months. Neither is guessed: if
-    # the person said nothing, both stay None and every waiting period comes
-    # back UNKNOWN rather than being compared against an invented figure.
-    checks = waiting.evaluate(clauses, policy_age_days(facts))
     messages = [
         {"role": "system", "content": REASON_SYSTEM},
         {
             "role": "user",
             "content": render_reasoning_request(
-                scenario, facts, clauses, waiting.render(checks)
+                scenario, facts, clauses,
+                waiting.render(computed.waiting),
+                reduction.render(computed.reductions),
+                window.render(computed.windows),
             ),
         },
     ]
-    if nudge_citations:
+    if nudge:
         # Appended as a second user turn rather than edited into the first, so
         # the retry is a different cache key and cannot be served the very
         # response that failed.
-        messages.append({"role": "user", "content": CITATION_NUDGE})
+        messages.append({"role": "user", "content": nudge})
     return await client.complete_json(
-        messages, _reasoning_schema(ids), prompt_version=PROMPT_VERSION
+        messages, _reasoning_schema(ids), use_cache=use_cache,
     )
 
 
@@ -351,13 +584,224 @@ If no clause in the list actually decides this, the verdict is
 insufficient_information."""
 
 
+CONSISTENCY_NUDGE = """Your previous answer contradicts results that were calculated, not estimated:
+
+{problems}
+
+Answer the question again, and do not rely on anything these results rule out."""
+
+# Effects that say a clause is working against this claim - and how to say so
+# to the model. A clause the arithmetic has cleared cannot be doing any of them.
+_ADVERSE_EFFECTS = {"denies": "refused", "delays": "delayed", "reduces": "reduced"}
+
+
+def find_contradictions(
+    citations: list[Citation], verdict: str, computed: Computed
+) -> tuple[list[str], list[Citation]]:
+    """Where the model's answer disagrees with what Python already worked out.
+
+    Returns (problems, irrelevant): a sentence for each contradiction, to put in
+    front of the model, and the citations that are provably wrong - a clause
+    cited as working against the claim that the arithmetic has cleared.
+
+    WHY THIS EXISTS. The prompt already says "never contradict these results",
+    and the model still did, three samples of three:
+      - told "Already satisfied: 3.2", it refused a claim five years into a
+        36-month pre-existing disease wait, citing 3.2;
+      - told 5.1 was "ruled out by the numbers" (8,000 within a 10,000 cap), it
+        said the room would be paid at 80%, citing 5.1.
+    An instruction can be ignored. A check in code cannot, and it only has to
+    compare the citations against results that already exist.
+
+    It never changes a verdict. It finds the disagreement; the model answers
+    again with the disagreement in front of it.
+    """
+    served = {
+        c.clause_id: c for c in computed.waiting
+        if c.status is waiting.WaitingStatus.SERVED
+    }
+    ruled_out = {
+        c.clause_id: c for c in computed.reductions
+        if c.status is reduction.ReductionStatus.DOES_NOT_APPLY
+    }
+    problems: list[str] = []
+    irrelevant: list[Citation] = []
+    for citation in citations:
+        if citation.effect not in _ADVERSE_EFFECTS:
+            continue
+        cleared = served.get(citation.clause_id) or ruled_out.get(citation.clause_id)
+        if cleared is not None:
+            problems.append(
+                f"- You cited clause {citation.clause_id} as a reason this claim is "
+                f"{_ADVERSE_EFFECTS[citation.effect]}, but it was calculated: "
+                f"{cleared.describe()}."
+            )
+            irrelevant.append(citation)
+
+    # A refusal and a reduction cannot both decide one claim: a co-payment or a
+    # cap takes a share of a claim that IS paid. The model wrote exactly this
+    # contradiction for a nose job bought at 70 - "not covered ... however the
+    # 20% co-payment applies" - and answered conditional. No arithmetic is
+    # involved, so nothing is dropped; the model is asked to decide.
+    # Covered, while citing a reduction the arithmetic says DOES apply. The
+    # citation and the calculation agree the claim is cut; only the verdict
+    # disagrees. Measured on an ICU stay at 9,000 a day against a 6,000 cap,
+    # three fresh samples of three. Nothing is dropped: the citation is right.
+    if verdict == Verdict.COVERED:
+        applies = {
+            c.clause_id: c for c in computed.reductions
+            if c.status is reduction.ReductionStatus.APPLIES
+        }
+        for citation in citations:
+            check = applies.get(citation.clause_id)
+            if citation.effect == "reduces" and check is not None:
+                problems.append(
+                    f"- You cited clause {citation.clause_id} as reducing this claim, "
+                    f"and it was calculated that it does: {check.describe()}. A claim "
+                    f"paid less than in full is conditional, not covered."
+                )
+
+    denying = [c.clause_id for c in citations if c.effect == "denies"]
+    reducing = [c.clause_id for c in citations if c.effect == "reduces"]
+    if denying and reducing and verdict != Verdict.NOT_COVERED:
+        problems.append(
+            f"- You cited {', '.join(denying)} as refusing this claim and "
+            f"{', '.join(reducing)} as reducing it. Both cannot decide it: a "
+            f"co-payment, cap or sub-limit reduces a claim that IS paid, and a "
+            f"refused claim has nothing to reduce. Decide first whether it is refused."
+        )
+
+    # Paying a claim on the strength of a clause that points to a list this
+    # document does not contain. Measured on `day-care-not-listed`: day care is
+    # paid for treatment "listed in Annexure II", there is no Annexure II, and
+    # the model answered that six hours on a drip is covered. A note printed
+    # under the clause in every prompt was tried first, and reverted: it did
+    # not fix this case and moved four unrelated ones. Checking only answers
+    # that actually lean on such a clause reaches only those answers. Nothing
+    # is dropped - the absence proves the answer unchecked, not wrong.
+    #
+    # Not asked when a sub-limit elsewhere names the described treatment. "Treatment
+    # of cataract shall be limited to 25,000" presupposes cataract treatment is
+    # paid, so the missing day-care list is not what the answer rests on. Asked
+    # anyway, the retry turned a correct cataract answer into a cosmetic-surgery
+    # refusal, two samples of two.
+    names_treatment = any(c.named for c in computed.reductions)
+    if verdict in (Verdict.COVERED, Verdict.CONDITIONAL) and not names_treatment:
+        for citation in citations:
+            names = computed.absent.get(citation.clause_id)
+            # Any effect but "denies": a held-out case leaned on the day-care
+            # clause labelled "delays" and slipped past a check for "permits".
+            if citation.effect != "denies" and names:
+                listed = " and ".join(names)
+                problems.append(
+                    f"- You relied on clause {citation.clause_id} to pay this claim. "
+                    f"Clause {citation.clause_id} refers to {listed}, which is not "
+                    f"included in this document, so anything that depends on what "
+                    f"{listed} lists cannot be checked here."
+                )
+    return problems, irrelevant
+
+
+def unraised_reductions(citations: list[Citation], computed: Computed) -> list[Citation]:
+    """Citations of a reduction as REDUCING this claim when nothing described bears on it.
+
+    No room, no sum insured, no age: the arithmetic comes back NOT_RAISED, and a
+    room cap or co-payment cited as cutting this claim is a reduction asserted
+    with no described fact behind it. Measured on a claim about late paperwork
+    (cited beside the documents clause that decides it) and on a held-out war
+    injury "subject to the room rent limit and the senior co-payment".
+
+    These are FILTERED, not retried. A retry that told the model "nothing the
+    person described bears on this" was measured, and it pushed right answers
+    to insufficient_information - a held-out late-notice case, and two main
+    cases to two samples of three. Filtering changes no verdict.
+    """
+    not_raised = {
+        c.clause_id for c in computed.reductions
+        if c.status is reduction.ReductionStatus.NOT_RAISED
+    }
+    return [c for c in citations if c.effect == "reduces" and c.clause_id in not_raised]
+
+
+def _names_a_refusal(citations: list[Citation], clauses: list[ShortlistClause]) -> bool:
+    """True if some cited exclusion, waiting period or condition is said to refuse or delay."""
+    refusing_types = {"exclusion", "waiting_period", "condition"}
+    types = {c.clause_id: c.clause_type for c in clauses}
+    return any(
+        c.effect in ("denies", "delays") and types.get(c.clause_id) in refusing_types
+        for c in citations
+    )
+
+
+def _rests_only_on_a_missing_list(
+    citations: list[Citation], verdict: str, computed: Computed,
+    clauses: list[ShortlistClause],
+) -> bool:
+    """True if a paying answer has nothing behind it but a list the document lacks.
+
+    Checked only after the model has been told about the missing annexure and
+    asked again. If every clause it still relies on to pay is one that points to
+    that list - or a definition, which explains a word and pays nothing - then
+    nothing checkable supports the answer. That is the same position as an
+    answer with no citations at all, and it goes the same safe way: downgraded
+    to insufficient_information. A held-out short procedure and the main set's
+    six hours on a drip both answered conditional "on the procedure being listed
+    in Annexure II" - true, and exactly what insufficient_information means.
+
+    Not when a sub-limit names the described treatment: that clause presupposes
+    the treatment is paid, so the missing list is not what the answer rests on.
+    """
+    if verdict not in (Verdict.COVERED, Verdict.CONDITIONAL):
+        return False
+    if any(c.named for c in computed.reductions):
+        return False
+    definitions = {c.clause_id for c in clauses if c.clause_type == "definition"}
+    noise = unraised_reductions(citations, computed)
+    basis = [c for c in citations if c.effect != "denies" and c not in noise]
+    return any(c.clause_id in computed.absent for c in basis) and all(
+        c.clause_id in computed.absent or c.clause_id in definitions for c in basis
+    )
+
+
+def _read_answer(
+    payload: dict[str, Any], source_by_id: dict[str, str]
+) -> tuple[list[Citation], str]:
+    """The model's citations, each verified against its clause, and its verdict."""
+    raw_citations = payload.get("deciding_clauses", [])
+    checks: list[QuoteCheck] = verify_citations(raw_citations, source_by_id)
+    citations = []
+    for raw, check in zip(raw_citations, checks):
+        quote, verified, reason_text = raw.get("quote", ""), check.verified, check.reason
+        if not verified:
+            # The clause's own words with something appended: keep the words.
+            # See grounding.verified_prefix for why a retry could not do this.
+            kept = verified_prefix(quote, source_by_id.get(check.clause_id, ""))
+            if kept is not None:
+                quote, verified, reason_text = kept, True, ""
+        citations.append(Citation(
+            clause_id=check.clause_id,
+            quote=quote,
+            effect=raw.get("effect", "permits"),
+            verified=verified,
+            unverified_reason=reason_text,
+        ))
+    return citations, payload.get("verdict", Verdict.INSUFFICIENT_INFORMATION)
+
+
 # --- the whole stage ------------------------------------------------------
 
 
 async def run_scenario(
-    scenario: str, clauses: list[ShortlistClause]
+    scenario: str, clauses: list[ShortlistClause], *, resample: bool = False
 ) -> ScenarioResult:
-    """Answer one scenario against one policy."""
+    """Answer one scenario against one policy.
+
+    `resample` bypasses the cache for the REASONING step only, so the same
+    prompt is answered afresh while the facts stay as extracted. It exists for
+    the eval: a cached answer re-read is a copy, not a second opinion, and the
+    only way to learn whether a verdict is stable is to ask again. Nothing
+    resampled is written back, so the stored answer remains the baseline.
+    """
     facts = await extract_facts(scenario)
     missing = [k for k in DECISIVE_FACTS if facts.get(k) in (None, "", "unknown")]
 
@@ -370,26 +814,15 @@ async def run_scenario(
             missing_facts=missing,
         )
 
-    payload = await reason(scenario, facts, considered)
+    computed = compute(facts, considered)
+    payload = await reason(
+        scenario, facts, considered, computed, use_cache=not resample
+    )
 
     # 5d: verification. Every quotation must actually occur in the clause it
     # was attributed to.
     source_by_id = {c.clause_id: c.text for c in considered}
-    raw_citations = payload.get("deciding_clauses", [])
-    checks: list[QuoteCheck] = verify_citations(raw_citations, source_by_id)
-
-    citations = [
-        Citation(
-            clause_id=check.clause_id,
-            quote=raw.get("quote", ""),
-            effect=raw.get("effect", "permits"),
-            verified=check.verified,
-            unverified_reason=check.reason,
-        )
-        for raw, check in zip(raw_citations, checks)
-    ]
-
-    verdict = payload.get("verdict", Verdict.INSUFFICIENT_INFORMATION)
+    citations, verdict = _read_answer(payload, source_by_id)
 
     # A definite verdict with nothing to back it is not a definite verdict.
     # The schema cannot express "citations are required unless the verdict is
@@ -403,20 +836,11 @@ async def run_scenario(
     # answer over a formatting slip. One pointed retry recovers it.
     if verdict != Verdict.INSUFFICIENT_INFORMATION and not citations:
         log.info("verdict %s arrived with no citations; retrying once", verdict)
-        payload = await reason(scenario, facts, considered, nudge_citations=True)
-        raw_citations = payload.get("deciding_clauses", [])
-        checks = verify_citations(raw_citations, source_by_id)
-        citations = [
-            Citation(
-                clause_id=check.clause_id,
-                quote=raw.get("quote", ""),
-                effect=raw.get("effect", "permits"),
-                verified=check.verified,
-                unverified_reason=check.reason,
-            )
-            for raw, check in zip(raw_citations, checks)
-        ]
-        verdict = payload.get("verdict", Verdict.INSUFFICIENT_INFORMATION)
+        payload = await reason(
+            scenario, facts, considered, computed, nudge=CITATION_NUDGE,
+            use_cache=not resample,
+        )
+        citations, verdict = _read_answer(payload, source_by_id)
 
         if verdict != Verdict.INSUFFICIENT_INFORMATION and not citations:
             # Still nothing. Downgrade is the safe direction: it turns an
@@ -424,6 +848,74 @@ async def run_scenario(
             # leaving a confident answer standing on nothing.
             log.warning("verdict %s still had no citations; downgrading", verdict)
             verdict = Verdict.INSUFFICIENT_INFORMATION
+
+    # 5e: consistency. The answer is checked against what Python already
+    # worked out, and a contradiction gets one retry with the calculation in
+    # front of the model - the same shape as the citation retry above.
+    problems, _ = find_contradictions(citations, verdict, computed)
+    # Remembered before the retry, because the retry can drop the clause that
+    # pointed to the missing list - and still not have answered the question.
+    leaned_on_missing_list = verdict in (Verdict.COVERED, Verdict.CONDITIONAL) and any(
+        c.clause_id in computed.absent and c.effect != "denies" for c in citations
+    )
+    if problems:
+        log.info("answer contradicts computed results; retrying once: %s", problems)
+        payload = await reason(
+            scenario, facts, considered, computed,
+            nudge=CONSISTENCY_NUDGE.format(problems="\n".join(problems)),
+            use_cache=not resample,
+        )
+        citations, verdict = _read_answer(payload, source_by_id)
+
+        # Still citing a clause the arithmetic cleared. Under a COVERED verdict
+        # that is a wrong label, not a wrong clause: the answer says nothing is
+        # cut or refused, the arithmetic says the clause cuts nothing, and both
+        # agree it permits. Measured on `room-rent-within-cap`, four fresh
+        # samples of four: the retry answered covered - "8,000 does not exceed
+        # the 10,000 limit ... paid in full" - and still labelled clause 5.1
+        # "reduces". Dropping that citation left a right answer with nothing
+        # behind it, and the downgrade below turned it into
+        # insufficient_information. So it is relabelled instead.
+        #
+        # Under any other verdict the citation is doing work the arithmetic
+        # rules out, so it goes. Either way the verdict is left alone - code
+        # can show a citation is wrong, but not what the right answer is.
+        _, irrelevant = find_contradictions(citations, verdict, computed)
+        if irrelevant and verdict == Verdict.COVERED:
+            citations = [
+                replace(c, effect="permits") if c in irrelevant else c for c in citations
+            ]
+        elif irrelevant:
+            log.warning("dropping citation(s) the arithmetic rules out: %s",
+                        [c.clause_id for c in irrelevant])
+            citations = [c for c in citations if c not in irrelevant]
+            if verdict != Verdict.INSUFFICIENT_INFORMATION and not citations:
+                verdict = Verdict.INSUFFICIENT_INFORMATION
+
+        if _rests_only_on_a_missing_list(citations, verdict, computed, considered):
+            log.warning("verdict %s rests only on a list this document lacks; downgrading", verdict)
+            verdict = Verdict.INSUFFICIENT_INFORMATION
+        elif (
+            leaned_on_missing_list
+            and verdict == Verdict.NOT_COVERED
+            and not _names_a_refusal(citations, considered)
+        ):
+            # Measured on `day-care-not-listed`, four fresh samples of four: told
+            # the day-care list is missing, the retry answered not_covered
+            # "because in-patient cover needs 24 hours", citing that cover clause
+            # as permitting. That abandons the question rather than answering
+            # it: no exclusion, waiting period or condition is named as refusing.
+            # Scoped to answers that leaned on a missing list, because elsewhere
+            # right refusals carry sloppy labels too - a refusal on a cover
+            # window cites the window clause as "permits".
+            log.warning("refusal after the missing-list retry names no refusing clause; downgrading")
+            verdict = Verdict.INSUFFICIENT_INFORMATION
+
+    # Only when something else still stands: a verdict is never left with nothing
+    # behind it by this filter, so it can never trigger a downgrade.
+    noise = unraised_reductions(citations, computed)
+    if noise and len(noise) < len(citations):
+        citations = [c for c in citations if c not in noise]
 
     return ScenarioResult(
         verdict=verdict,

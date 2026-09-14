@@ -1,0 +1,138 @@
+{
+  "_why": [
+    "HELD-OUT scenario cases. Never used to choose or tune a change - run only to",
+    "report whether the main set's score generalises.",
+    "",
+    "WHY THIS FILE EXISTS. By M13 the main 40 cases had been used to make dozens of",
+    "keep-or-revert decisions, the reasoning prompt was found to contain one of",
+    "them word for word as an example, and removing that example broke eight",
+    "cases. A score earned on the cases you tuned against says how well the",
+    "system fits those cases. Only questions it was never shaped around can say",
+    "how well it answers questions.",
+    "",
+    "Written after the M13 measurements and before any M14 change, against the",
+    "same synthetic policy and the same conventions as scenarios.json (see its",
+    "_why for the sub-limit convention). Written by the same author as the fixes,",
+    "so not fully independent: a stronger test would be cases written by someone",
+    "who has not seen the prompt.",
+    "",
+    "Each situation differs from every main-set case: different treatments,",
+    "different numbers, different wording, and the cosmetic carve-out is tested",
+    "through cancer rather than the burn example the prompt contains."
+  ],
+  "cases": [
+    {
+      "id": "ho-cancer-reconstruction",
+      "scenario": "After a mastectomy for breast cancer my surgeon performed breast reconstruction, and certified that it was medically necessary. I have held the policy five years.",
+      "expected_verdict": "covered",
+      "must_cite": ["4.1"],
+      "why": "Plastic surgery is excluded unless necessitated by an Accident, Burn or Cancer and certified medically necessary. This is necessitated by cancer and certified."
+    },
+    {
+      "id": "ho-war-injury",
+      "scenario": "I was injured by shelling while visiting a border town during a war and had to be hospitalised. I have held the policy six years.",
+      "expected_verdict": "not_covered",
+      "must_cite": ["4.8"],
+      "why": "Any expense arising from war or warlike operations is excluded, whether war is declared or not."
+    },
+    {
+      "id": "ho-hysterectomy-too-soon",
+      "scenario": "I had a hysterectomy eighteen months after taking out the policy.",
+      "expected_verdict": "not_covered",
+      "must_cite": ["3.3"],
+      "why": "Hysterectomy is named in the specified-disease waiting period of twenty four months; eighteen months is short of it."
+    },
+    {
+      "id": "ho-knee-replacement-served",
+      "scenario": "I needed a knee replacement thirty months after my policy began. The knee trouble only started after I took the policy out.",
+      "expected_verdict": "covered",
+      "must_cite": [],
+      "why": "Joint replacement carries a 24-month bar, served at thirty months, and the condition is not pre-existing. No exclusion or cap applies to what is described."
+    },
+    {
+      "id": "ho-attempted-suicide",
+      "scenario": "I was hospitalised after an attempted suicide. I have held the policy four years.",
+      "expected_verdict": "not_covered",
+      "must_cite": ["4.2"],
+      "why": "Expenses attributable to attempted suicide are excluded."
+    },
+    {
+      "id": "ho-scuba-diving",
+      "scenario": "I got decompression sickness while scuba diving on holiday and was admitted to hospital. I have held the policy ten years.",
+      "expected_verdict": "not_covered",
+      "must_cite": ["4.3"],
+      "why": "Treatment necessitated by hazardous or adventure sports is excluded, and scuba diving is named."
+    },
+    {
+      "id": "ho-surrogacy",
+      "scenario": "We are paying a surrogate to carry our baby. Will the policy cover the surrogacy costs? We have held it five years.",
+      "expected_verdict": "not_covered",
+      "must_cite": ["4.5"],
+      "why": "Gestational surrogacy is excluded by name."
+    },
+    {
+      "id": "ho-icu-within-cap",
+      "scenario": "My sum insured is 10 lakh and I spent three days in the ICU at 15,000 rupees a day after a stroke. I have held the policy four years.",
+      "expected_verdict": "covered",
+      "must_cite": [],
+      "must_not_cite": ["5.2"],
+      "why": "ICU charges are capped at 2% of the sum insured per day, which is 20,000; 15,000 is within it, so no deduction follows."
+    },
+    {
+      "id": "ho-room-over-cap-small-si",
+      "scenario": "My sum insured is 2 lakh and I chose a room costing 4,000 rupees a day for my appendix operation. I have held the policy three years.",
+      "expected_verdict": "conditional",
+      "must_cite": ["5.1"],
+      "why": "1% of 2 lakh is 2,000 a day; the room at 4,000 exceeds it, so the excess is not paid and the claim is paid but reduced."
+    },
+    {
+      "id": "ho-copay-derived-age",
+      "scenario": "I am 66 and have held this policy for two years. I was admitted for a kidney stone, which I never had before taking the policy.",
+      "expected_verdict": "conditional",
+      "must_cite": ["5.3"],
+      "why": "66 now and two years held makes 64 at inception, over 60, so the 20% co-payment applies. Two years clears the initial waiting period, a kidney stone is not a specified disease, and it is not pre-existing."
+    },
+    {
+      "id": "ho-stem-cell-therapy",
+      "scenario": "My doctor recommends stem cell therapy. My sum insured is 6 lakh and I have held the policy five years.",
+      "expected_verdict": "conditional",
+      "must_cite": ["5.5"],
+      "why": "Stem cell therapy is named in the modern treatment limit, restricted to 50% of the sum insured per policy year."
+    },
+    {
+      "id": "ho-planned-notice-late",
+      "scenario": "My knee surgery was planned weeks in advance, but I only told the insurer on the morning I was admitted. I have held the policy four years.",
+      "expected_verdict": "conditional",
+      "must_cite": ["6.1"],
+      "why": "Planned hospitalisation needs notice at least 48 hours before admission; failing that the Company MAY repudiate, so the outcome is discretionary."
+    },
+    {
+      "id": "ho-pre-hospitalisation-too-early",
+      "scenario": "I had tests ninety days before I was admitted, for the same condition, and my hospital claim was accepted. I have held the policy six years.",
+      "expected_verdict": "not_covered",
+      "must_cite": ["2.2"],
+      "why": "Pre-hospitalisation expenses are covered only for the sixty days preceding admission. Ninety days is outside that window."
+    },
+    {
+      "id": "ho-dental-accident",
+      "scenario": "I broke two teeth in a road accident and was admitted to hospital for dental surgery. I have held the policy three years.",
+      "expected_verdict": "covered",
+      "must_cite": ["4.6"],
+      "why": "Dental treatment is excluded unless necessitated by an Accident and requiring hospitalisation - both are true here."
+    },
+    {
+      "id": "ho-lost-luggage",
+      "scenario": "Will this policy pay for my luggage that the airline lost?",
+      "expected_verdict": "insufficient_information",
+      "must_cite": [],
+      "why": "A health policy does not address lost luggage. The document is silent, not negative."
+    },
+    {
+      "id": "ho-short-procedure",
+      "scenario": "I had a minor procedure under local anaesthesia and went home after three hours. I have held the policy five years.",
+      "expected_verdict": "insufficient_information",
+      "must_cite": [],
+      "why": "Under 24 hours, so in-patient cover does not apply. Day care cover depends on the procedure being listed in Annexure II, which this document does not contain, and the procedure is not named."
+    }
+  ]
+}

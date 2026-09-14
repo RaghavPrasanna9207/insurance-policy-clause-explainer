@@ -31,7 +31,7 @@ reasoning step answer `insufficient_information` honestly - and a fourth failure
 was the model asserting a verdict when the timing had never been stated.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 
 
@@ -49,6 +49,9 @@ class WaitingCheck:
     required_days: int
     held_days: int | None
     status: WaitingStatus
+    # The clause's own carve-outs, already checked against its text at
+    # analysis time (app/grounding.py, verify_exception).
+    exceptions: list[str] = field(default_factory=list)
 
     def describe(self) -> str:
         """A sentence for the reasoning prompt, stating the arithmetic done."""
@@ -70,10 +73,23 @@ class WaitingCheck:
                 f"policy held {_human(self.held_days)} -> this waiting period no "
                 f"longer applies (it says nothing about any other clause)"
             )
-        return (
+        blocked = (
             f"clause {self.clause_id}: requires {_human(self.required_days)}, "
             f"policy held {_human(self.held_days)} -> this waiting period still "
             f"applies and blocks treatment covered by THIS clause"
+        )
+        if not self.exceptions:
+            return blocked
+        # Measured: without this, "hit by a car ten days in" was refused under
+        # a 30-day bar that says "except claims arising out of an Accident" -
+        # the model followed "blocks" over the clause's own carve-out, three
+        # times out of three. Not served and excepted are both true; this line
+        # had only been saying the first. Whether the situation IS an accident
+        # is language, so it is named here and decided by the model.
+        carve_outs = "; ".join(f'"{e}"' for e in self.exceptions)
+        return (
+            f"{blocked}, EXCEPT where the situation falls within this clause's "
+            f"own exception: {carve_outs}. Decide from the description whether it does"
         )
 
 
@@ -123,6 +139,7 @@ def evaluate(clauses, days_held: int | None) -> list[WaitingCheck]:
                 required_days=required,
                 held_days=days_held,
                 status=status,
+                exceptions=list(getattr(clause, "exceptions", None) or []),
             )
         )
     return checks

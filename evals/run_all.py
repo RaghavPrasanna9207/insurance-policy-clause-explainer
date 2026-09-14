@@ -40,12 +40,25 @@ REPORT_PATH = REPO_ROOT / "evals" / "REPORT.md"
 
 
 def _git_commit() -> str:
+    """The commit the numbers came from, marked `-dirty` if they did not.
+
+    A bare HEAD hash claims the run used exactly that commit's code. With
+    uncommitted edits it did not: the M14 report was stamped `2da3dd6` while
+    measuring M14 changes that only existed in the working tree.
+
+    REPORT.md itself is excluded, because this script rewrites it - otherwise
+    the second run on a clean commit would always call itself dirty.
+    """
     try:
-        out = subprocess.run(
+        head = subprocess.run(
             ["git", "rev-parse", "--short", "HEAD"],
             cwd=REPO_ROOT, capture_output=True, text=True, check=True,
-        )
-        return out.stdout.strip()
+        ).stdout.strip()
+        changes = subprocess.run(
+            ["git", "status", "--porcelain", "--", ".", ":(exclude)evals/REPORT.md"],
+            cwd=REPO_ROOT, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        return f"{head}-dirty" if changes else head
     except Exception:
         return "unknown"
 
@@ -55,15 +68,25 @@ def _cache_note(seconds: float) -> str:
 
     A report showing "0s" invites the reader to think this eval is free. It is
     not - a cold run is several minutes of local inference. It is only instant
-    because every response was already cached under an identical model, prompt
-    version, schema and decoding configuration.
+    because every response was already cached under an identical model,
+    messages, schema and decoding configuration.
     """
     if seconds < 20:
         return " (served from cache; a cold run takes several minutes)"
     return ""
 
 
-def build(classification: dict, scenario: dict, seconds: float) -> str:
+# What each held-out batch has been exposed to, stated beside its number. A
+# held-out score is only as clean as its history, and the history is the point.
+HELDOUT_NOTES = {
+    "1": "read while diagnosing M14 failures - no longer clean",
+    "2": "written before running; one case read while diagnosing",
+}
+
+
+def build(classification: dict, scenario: dict, seconds: float,
+          heldout: dict[str, dict] | None = None) -> str:
+    heldout = heldout or {}
     rank = classification.get("ranking") or {}
 
     lines = [
@@ -102,7 +125,17 @@ def build(classification: dict, scenario: dict, seconds: float) -> str:
         )
     lines += [
         f"| Scenario verdict accuracy | **{scenario['verdict_accuracy']:.3f}** | quality |",
+    ]
+    for batch, res in heldout.items():
+        lines.append(
+            f"| Scenario verdict accuracy, held-out batch {batch} ({res['total']} cases, "
+            f"{HELDOUT_NOTES.get(batch, 'never tuned on')}) | **{res['verdict_accuracy']:.3f}** "
+            f"| quality |"
+        )
+    lines += [
         f"| Scenario citation recall | **{scenario['citation_recall']:.3f}** | quality |",
+        f"| Scenario false citation rate | "
+        f"**{scenario['false_citation_rate']:.3f}** | quality |",
         f"| Quote fabrication rate | **{scenario['fabrication_rate']:.3f}** | quality |",
         f"| **Citation detection integrity** | "
         f"**{scenario['detection_integrity']:.3f}** | **guarantee** |",
@@ -237,6 +270,35 @@ def build(classification: dict, scenario: dict, seconds: float) -> str:
             "is not worth it.",
         ]
 
+    if heldout:
+        lines += [
+            "",
+            "---",
+            "",
+            "## 3b. Held-out scenarios",
+            "",
+            "The main 40 cases have been used to make many keep-or-revert decisions, and",
+            "the reasoning prompt contains one of them as its example. A score on cases",
+            "you tuned against measures how well the system fits them. These batches",
+            "were written separately and are run only to measure, so the gap between",
+            "their score and the main set's is an estimate of how much of the main",
+            "score is fit rather than skill. Single run each; see the learning log for",
+            "the majority-of-three figures.",
+            "",
+        ]
+        for batch, res in heldout.items():
+            lines.append(
+                f"**Batch {batch}** ({HELDOUT_NOTES.get(batch, 'never tuned on')}): "
+                f"verdict accuracy {res['verdict_accuracy']:.3f} "
+                f"({sum(r['verdict_ok'] for r in res['rows'])}/{res['total']}), "
+                f"citation recall {res['citation_recall']:.3f}, "
+                f"detection integrity {res['detection_integrity']:.3f}"
+            )
+            for row in res["rows"]:
+                if not row["verdict_ok"]:
+                    lines.append(f"- `{row['id']}`: expected `{row['expected']}`, got `{row['got']}`")
+            lines.append("")
+
     lines += [
         "",
         "---",
@@ -252,9 +314,11 @@ def build(classification: dict, scenario: dict, seconds: float) -> str:
         "",
         "The golden PDF is generated, not committed, so it is rebuilt from",
         "`evals/golden/build_synthetic_policy.py` if missing. Model responses are",
-        "cached by a hash of model, prompt version, messages, schema and decoding",
-        "settings, so a second run costs seconds - and changing any of those",
-        "recomputes rather than serving a stale answer.",
+        "cached by a hash of model, messages, schema and decoding settings, so a",
+        "second run costs seconds - and changing any of those recomputes rather",
+        "than serving a stale answer. The prompt version is a label, not part of",
+        "the key: an unchanged prompt replays its stored answer even after the",
+        "version is bumped, so only the cases a change reached are regenerated.",
         "",
     ]
     return "\n".join(lines)
@@ -278,9 +342,24 @@ def main() -> None:
     print("2/2  scenario simulator")
     print("=" * 60)
     scenario = asyncio.run(run_scenario_eval.run(use_cache=use_cache))
+    # Recorded like any other scenario run, so a full report run counts toward
+    # the history that comparisons and stability are computed from.
+    comparison = run_scenario_eval.render_comparison(
+        run_scenario_eval.compare_with_previous(
+            scenario, run_scenario_eval.load_history()
+        )
+    )
+    run_scenario_eval.record_run(scenario)
+
+    # Held-out batches: measured, never recorded into the history the main
+    # set's comparisons and watchlist are computed from.
+    heldout = {
+        batch: asyncio.run(run_scenario_eval.run(use_cache=use_cache, cases_path=path))
+        for batch, path in run_scenario_eval.HELDOUT_PATHS.items()
+    }
 
     seconds = time.perf_counter() - started
-    REPORT_PATH.write_text(build(classification, scenario, seconds), encoding="utf-8")
+    REPORT_PATH.write_text(build(classification, scenario, seconds, heldout), encoding="utf-8")
 
     print()
     print("=" * 60)
@@ -289,17 +368,21 @@ def main() -> None:
     if rank:
         print(f"  ranking expectations    : {rank['passed']}/{rank['total']}")
     print(f"  scenario verdict acc.   : {scenario['verdict_accuracy']:.3f}")
+    for batch, res in heldout.items():
+        print(f"  held-out batch {batch}      : {res['verdict_accuracy']:.3f}")
     print(f"  citation recall         : {scenario['citation_recall']:.3f}")
     print(f"  fabrication rate        : {scenario['fabrication_rate']:.3f}")
     print(f"  DETECTION INTEGRITY     : {scenario['detection_integrity']:.3f}  "
           f"{'OK' if scenario['detection_integrity'] >= 1.0 else 'FAILED - guarantee broken'}")
     print("=" * 60)
     print(f"wrote {REPORT_PATH.relative_to(REPO_ROOT)} in {seconds:.0f}s")
+    print()
+    print(comparison)
 
     # A non-zero exit if the guarantee is broken, so this can gate a pipeline.
     # The quality numbers deliberately do NOT gate: they are allowed to be poor,
     # and a threshold on them would only invite tuning to the threshold.
-    if scenario["detection_integrity"] < 1.0:
+    if any(r["detection_integrity"] < 1.0 for r in [scenario, *heldout.values()]):
         sys.exit(1)
 
 

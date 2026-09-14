@@ -107,6 +107,42 @@ def verify_quote(quote: str, source_text: str) -> tuple[bool, str]:
     return False, "quote does not appear in the cited clause"
 
 
+# How much of a quotation must survive trimming for the trimmed part to stand.
+MIN_KEPT_SHARE = 0.6
+
+
+def verified_prefix(quote: str, source_text: str) -> str | None:
+    """The longest leading part of `quote` that the clause really contains, or None.
+
+    WHY. Two quotations failed verification in every run, and both had the same
+    shape: the clause's own words, exactly, with something of the model's
+    appended - "…has been accepted BY THE COMPANY" (three words from the clause
+    before), and a whole clause followed by the pipeline's own "EXCEPTIONS - …"
+    annotation. A retry repeated both byte for byte, so asking again does not
+    fix this; the true part is already there to keep.
+
+    Same principle as _TRAILING_REF, generalised: what is kept must match
+    exactly, so nothing invented can hide in it. And it must be most of the
+    quotation - at least MIN_KEPT_SHARE of it, and never shorter than
+    MIN_QUOTE_CHARS - so a true opening followed by a longer invention is not
+    turned into a verified quotation by throwing the invention away.
+
+    Returns the kept words as the model wrote them (its casing and line breaks),
+    so what the reader sees is still a copy of the model's quotation, shortened.
+    """
+    tokens = quote.split()
+    haystack = normalize(source_text)
+    whole = len(normalize(quote))
+    for k in range(len(tokens) - 1, 0, -1):
+        kept = " ".join(tokens[:k]).rstrip(" ,;:")
+        needle = normalize(kept)
+        if len(needle) < MIN_QUOTE_CHARS or len(needle) < MIN_KEPT_SHARE * whole:
+            return None
+        if needle in haystack:
+            return kept
+    return None
+
+
 def verify_citations(
     citations: list[dict], clause_text_by_id: dict[str, str]
 ) -> list[QuoteCheck]:
@@ -135,3 +171,59 @@ def verify_citations(
         verified, reason = verify_quote(quote, source)
         checks.append(QuoteCheck(clause_id, quote, verified, reason))
     return checks
+
+
+# --- exceptions extracted at analysis time ---------------------------------
+#
+# WHY AN EXTRACTED EXCEPTION NEEDS CHECKING AT ALL
+# ------------------------------------------------
+# Stage 3 asks the model for each clause's carve-outs, and stage 5 prints them
+# under the clause as "EXCEPTIONS - this clause does NOT apply when: ...". That
+# line is the pipeline speaking, not the model, so a wrong one is a falsehood
+# this system asserts. Measured on the synthetic policy, 5 of the 8 exceptions
+# extracted were wrong, in two different ways:
+#
+#   NOT IN THE CLAUSE    the alcohol exclusion was given "necessitated by an
+#                        Accident, Burn or Cancer" - the analysis prompt's own
+#                        worked example - so a question about a drunken fall
+#                        down the stairs was told the exclusion spares accidents
+#
+#   REAL TEXT, WRONG ROLE  "reversal of sterilisation" is on the infertility
+#                          clause's list of things it EXCLUDES; the whole breach-
+#                          of-law exclusion was returned as its own exception
+#
+# A substring check catches the first kind and not the second. The second is
+# caught by the grammar of a carve-out: in a policy wording an exception is
+# introduced by a word that says so, earlier in the same sentence.
+
+# The same words CLASSIFY_SYSTEM tells the model to look for. A test holds the
+# two lists together.
+EXCEPTION_MARKERS = (
+    "unless", "except", "other than", "save for", "provided that", "shall not apply",
+)
+_MARKER = re.compile(r"\b(?:" + "|".join(re.escape(m) for m in EXCEPTION_MARKERS) + r")\b")
+# A full stop followed by a space. Not a bare full stop, or "3.1" and "1.5
+# lakh" would end a sentence. Erring towards more boundaries only ever drops an
+# exception, which is the safe direction: the clause text is still in front of
+# the reader, only the emphasis is lost.
+_SENTENCE_END = re.compile(r"[.!?]\s")
+
+
+def verify_exception(span: str, source_text: str) -> bool:
+    """True if `span` is a carve-out the clause actually states.
+
+    It must appear in the clause, and an exception word must come before it in
+    the same sentence. No minimum length, unlike a quotation: the exception
+    word is what stops a short span from matching by accident.
+    """
+    needle = normalize(span).strip(" .,;:")
+    if not needle:
+        return False
+    haystack = normalize(source_text)
+    start = haystack.find(needle)
+    while start != -1:
+        sentence_so_far = _SENTENCE_END.split(haystack[:start])[-1]
+        if _MARKER.search(sentence_so_far):
+            return True
+        start = haystack.find(needle, start + 1)
+    return False

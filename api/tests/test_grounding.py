@@ -8,7 +8,15 @@ cries wolf on correct quotations until people stop believing it.
 
 import pytest
 
-from app.grounding import MIN_QUOTE_CHARS, normalize, verify_citations, verify_quote
+from app.grounding import (
+    EXCEPTION_MARKERS,
+    MIN_QUOTE_CHARS,
+    normalize,
+    verified_prefix,
+    verify_citations,
+    verify_exception,
+    verify_quote,
+)
 
 CLAUSE = (
     "3.2 Pre-existing Disease Waiting Period\n"
@@ -157,3 +165,138 @@ def test_citing_a_clause_outside_the_document_fails_loudly():
     )
     assert not checks[0].verified
     assert "not in this document" in checks[0].reason
+
+
+# --- a true quotation with something appended ------------------------------
+
+POST_HOSP = (
+    "2.3 Post-hospitalisation Medical Expenses The Company shall indemnify Medical Expenses "
+    "incurred during the ninety days immediately following the date of discharge, provided "
+    "that such expenses relate to the same condition for which the Insured Person was "
+    "hospitalised and the in-patient claim has been accepted."
+)
+
+
+def test_words_spliced_onto_a_true_quotation_are_trimmed_off():
+    """The measured failure, in every run: clause 2.3 quoted exactly, then
+    "by the Company" from the clause before it. A retry repeated it byte for
+    byte. What is kept is the part that IS the clause's words, in the model's
+    own casing and line breaks."""
+    quote = (
+        "The Company shall indemnify Medical Expenses incurred during the ninety days "
+        "immediately following the date of discharge, provided that such expenses relate to "
+        "the same condition for which the Insured Person was hospitalised and the in-patient "
+        "claim has been accepted by the Company."
+    )
+    kept = verified_prefix(quote, POST_HOSP)
+    assert kept is not None and kept.endswith("has been accepted")
+    assert verify_quote(kept, POST_HOSP)[0]
+
+
+def test_an_annotation_copied_after_a_quotation_is_trimmed_off():
+    quote = (
+        "Expenses related to the treatment of a Pre-existing Disease and its direct "
+        "complications shall be excluded until the\nexpiry of thirty six months\n"
+        "EXCEPTIONS - this clause does NOT apply when: an accident"
+    )
+    assert verified_prefix(quote, CLAUSE).endswith("thirty six months")
+
+
+def test_a_mostly_invented_quotation_is_not_rescued_by_its_first_words():
+    """A true opening followed by a longer invention must stay unverified.
+    Keeping "Expenses related to the treatment of a Pre-existing Disease" and
+    dropping the rest would put a green tick on a quotation that was mostly
+    made up."""
+    quote = (
+        "Expenses related to the treatment of a Pre-existing Disease will be paid in full "
+        "from the first day of the policy with no waiting period of any kind whatsoever"
+    )
+    assert verified_prefix(quote, CLAUSE) is None
+
+
+# --- extracted exceptions --------------------------------------------------
+#
+# Clause texts below are the synthetic policy's own wording. Every "wrong"
+# exception is one the analysis stage actually produced for that clause.
+
+INITIAL_WAITING = (
+    "3.1 Initial Waiting Period No claim shall be payable in respect of any Illness "
+    "contracted during the first thirty days from the commencement date of the first "
+    "policy with the Company, except claims arising out of an Accident. This exclusion "
+    "shall not apply on subsequent continuous renewal of the policy without a break."
+)
+COSMETIC = (
+    "4.1 Cosmetic and Plastic Surgery The Company shall not be liable to make any "
+    "payment in respect of expenses incurred in connection with cosmetic or plastic "
+    "surgery or any treatment to change appearance, unless such surgery is "
+    "necessitated by an Accident, Burn or Cancer, and is certified by the attending "
+    "Medical Practitioner to be medically necessary."
+)
+SELF_INJURY = (
+    "4.2 Intentional Self-Injury The Company shall not be liable for expenses arising "
+    "out of or attributable to any intentional self-injury, attempted suicide, or the "
+    "use of intoxicating substances, alcohol or drugs not prescribed by a registered "
+    "Medical Practitioner."
+)
+BREACH_OF_LAW = (
+    "4.4 Breach of Law Expenses for treatment directly arising from or consequent upon "
+    "any Insured Person committing or attempting to commit a breach of law with "
+    "criminal intent shall be excluded."
+)
+INFERTILITY = (
+    "4.5 Infertility and Sterility Expenses related to sterility and infertility, "
+    "including assisted reproduction services, gestational surrogacy, reversal of "
+    "sterilisation and any form of contraception, are excluded under this policy."
+)
+
+
+def test_a_carve_out_introduced_by_except_is_kept():
+    assert verify_exception("claims arising out of an Accident", INITIAL_WAITING)
+
+
+def test_every_condition_under_one_unless_is_kept():
+    """4.1's second condition is joined by "and is", with "unless" earlier in the
+    same sentence. It is still part of the carve-out."""
+    assert verify_exception("necessitated by an Accident, Burn or Cancer", COSMETIC)
+    assert verify_exception(
+        "certified by the attending Medical Practitioner to be medically necessary", COSMETIC
+    )
+
+
+def test_an_exception_copied_from_elsewhere_is_dropped():
+    """The analysis prompt's own worked example is "cosmetic surgery ... unless
+    necessitated by an Accident, Burn or Cancer". For the alcohol exclusion, which
+    has no carve-out at all, the model returned that example's answer - and the
+    reasoning step was then told the exclusion does not apply to accidents, on a
+    question about falling down the stairs drunk."""
+    assert not verify_exception("necessitated by an Accident, Burn or Cancer", SELF_INJURY)
+
+
+def test_a_paraphrase_is_dropped():
+    """Also inverted: the clause EXCLUDES direct complications."""
+    assert not verify_exception("direct complications of a pre-existing disease", CLAUSE)
+
+
+def test_the_exclusion_itself_is_not_an_exception_to_it():
+    """Verbatim, and still wrong. A real span in the wrong ROLE is caught by the
+    missing exception word, not by the substring check."""
+    assert not verify_exception(
+        "directly arising from or consequent upon any Insured Person committing or "
+        "attempting to commit a breach of law with criminal intent",
+        BREACH_OF_LAW,
+    )
+    assert not verify_exception("reversal of sterilisation", INFERTILITY)
+
+
+def test_an_exception_word_in_an_earlier_sentence_does_not_count():
+    source = "Claims are excluded except for accidents. Treatment of obesity is excluded."
+    assert verify_exception("accidents", source)
+    assert not verify_exception("Treatment of obesity", source)
+
+
+def test_the_code_accepts_exactly_the_words_the_prompt_asks_for():
+    """Two lists that must agree are held together here rather than trusted to."""
+    from app.llm.prompts import CLASSIFY_SYSTEM
+
+    for marker in EXCEPTION_MARKERS:
+        assert f'"{marker}"' in CLASSIFY_SYSTEM

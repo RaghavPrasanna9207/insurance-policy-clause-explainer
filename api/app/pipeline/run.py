@@ -174,6 +174,14 @@ def _persist_analyses(doc_id: str, segments, analyses, scored) -> None:
                     limits_json=json.dumps(analysis.monetary_limits),
                     time_windows_json=json.dumps(analysis.time_windows),
                     waiting_period_days=analysis.waiting_period_days,
+                    copay_percent=analysis.copay_percent,
+                    copay_min_age_at_inception=analysis.copay_min_age_at_inception,
+                    cap_percent_of_sum_insured=analysis.cap_percent_of_sum_insured,
+                    icu_cap_percent_of_sum_insured=(
+                        analysis.icu_cap_percent_of_sum_insured
+                    ),
+                    cover_window_days=analysis.cover_window_days,
+                    cover_window_anchor=analysis.cover_window_anchor,
                     exceptions_json=json.dumps(analysis.exceptions),
                     likelihood=analysis.likelihood,
                     severity=analysis.severity,

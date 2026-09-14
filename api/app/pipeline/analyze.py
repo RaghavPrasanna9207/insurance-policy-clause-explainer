@@ -60,8 +60,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.config import settings
+from app.grounding import verify_exception
 from app.llm import client
-from app.llm.prompts import CLASSIFY_SYSTEM, PROMPT_VERSION, render_clause_batch
+from app.llm.prompts import CLASSIFY_SYSTEM, render_clause_batch
 from app.pipeline.segment import Segment
 from app.taxonomy import ClauseType
 
@@ -86,6 +87,29 @@ class ClauseAnalysis:
     waiting_period_unit: str | None = None
     # Conditions under which the clause does NOT apply.
     exceptions: list[str] = field(default_factory=list)
+    # THE OPERANDS OF A REDUCTION, reported exactly as the clause states them.
+    # Same split as the waiting period above and for the same reason: reading
+    # "one percent of the Sum Insured per day" out of prose is language;
+    # deciding whether 8,000 exceeds 1% of 10 lakh is arithmetic, and stage 5
+    # does it in Python. See app/pipeline/reduction.py.
+    copay_percent: int | None = None
+    copay_min_age_at_inception: int | None = None
+    cap_percent_of_sum_insured: int | None = None
+    icu_cap_percent_of_sum_insured: int | None = None
+    # A COVER WINDOW around one hospital stay, exactly as the clause states it:
+    # "the ninety days immediately following the date of discharge" is
+    # (90, "days", "after_discharge"). Normalised to days by
+    # `cover_window_days`; compared in app/pipeline/window.py.
+    #
+    # Deliberately separate from the waiting period above, and the separation
+    # is the fix for a real misreading: the clause reader was putting 2.2's
+    # "sixty days immediately preceding the date of admission" into
+    # waiting_period_value, and waiting.py then told every scenario that 2.2
+    # was a 60-day waiting period. A waiting period counts from the day the
+    # POLICY began; a cover window counts from one HOSPITAL STAY.
+    cover_window_value: int | None = None
+    cover_window_unit: str | None = None
+    cover_window_anchor: str | None = None
     likelihood: int = 3
     severity: int = 3
 
@@ -102,6 +126,14 @@ class ClauseAnalysis:
             return None
         per = {"days": 1, "months": 30, "years": 365}.get(self.waiting_period_unit or "")
         return self.waiting_period_value * per if per else None
+
+    @property
+    def cover_window_days(self) -> int | None:
+        """The cover window in days, or None if this clause states none."""
+        if not self.cover_window_value or self.cover_window_value <= 0:
+            return None
+        per = {"days": 1, "months": 30, "years": 365}.get(self.cover_window_unit or "")
+        return self.cover_window_value * per if per else None
 
 
 def _batch_schema(ids: list[str]) -> dict[str, Any]:
@@ -181,6 +213,44 @@ def _batch_schema(ids: list[str]) -> dict[str, Any]:
                         # clause's escape hatch is exactly what a policyholder
                         # needs to see.
                         "exceptions": {"type": "array", "items": {"type": "string"}},
+                        # REDUCTION OPERANDS. Null on every clause that does not
+                        # cut a payout, which is most of them.
+                        #
+                        # These exist because the model was being asked, inside
+                        # a paragraph of legal prose, to work out whether 8,000
+                        # exceeds one percent of ten lakh - and it got that
+                        # wrong in both directions on the golden set: a room
+                        # under the cap read as a breach, an ICU rate over the
+                        # cap read as fine.
+                        #
+                        # Asking instead for the two numbers the clause STATES
+                        # leaves the model doing what it is good at. Python
+                        # multiplies and compares. This is the same fix already
+                        # applied to waiting periods, in the family of
+                        # comparisons nobody had noticed was the same family:
+                        # money and age rather than duration.
+                        "copay_percent": {"type": ["integer", "null"]},
+                        "copay_min_age_at_inception": {"type": ["integer", "null"]},
+                        "cap_percent_of_sum_insured": {"type": ["integer", "null"]},
+                        "icu_cap_percent_of_sum_insured": {
+                            "type": ["integer", "null"]
+                        },
+                        # COVER WINDOW OPERANDS: the third family of the same
+                        # fix, after duration and money. "Is a scan 120 days
+                        # after discharge inside a 90-day window" was being
+                        # decided by the model, and it said yes. The anchor is
+                        # an enum because a window has a side, and comparing a
+                        # before-admission window with an after-discharge
+                        # expense compares two different measurements.
+                        "cover_window_value": {"type": ["integer", "null"]},
+                        "cover_window_unit": {
+                            "type": ["string", "null"],
+                            "enum": ["days", "months", "years", None],
+                        },
+                        "cover_window_anchor": {
+                            "type": ["string", "null"],
+                            "enum": ["before_admission", "after_discharge", None],
+                        },
                         # Integer enums, not bare integers: a 1-5 scale that can
                         # return 7 is not a 1-5 scale, and stage 4 normalises
                         # these assuming the stated range.
@@ -191,6 +261,11 @@ def _batch_schema(ids: list[str]) -> dict[str, Any]:
                         "id", "clause_type", "plain_language", "what_it_means",
                         "triggers", "monetary_limits", "time_windows",
                         "waiting_period_value", "waiting_period_unit", "exceptions",
+                        "copay_percent", "copay_min_age_at_inception",
+                        "cap_percent_of_sum_insured",
+                        "icu_cap_percent_of_sum_insured",
+                        "cover_window_value", "cover_window_unit",
+                        "cover_window_anchor",
                         "likelihood", "severity",
                     ],
                 },
@@ -214,22 +289,46 @@ def _parse(payload: dict[str, Any]) -> dict[str, ClauseAnalysis]:
             waiting_period_value=item.get("waiting_period_value"),
             waiting_period_unit=item.get("waiting_period_unit"),
             exceptions=[e.strip() for e in item.get("exceptions", []) if e.strip()],
+            copay_percent=item.get("copay_percent"),
+            copay_min_age_at_inception=item.get("copay_min_age_at_inception"),
+            cap_percent_of_sum_insured=item.get("cap_percent_of_sum_insured"),
+            icu_cap_percent_of_sum_insured=item.get("icu_cap_percent_of_sum_insured"),
+            cover_window_value=item.get("cover_window_value"),
+            cover_window_unit=item.get("cover_window_unit"),
+            cover_window_anchor=item.get("cover_window_anchor"),
             likelihood=item["likelihood"],
             severity=item["severity"],
         )
     return out
 
 
-async def _analyze_batch(batch: list[Segment]) -> dict[str, ClauseAnalysis]:
+async def _analyze_batch(
+    batch: list[Segment], use_cache: bool = True
+) -> dict[str, ClauseAnalysis]:
     ids = [str(seg.order_idx) for seg in batch]
     messages = [
         {"role": "system", "content": CLASSIFY_SYSTEM},
         {"role": "user", "content": render_clause_batch(batch)},
     ]
     payload = await client.complete_json(
-        messages, _batch_schema(ids), prompt_version=PROMPT_VERSION
+        messages, _batch_schema(ids), use_cache=use_cache,
     )
-    return _parse(payload)
+    analyses = _parse(payload)
+
+    # Every exception is checked against its own clause before anything stores
+    # or prints it. Checked here, after the cache, so the model call - and its
+    # cached answer - is untouched; only what is believed about it changes.
+    # See verify_exception for the two ways these were measured going wrong.
+    text_by_id = {str(seg.order_idx): seg.text for seg in batch}
+    for key, analysis in analyses.items():
+        kept = [e for e in analysis.exceptions if verify_exception(e, text_by_id[key])]
+        if len(kept) < len(analysis.exceptions):
+            log.info(
+                "clause %s: dropped exception(s) the clause does not state: %s",
+                key, [e for e in analysis.exceptions if e not in kept],
+            )
+        analysis.exceptions = kept
+    return analyses
 
 
 async def analyze(
@@ -238,6 +337,7 @@ async def analyze(
     batch_size: int | None = None,
     concurrency: int | None = None,
     progress=None,
+    use_cache: bool = True,
 ) -> dict[str, ClauseAnalysis]:
     """Analyse every clause. Returns a mapping of str(order_idx) -> ClauseAnalysis."""
     batch_size = batch_size or settings.analyze_batch_size
@@ -254,7 +354,7 @@ async def analyze(
         # GPU. The semaphore keeps a few in flight without thrashing VRAM.
         async with semaphore:
             try:
-                out = await _analyze_batch(batch)
+                out = await _analyze_batch(batch, use_cache=use_cache)
             except Exception as exc:
                 # One failed batch must not abandon the other 34 clauses. The
                 # gaps are filled by _retry_missing below.

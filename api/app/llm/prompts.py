@@ -1,9 +1,11 @@
 """Prompt templates and their version.
 
-PROMPT_VERSION is part of every cache key. Bump it whenever a prompt's wording
-changes, and the next run recomputes instead of silently serving results
-produced by the old instructions. Forgetting to bump it is the classic way to
-spend an afternoon debugging a change that never actually took effect.
+PROMPT_VERSION is a LABEL. Bump it whenever a prompt's wording changes, so eval
+reports, the run history and stored analyses record which instructions produced
+them. It is not part of the cache key - the cache hashes the prompt text
+itself, so a reworded prompt can never be served an answer to the old wording,
+and an unchanged prompt keeps its stored answer. See app/llm/cache.py for why
+it was taken out of the key.
 
 --------------------------------------------------------------------------
 Why CLASSIFY_SYSTEM is so specific about what each label means
@@ -34,9 +36,10 @@ because these categories genuinely overlap: a room-rent cap *is* describing
 coverage, it just happens to be describing its ceiling.
 """
 
+from app.grounding import normalize
 from app.taxonomy import ClauseType
 
-PROMPT_VERSION = "v11-prominence"
+PROMPT_VERSION = "v38-covered-but-reduced"
 
 CLASSIFY_SYSTEM = """\
 You are an expert on Indian (IRDAI-regulated) health insurance policy wordings.
@@ -110,6 +113,38 @@ EXTRACTED DETAILS:
     "no claim ... except claims arising out of an Accident"
        -> ["claims arising out of an Accident"]
   Empty list only when the clause genuinely admits no exception.
+
+THE NUMBERS BEHIND A REDUCTION. Null on every clause that reduces nothing,
+which is most of them. Report what the clause SAYS; the comparison against the
+person's actual figures is done afterwards, in code.
+- copay_percent: the co-payment percentage the insured must bear.
+    "a co-payment of twenty percent of the admissible claim amount" -> 20
+- copay_min_age_at_inception: the age that triggers that co-payment, where the
+  clause sets one. Read the wording carefully - it usually keys on age when the
+  policy STARTED, not age at the time of claim.
+    "completed sixty years of age at the time of first inception" -> 60
+    a co-payment with no age condition at all -> null
+- cap_percent_of_sum_insured: an ordinary per-day accommodation cap expressed
+  as a percentage of the sum insured.
+    "room rent ... limited to one percent of the Sum Insured per day" -> 1
+- icu_cap_percent_of_sum_insured: the same, for intensive care, where the
+  clause states a separate rate.
+    "Intensive Care Unit charges ... limited to two percent" -> 2
+  A clause that states one rate for a room and a different rate for ICU fills
+  in BOTH fields; one that mentions no ICU rate leaves this null.
+
+A cap expressed in RUPEES rather than as a percentage of the sum insured
+("twenty five thousand rupees per eye") leaves all four fields null and belongs
+in monetary_limits, where it already goes.
+
+THE WINDOW AROUND A HOSPITAL STAY. Null on every clause that states none, which
+is almost all of them.
+- cover_window_value / cover_window_unit / cover_window_anchor: a clause that
+  pays for expenses only within a period before admission or after discharge.
+    "the sixty days immediately preceding the date of admission" -> 60, days, before_admission
+    "the ninety days immediately following the date of discharge" -> 90, days, after_discharge
+  That window counts from a hospital stay, not from when the policy began, so
+  it is never a waiting period and never goes in waiting_period_value.
 
 LIKELIHOOD (1-5) - how many policyholders this clause will actually touch:
   1  Almost nobody. War, nuclear perils, adventure sports.
@@ -201,16 +236,56 @@ policy can answer at all - and it can only do that if it knows what was never
 said.
 
 Examples of the distinction:
-- "I had knee surgery"                -> policy_age_value: null, unit: null
-- "8 months after buying the policy"  -> policy_age_value: 8, unit: months
-- "two weeks after my policy started" -> policy_age_value: 2, unit: weeks
-- "I have held it five years"         -> policy_age_value: 5, unit: years
+- "I had knee surgery"                -> time_since_policy_start_value: null, unit: null
+- "8 months after buying the policy"  -> time_since_policy_start_value: 8, unit: months
+- "two weeks after my policy started" -> time_since_policy_start_value: 2, unit: weeks
+- "I have held it five years"         -> time_since_policy_start_value: 5, unit: years
+- "admitted a year after I took out cover" -> time_since_policy_start_value: 1, unit: years
+- "six months into the policy"        -> time_since_policy_start_value: 6, unit: months
+
+An AGE is never how long the policy has been held. "I was 61 when the cover
+began and I claimed four years later" is age_at_policy_start: 61 AND
+time_since_policy_start_value: 4, unit: years - two different numbers in two different
+fields. A time_since_policy_start_value always comes with its unit; if there is no length
+of time with a unit, it is null.
 
 NEVER convert between units. "Two weeks" is 2 + weeks, not 2 + months and
 not 14 + days. Report the number and the word the person actually used;
 converting is done afterwards, in code.
-- "I'm 67"                                 -> age: 67
-- no age mentioned                         -> age: null
+TWO DIFFERENT AGES, AND THEY ARE NOT INTERCHANGEABLE.
+`age` is how old the person is NOW. `age_at_policy_start` is how old they were
+when the policy began. A senior-citizen co-payment keys on the second one, so
+guessing it from the first would impose a 20% cut on someone who does not owe
+it. Fill in only what was actually said; the arithmetic linking them is done
+afterwards, in code.
+
+- "I'm 67"                                    -> age: 67, age_at_policy_start: null
+- "I bought this policy at 67"                -> age: null, age_at_policy_start: 67
+- "I took it out at 70 and I'm 72 now"        -> age: 72, age_at_policy_start: 70
+- no age mentioned                            -> both null
+
+MONEY, THE SAME WAY: a value and the word that went with it.
+Indian policies are written in lakh and crore, and converting them is
+arithmetic done later in code - exactly like the units above.
+
+- "my sum insured is 5 lakh"       -> sum_insured_value: 5, sum_insured_unit: lakh
+- "sum insured of 75,000 rupees"   -> sum_insured_value: 75000, unit: rupees
+- "a room costing 9,000 a night"   -> room_rent_per_day_inr: 9000, room_is_icu: false
+- "four days in ICU at 12,000/day" -> room_rent_per_day_inr: 12000, room_is_icu: true
+- no room or ICU mentioned         -> room_rent_per_day_inr: null, room_is_icu: null
+
+room_rent_per_day_inr is the PER-DAY charge in plain rupees, never the total
+bill. "Four days at 12,000 a day" is 12000, not 48000.
+
+EXPENSES BEFORE OR AFTER A HOSPITAL STAY: how far from the stay, and which side.
+This counts from a HOSPITAL STAY, not from when the policy began - it is never
+the same number as time_since_policy_start.
+
+- "tests fifty days before I was admitted"  -> expense_timing_value: 50, expense_timing_unit: days, expense_timing_anchor: before_admission
+- "a scan 120 days after I was discharged"  -> 120, days, after_discharge
+- "physio for two months after I went home from hospital" -> 2, months, after_discharge
+- "a follow-up after I was discharged" (no number) -> null, null, after_discharge
+- nothing said about expenses before admission or after discharge -> all three null
 
 For pre_existing_condition, answer "unknown" unless the description makes it
 clear either way. "Unknown" is the honest answer far more often than not.
@@ -297,6 +372,34 @@ wrong answer even when the verdict happens to land correctly.
 
 Never contradict those results and never recompute them.
 
+DO NOT DO THE MONEY ARITHMETIC YOURSELF EITHER.
+Every cap expressed as a percentage - a room-rent limit, an ICU limit, a
+senior-citizen co-payment - has already been worked out against the person's
+own figures, under "WHAT REDUCES THE PAYOUT". Those results are computed and
+correct. Do not multiply percentages, and do not check them.
+
+  - A reduction marked APPLIES means the claim is paid at less than the full
+    amount. If nothing refuses the claim, that makes the verdict
+    **conditional**, and the amount must be named in your reasoning.
+  - A reduction marked CANNOT TELL means a figure needed for the comparison was
+    never stated. If the answer turns on it, say so.
+  - A reduction marked YOUR CALL has no arithmetic to it: whether a cataract
+    sub-limit or a modern-treatment restriction covers this treatment is a
+    question about what the treatment WAS, and that one is yours to decide from
+    the clause text.
+  - Reductions listed as ruled out decide nothing. Do not cite them.
+
+ASK BOTH QUESTIONS, NOT ONE.
+The failure this section exists to prevent: having established that nothing
+BLOCKS a claim, stopping there and answering "covered". Those are two separate
+questions and both must be answered.
+
+  1. Is this claim refused?          exclusions, unserved waiting periods
+  2. Is it paid IN FULL?             co-payments, room caps, sub-limits
+
+Someone told "covered" who is actually paid 80% has been given a wrong answer,
+and they find out when the money arrives.
+
 READ THE EXCEPTIONS.
 Where a clause has carve-outs they are listed under it as "EXCEPTIONS - this
 clause does NOT apply when: ...". If the situation falls inside one, the clause
@@ -347,8 +450,28 @@ refusal, and never promise cover the clauses do not give.
 """
 
 
+# Phrases that state what a policy pays. The fact extractor is never shown the
+# policy, so when one of these turns up in its free-text notes and the person
+# did not say it, the extractor has answered the question instead of reading
+# it. Measured: "This policy does not cover car theft" in the notes turned an
+# honest insufficient_information into not_covered, six samples of six.
+_COVERAGE_CLAIMS = (
+    "does not cover", "doesn't cover", "not cover", "not covered", "is covered",
+    "are covered", "will be covered", "excluded", "not payable", "is payable",
+    "will not pay", "will pay",
+)
+
+
+def _invents_coverage(note: str, scenario: str) -> bool:
+    """True if the note claims coverage in words the person did not use."""
+    note, said = normalize(note), normalize(scenario)
+    return any(p in note and p not in said for p in _COVERAGE_CLAIMS)
+
+
 def render_reasoning_request(
-    scenario: str, facts: dict, clauses, waiting_block: str = ""
+    scenario: str, facts: dict, clauses,
+    waiting_block: str = "", reduction_block: str = "",
+    window_block: str = "",
 ) -> str:
     """Build the reasoning prompt.
 
@@ -359,9 +482,11 @@ def render_reasoning_request(
     are built from one list, in one place, in `pipeline/scenario.py`.
     """
     known = {k: v for k, v in facts.items() if v not in (None, "", [], "unknown")}
+    if isinstance(known.get("notes"), str) and _invents_coverage(known["notes"], scenario):
+        del known["notes"]
     # Imported rather than redeclared: the model's list and the user's list are
     # the same list. See DECISIVE_FACTS in pipeline/scenario.py for why.
-    from app.pipeline.scenario import DECISIVE_FACTS
+    from app.pipeline.scenario import DECISIVE_FACTS, shared_words
 
     missing = [k for k in DECISIVE_FACTS if facts.get(k) in (None, "", "unknown")]
 
@@ -384,6 +509,31 @@ def render_reasoning_request(
 
     if waiting_block:
         lines += ["", waiting_block]
+    # Beside the waiting periods, because both answer "is this expense payable
+    # at all" - which has to be settled before "is it payable in full".
+    if window_block:
+        lines += ["", window_block]
+    # After the waiting periods, because the two answer questions that come in
+    # that order: first "is this claim payable at all", then "is it payable in
+    # full". Reversing them puts a co-payment in front of a bar that means
+    # nothing is paid at all.
+    if reduction_block:
+        lines += ["", reduction_block]
+
+    # Last before the clauses, and silent unless something is shared: most
+    # questions share no unusual words with any clause and see nothing here.
+    shared = shared_words(scenario, clauses)
+    if shared:
+        lines += ["", "WORDS THIS QUESTION SHARES WITH A CLAUSE (a lookup, not a judgement)."]
+        lines += [
+            f"- clause {clause_id} uses these words from the question, or forms of them: "
+            f"{', '.join(words)}"
+            for clause_id, words in shared.items()
+        ]
+        lines.append(
+            "Read these clauses closely before choosing what to cite. Sharing words "
+            "does not by itself mean a clause applies."
+        )
 
     lines += ["", "POLICY CLAUSES AVAILABLE TO YOU:", ""]
     for clause in clauses:
@@ -396,6 +546,15 @@ def render_reasoning_request(
         # Surfaced separately from the body text. An exclusion carrying a
         # carve-out was being read as an unconditional bar, because the escape
         # hatch sits at the end of a long sentence.
+        #
+        # Removing this line was measured, and reverted. It had been copied into
+        # quotations and was suspected of drawing citations to the one exclusion
+        # carrying it. Without it, citation recall rose (0.742 -> 0.806), but
+        # certified burn surgery was refused as "still cosmetic" and an accident
+        # ten days into a policy came back conditional - three samples of three
+        # each - while the two cases it was meant to fix stayed wrong. It is
+        # safe to show now because every exception is verified against the
+        # clause text first (app/grounding.py, verify_exception).
         if getattr(clause, "exceptions", None):
             lines.append(
                 "EXCEPTIONS - this clause does NOT apply when: "

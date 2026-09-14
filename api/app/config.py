@@ -77,6 +77,24 @@ class Settings(BaseSettings):
     # temperature=0 is not decoration: extraction must be reproducible, or the
     # LLM cache and the eval numbers both become meaningless.
     temperature: float = 0.0
+    # temperature=0 ALONE DOES NOT GIVE REPRODUCIBILITY, which this project
+    # assumed for eight milestones and then measured.
+    #
+    # Two full eval runs of identical code, on identical prompts, disagreed on
+    # three of forty scenario cases - `senior-but-excluded` and `breach-of-law`
+    # went from correct to wrong, `copay-just-under-sixty` from wrong to
+    # correct. A change worth two cases cannot be measured through noise worth
+    # three.
+    #
+    # Greedy decoding still runs through llama.cpp's sampler chain, and with no
+    # seed supplied Ollama picks a random one per request, so near-ties between
+    # two tokens are broken differently from run to run. A near-tie at one
+    # token is all it takes: `not_covered` and `insufficient_information` begin
+    # to diverge at the first word of the verdict.
+    #
+    # Fixed rather than left to chance. The value is arbitrary; being the same
+    # value every time is the entire point.
+    seed: int = 0
 
     # --- Pipeline ---
     # One clause per call. This is measured, not assumed: on the golden policy,
@@ -86,9 +104,44 @@ class Settings(BaseSettings):
     # sharing a generation lets the model's reading of one bleed into the next.
     # Raise it for very large documents, where the time trade shifts.
     analyze_batch_size: int = 1
-    # Ollama serves requests concurrently, but each still competes for the same
-    # GPU. 2 measured better than 4 on an 8GB card.
-    analyze_concurrency: int = 2
+    # ONE REQUEST AT A TIME, AND THE REASON IS REPRODUCIBILITY, NOT SPEED.
+    #
+    # This was 2 ("Ollama serves requests concurrently, but each still competes
+    # for the same GPU; 2 measured better than 4 on an 8GB card") until the
+    # cost of that concurrency was measured rather than assumed.
+    #
+    # `evals/check_determinism.py` analyses the same 12 clauses six times with
+    # the cache bypassed and compares the output byte for byte:
+    #
+    #     concurrency=1   6/6 identical
+    #     concurrency=2   3 of 6 diverge, alternating exactly
+    #     concurrency=4   1 of 6 diverges
+    #
+    # With more than one request in flight, Ollama batches whatever arrives
+    # together. Float addition is not associative, so a different batch
+    # composition sums the matmul reductions in a different order and lands on
+    # a different logit in the low bits - and where two tokens were nearly
+    # tied, the tie breaks the other way. The same clause came back as "any
+    # place that provides inpatient or day care treatment" on one run and "any
+    # place that takes sick people in for treatment" on the next.
+    #
+    # WHAT IT COST TO NOT KNOW THIS: three runs of the 40-case scenario eval
+    # over identical code scored 0.725, 0.700 and 0.750, with five cases
+    # flipping between runs. Every prompt comparison this project has made was
+    # being read through noise of that size.
+    #
+    # AND THE TRADE IS ALMOST NOTHING, which is the part worth knowing. The
+    # obvious objection to serialising is that it must halve throughput. It
+    # does not. Measured on the 40-clause golden policy with the cache off:
+    #
+    #     concurrency=1   203.0s
+    #     concurrency=2   184.2s
+    #
+    # Nine percent, not two hundred. One request already saturates an 8GB card,
+    # so the second mostly waits its turn - the same reason 2 beat 4 in the
+    # original measurement, carried one step further than it was taken. The
+    # concurrency was buying 19 seconds and costing reproducibility.
+    analyze_concurrency: int = 1
     @property
     def scenario_token_budget(self) -> int:
         """How many tokens of clause text the reasoner may be given.

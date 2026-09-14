@@ -8,13 +8,64 @@
     "rationalising whatever it happened to produce - the same discipline as the",
     "ranking expectations, and for the same reason.",
     "",
+    "WHY THIS SET IS 40 CASES AND NOT 16",
+    "-----------------------------------",
+    "It was 16. On 16 cases one case is worth 0.0625, so a change that moved the",
+    "score by two cases was indistinguishable from noise - and five consecutive",
+    "measured runs did exactly that, landing 0.688 / 0.625 / 0.812 / 0.688 /",
+    "0.812 without the set being able to say which change had helped. A metric",
+    "that cannot resolve the differences you are making is not measuring your",
+    "work, and continuing to tune against it is how you end up believing an",
+    "improvement that is not there.",
+    "",
+    "At 40 cases one case is 0.025, so a genuine two-case improvement is visible",
+    "above the granularity of the instrument rather than lost inside it.",
+    "",
+    "The new cases are deliberately weighted toward REDUCTIONS - co-payments,",
+    "room-rent caps, proportionate deductions, disease sub-limits. The old set",
+    "had three such cases out of sixteen, and the system's worst measured",
+    "failure was in exactly that gap: it told a senior citizen's claim was",
+    "covered while missing the 20% co-payment that takes a fifth of it. A set",
+    "that under-samples the failure mode cannot measure a fix to it.",
+    "",
     "must_cite lists clauses the answer CANNOT be right without. It deliberately",
     "does not list every clause that could reasonably be mentioned; citing extra",
     "relevant clauses is not an error, missing the deciding one is.",
     "",
+    "must_not_cite is the opposite direction, and exists because a system pushed",
+    "to find reductions can start finding them where there are none. A clause",
+    "listed here is one a correct answer must NOT rely on - a co-payment for",
+    "someone who was 58 at inception, a room-rent cap that was never breached.",
+    "Over-firing and under-firing are both wrong, and a set that measures only",
+    "one of them will happily reward a fix that trades one for the other.",
+    "",
+    "THE CONVENTION FOR SUB-LIMITS, stated once so the expected verdicts are",
+    "consistent and checkable:",
+    "",
+    "  A reduction that DEFINITELY APPLIES on the facts as described makes the",
+    "  verdict `conditional` - the claim is paid, but not in full, and the person",
+    "  needs to know that before they file.",
+    "",
+    "  A reduction that merely EXISTS in the policy but is not triggered by",
+    "  anything described does not change the verdict. Every policy has a room",
+    "  rent cap; if nobody mentioned a room, that cap decides nothing, and",
+    "  answering `conditional` to every question on the strength of it would make",
+    "  the verdict meaningless.",
+    "",
+    "  A reduction NEVER converts a refusal into a conditional. Sub-limits apply",
+    "  to admissible claims; if an exclusion pays zero, there is nothing to",
+    "  reduce.",
+    "",
     "The insufficient_information cases carry the most weight. A system that",
     "cannot say 'your document does not settle this' will guess, and a confident",
-    "guess about a claim is the specific harm this project exists to prevent."
+    "guess about a claim is the specific harm this project exists to prevent.",
+    "",
+    "PURELY PROCEDURAL QUESTIONS ARE OUT OF SCOPE ON PURPOSE. 'Can I port my",
+    "policy', 'can I cancel in the free-look period' are addressed by section 7,",
+    "but the four verdicts are claim-shaped and neither `covered` nor",
+    "`conditional` is clearly right for them. A case whose expected verdict is",
+    "arguable measures the vocabulary rather than the reasoning, so those are",
+    "excluded rather than guessed at."
   ],
   "cases": [
     {
@@ -29,7 +80,8 @@
       "scenario": "I have had high blood pressure since before I bought the policy. I was hospitalised for it 5 years after taking the policy out.",
       "expected_verdict": "covered",
       "must_cite": [],
-      "why": "60 months elapsed against a 36-month pre-existing disease waiting period, so it has been served."
+      "must_not_cite": ["4.1"],
+      "why": "60 months elapsed against a 36-month pre-existing disease waiting period, so it has been served. The cosmetic surgery exclusion has nothing to do with blood pressure, and citing it is a wrong answer even when the verdict lands."
     },
     {
       "id": "cosmetic-exclusion",
@@ -125,9 +177,181 @@
     {
       "id": "cataract-served",
       "scenario": "I had a cataract operation as day care 4 years after buying the policy, and I am 40.",
+      "expected_verdict": "conditional",
+      "must_cite": ["5.4"],
+      "why": "24-month specified-disease waiting period served; under 60 so no co-payment. Cataract treatment is capped by the cataract sub-limit, which definitely applies to a cataract operation, so by this file's convention the claim is paid but not necessarily in full: conditional. LABEL CHANGED in M13 from covered: it contradicted the stated convention and the matching cases oral-chemo-limit and robotic-surgery-limit, which expect conditional for a sub-limit naming the treatment with no cost given."
+    },
+    {
+      "id": "copay-applies-emergency",
+      "scenario": "I took this policy out when I was 70 and I am 72 now. I was admitted with pneumonia last month.",
+      "expected_verdict": "conditional",
+      "must_cite": ["5.3"],
+      "why": "70 at inception is over 60, so the 20% co-payment applies to the whole admissible claim. Two years held clears the 30-day initial waiting period, and pneumonia is not in the specified-disease list."
+    },
+    {
+      "id": "copay-just-under-sixty",
+      "scenario": "I bought this policy when I was 58 and I am claiming now, four years later, for a gallbladder operation.",
       "expected_verdict": "covered",
       "must_cite": [],
-      "why": "24-month specified-disease waiting period served; day care is covered; under 60 so no co-payment. A sub-limit caps the amount but does not deny the claim."
+      "must_not_cite": ["5.3"],
+      "why": "The co-payment requires having COMPLETED sixty years at first inception. 58 is not 60, so it does not apply - and this is the case a system pushed to look for reductions will get wrong. Gallbladder is not in the specified-disease list, and four years clears every waiting period."
+    },
+    {
+      "id": "copay-unknown-inception-age",
+      "scenario": "I am 68 and I was hospitalised for a stroke. I don't remember when I took the policy out.",
+      "expected_verdict": "insufficient_information",
+      "must_cite": [],
+      "must_not_cite": ["5.3"],
+      "why": "Two things are unknown and both matter. The co-payment keys on age AT INCEPTION, not age now - someone 68 today could have bought the policy at 50. And with the policy's age unstated, no waiting period can be evaluated either."
+    },
+    {
+      "id": "copay-and-room-breach",
+      "scenario": "I bought the policy at 65 and have held it five years. My sum insured is 3 lakh and I stayed in a room costing 6,000 rupees a night.",
+      "expected_verdict": "conditional",
+      "must_cite": ["5.1", "5.3"],
+      "why": "Two separate reductions stack: 1% of 3 lakh is 3,000/day so the room is double the cap, and 65 at inception triggers the 20% co-payment. An answer that finds one and stops has missed half of what this claim will lose."
+    },
+    {
+      "id": "senior-but-excluded",
+      "scenario": "I bought the policy at 70 and three years later I had a nose job because I disliked my profile.",
+      "expected_verdict": "not_covered",
+      "must_cite": ["4.1"],
+      "must_not_cite": ["5.3"],
+      "why": "Cosmetic surgery for appearance pays zero, and a co-payment reduces an ADMISSIBLE claim. There is nothing to take 20% of. A reduction must never soften a refusal into 'conditional'."
+    },
+    {
+      "id": "room-rent-within-cap",
+      "scenario": "My sum insured is 10 lakh and I stayed in a room at 8,000 rupees a night for hernia surgery. I have held the policy three years.",
+      "expected_verdict": "covered",
+      "must_cite": [],
+      "must_not_cite": ["5.2"],
+      "why": "1% of 10 lakh is 10,000/day and the room cost 8,000, so the cap is not breached and no proportionate deduction follows. Hernia's 24-month bar is served at three years. LABEL CHANGED in M13: 5.1 removed from must_not_cite. Citing the room limit as the one the room stays within is a fair justification for covered; relying on the proportionate deduction (5.2) is still wrong."
+    },
+    {
+      "id": "icu-rate-breach",
+      "scenario": "My sum insured is 5 lakh. I spent four days in intensive care charged at 12,000 rupees a day after a heart attack, and I have held the policy six years.",
+      "expected_verdict": "conditional",
+      "must_cite": ["5.1"],
+      "why": "ICU is capped at 2% of sum insured per day, which is 10,000. At 12,000 a day the charge exceeds it and the excess is not paid."
+    },
+    {
+      "id": "proportionate-deduction",
+      "scenario": "I took a room above the category I was eligible for, and the insurer now says it is cutting my surgeon's fee and operation theatre charges in the same proportion. I have held the policy four years.",
+      "expected_verdict": "conditional",
+      "must_cite": ["5.2"],
+      "why": "This is exactly what the proportionate deduction clause provides for - the reduction spreads from the room to all associated expenses. The claim is paid, at a reduced amount."
+    },
+    {
+      "id": "cataract-sublimit-amount",
+      "scenario": "I had cataract surgery on one eye costing 60,000 rupees. My sum insured is 4 lakh, I am 45, and I have held the policy five years.",
+      "expected_verdict": "conditional",
+      "must_cite": ["5.4"],
+      "why": "Cataract is capped at the lower of 25,000 per eye or 10% of sum insured (40,000), so 25,000. The claim is paid but the person meets most of a 60,000 bill themselves. The 24-month bar is served."
+    },
+    {
+      "id": "robotic-surgery-limit",
+      "scenario": "My surgeon wants to do a robotic procedure. My sum insured is 5 lakh, I am 55, and I have held the policy seven years.",
+      "expected_verdict": "conditional",
+      "must_cite": ["5.5"],
+      "why": "Robotic surgery is named in the modern treatment limit and is restricted to 50% of sum insured per policy year."
+    },
+    {
+      "id": "oral-chemo-limit",
+      "scenario": "I have been put on oral chemotherapy. My sum insured is 8 lakh, I am 50, and I have held the policy nine years.",
+      "expected_verdict": "conditional",
+      "must_cite": ["5.5"],
+      "why": "Oral chemotherapy is named in the modern treatment limit, restricted to 50% of sum insured per policy year."
+    },
+    {
+      "id": "intoxication-injury",
+      "scenario": "I fell down the stairs after drinking heavily and fractured my hip. I have held the policy five years.",
+      "expected_verdict": "not_covered",
+      "must_cite": ["4.2"],
+      "why": "Expenses attributable to the use of alcohol are excluded outright, and no waiting period or cap enters into it."
+    },
+    {
+      "id": "infertility-ivf",
+      "scenario": "My wife and I are starting IVF treatment. We have had the policy four years.",
+      "expected_verdict": "not_covered",
+      "must_cite": ["4.5"],
+      "why": "Assisted reproduction services are excluded by name."
+    },
+    {
+      "id": "breach-of-law",
+      "scenario": "I was injured while being arrested for shoplifting and needed hospital treatment. I have held the policy six years.",
+      "expected_verdict": "not_covered",
+      "must_cite": ["4.4"],
+      "why": "Treatment consequent upon committing a breach of law with criminal intent is excluded."
+    },
+    {
+      "id": "documents-late",
+      "scenario": "I was discharged forty days ago and I still have not sent the hospital bills to the insurer. I have held the policy three years and the treatment itself was covered.",
+      "expected_verdict": "conditional",
+      "must_cite": ["6.2"],
+      "why": "Documents were due within 15 days of discharge. The clause says failure MAY result in rejection, so the outcome is discretionary rather than automatic."
+    },
+    {
+      "id": "no-preauth-cashless",
+      "scenario": "The hospital told me cashless was not approved. Does that mean my claim has been rejected? I have held the policy four years.",
+      "expected_verdict": "conditional",
+      "must_cite": ["6.4"],
+      "why": "The clause says in terms that denial of pre-authorisation does not by itself constitute denial of the claim. It can still be reimbursed if otherwise admissible - so not a refusal, and not an assurance either."
+    },
+    {
+      "id": "non-disclosure",
+      "scenario": "I did not mention my thyroid condition on the proposal form. I am now claiming for something unrelated, two years into the policy.",
+      "expected_verdict": "not_covered",
+      "must_cite": ["6.3"],
+      "why": "Non-disclosure of a material fact makes the policy void and forfeits the premium. That is not a reduction, it is the whole policy falling away."
+    },
+    {
+      "id": "other-policy-contribution",
+      "scenario": "I hold another health policy with a different insurer and I have sent the same hospital bill to both. I have held this policy four years.",
+      "expected_verdict": "conditional",
+      "must_cite": ["6.6"],
+      "why": "The contribution clause limits this insurer to its rateable proportion. The claim is paid, but only in part by this policy."
+    },
+    {
+      "id": "pre-hospitalisation-window",
+      "scenario": "I had scans and blood tests fifty days before I was admitted, for the same condition, and the hospital claim has been accepted. I have held the policy five years.",
+      "expected_verdict": "covered",
+      "must_cite": ["2.2"],
+      "why": "Pre-hospitalisation expenses are covered for the sixty days preceding admission, for the same condition, where the in-patient claim was accepted. Fifty days is inside that window."
+    },
+    {
+      "id": "post-hospitalisation-too-late",
+      "scenario": "I had a follow-up scan a hundred and twenty days after I was discharged, for the same condition. I have held the policy five years.",
+      "expected_verdict": "not_covered",
+      "must_cite": ["2.3"],
+      "why": "Post-hospitalisation cover runs for ninety days following discharge. A hundred and twenty days is outside it."
+    },
+    {
+      "id": "ayush-private-clinic",
+      "scenario": "I had in-patient Ayurvedic treatment at a private clinic that is not government-run and has no Quality Council accreditation. I have held the policy four years.",
+      "expected_verdict": "not_covered",
+      "must_cite": ["2.6"],
+      "why": "AYUSH treatment is covered only in a government hospital or a QCI-accredited institute. The clause grants cover and withholds it in the same sentence."
+    },
+    {
+      "id": "ambulance-admissible",
+      "scenario": "I was taken to hospital by road ambulance after a heart attack and admitted, and the hospital claim has been accepted. I have held the policy eight years.",
+      "expected_verdict": "covered",
+      "must_cite": ["2.5"],
+      "why": "Road ambulance is reimbursed following an Emergency provided the in-patient claim is admissible, which it is."
+    },
+    {
+      "id": "day-care-not-listed",
+      "scenario": "I was in hospital on a drip for about six hours and went home the same day. I have held the policy three years.",
+      "expected_verdict": "insufficient_information",
+      "must_cite": [],
+      "why": "In-patient cover needs more than twenty four consecutive hours, so 2.1 does not apply. Day care cover applies only to treatments listed in Annexure II, and this document does not contain that annexure - so whether a six-hour drip qualifies cannot be answered from what is here."
+    },
+    {
+      "id": "dependant-not-addressed",
+      "scenario": "Does this policy cover my father-in-law? He lives with us.",
+      "expected_verdict": "insufficient_information",
+      "must_cite": [],
+      "why": "Who counts as an Insured Person is set by the Policy Schedule, and no clause here defines eligible family members. The document is silent rather than negative."
     }
   ]
 }
