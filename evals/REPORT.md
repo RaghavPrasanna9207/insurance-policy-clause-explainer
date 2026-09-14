@@ -9,8 +9,8 @@ one run against the code and settings stated here.
 | Prompt version | `v38-covered-but-reduced` |
 | Decoding | num_ctx 8192, num_predict 1600, temperature 0.0 |
 | Analysis batch size | 1 |
-| Commit | `2da3dd6` |
-| Generated | 2026-09-14 12:35 UTC |
+| Commit | `bd5c2c1` |
+| Generated | 2026-09-14 13:37 UTC |
 | Total wall time | 0s (served from cache; a cold run takes several minutes) |
 
 The golden set is a 39-clause synthetic IRDAI-style policy authored for
@@ -175,6 +175,8 @@ cd .. && python evals/run_all.py
 
 The golden PDF is generated, not committed, so it is rebuilt from
 `evals/golden/build_synthetic_policy.py` if missing. Model responses are
-cached by a hash of model, prompt version, messages, schema and decoding
-settings, so a second run costs seconds - and changing any of those
-recomputes rather than serving a stale answer.
+cached by a hash of model, messages, schema and decoding settings, so a
+second run costs seconds - and changing any of those recomputes rather
+than serving a stale answer. The prompt version is a label, not part of
+the key: an unchanged prompt replays its stored answer even after the
+version is bumped, so only the cases a change reached are regenerated.
