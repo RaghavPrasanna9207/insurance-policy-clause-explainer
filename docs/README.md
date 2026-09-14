@@ -143,6 +143,29 @@ Making the eval measure a change despite a model that never answers twice the sa
 - **Failure 29: a correct fix that measured net negative** - the fact extractor leaked a verdict through a free-text `notes` field. Removing the field fixed one case, broke three, and cost citations. Reverted; recorded as open.
 - **Failure 30: a warning that blamed a cause that did not exist** - reverting a change replays older answers, which the comparison had mistaken for an unrecorded run.
 
+### M11 - Reading the inputs: two bugs upstream of every verdict
+Two errors that happened before the model ever reasoned, found by reading the failing cases' own explanations rather than their scores. Verdict accuracy 0.725 to 0.800; failed quotations 5 to 1.
+
+- **Checking what a fix would buy, before building it** - the planned fix (code-added citations) could reach one case of 31 and would have broken another. Set aside.
+- **Failure 31: every check did its job, on a fact that was wrong** - 9 of 40 questions had the policy's age missing or replaced by the person's age. Every downstream stage was correct given its input, and the scenario eval, which scores only verdicts, could not see it.
+- **Concept 31: a schema key is part of the prompt** - under constrained decoding the key is the last thing written before the value. `policy_age` pulled in ages; `policy_held_for` fixed that and lost "after my policy started"; `time_since_policy_start` read both. Measured on held-out sentences, with a second held-out batch written after the first had been tuned against.
+- **Failure 32: eight fabricated quotes, and half were our own words** - the model copied an annotation the pipeline prints beneath each clause.
+- **Failure 33: the pipeline was telling the model things the policy does not say** - 5 of 8 extracted exceptions were wrong, one copied from the analysis prompt's own example. "The alcohol exclusion does not apply to accidents" explained a case that had failed in every run. The first diagnosis of its cause was wrong too.
+- **Concept 32: checking an extraction by its grammar, not only its text** - a substring check cannot catch real text in the wrong role. An exception must be preceded by an exception word in its own sentence.
+- **A verdict-neutral change, kept, and why** - it broke two cases and fixed two, and it stopped the system asserting falsehoods about the policy. Weighed against a structurally correct M10 fix that was reverted.
+
+### M12 - Seven attempts, three kept, and a number that means what it says
+Working through the remaining failures one measured change at a time. Verdict accuracy reaches 0.925 as a majority of three samples, the first score in the log that is not a single sample.
+
+- **Step 0: measure a rule before writing it** - replaying stored answers showed which cases each proposed rule would catch, and changed one rule before it existed.
+- **Fix 1 and Fix 2** - a waiting-period line that names the clause's own carve-out, and fact-extractor notes that claim coverage the person never mentioned. Each reached exactly the 2 and 1 cases predicted.
+- **Failure 34: removing the emphasis, which was carrying information** - the line suspected of distorting citations was the one making burn surgery covered. Reverted.
+- **Concept 33: checking the answer against the arithmetic** - "never contradict these results" is a request; detecting a citation of a clause the arithmetic cleared is mechanical. One retry, provably wrong citations removed, verdicts never set by code.
+- **Failure 35: a true fact that fixed three other cases and not its own** - why a change is not kept for effects it was not designed to cause.
+- **Failure 36: a second turn that chose the same wrong clauses** - a clean negative result about where citation errors come from.
+- **Failure 37: two attempts at third-person ages, both worse** - a key name is an instruction, but a guessed rename is only an experiment.
+- **Concept 34: majority of three** - a strict majority per case, run in chunks, with a replay check that proved three reverts were complete.
+
 ---
 
 ## Related documents

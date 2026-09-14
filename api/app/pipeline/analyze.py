@@ -60,6 +60,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.config import settings
+from app.grounding import verify_exception
 from app.llm import client
 from app.llm.prompts import CLASSIFY_SYSTEM, render_clause_batch
 from app.pipeline.segment import Segment
@@ -312,7 +313,22 @@ async def _analyze_batch(
     payload = await client.complete_json(
         messages, _batch_schema(ids), use_cache=use_cache,
     )
-    return _parse(payload)
+    analyses = _parse(payload)
+
+    # Every exception is checked against its own clause before anything stores
+    # or prints it. Checked here, after the cache, so the model call - and its
+    # cached answer - is untouched; only what is believed about it changes.
+    # See verify_exception for the two ways these were measured going wrong.
+    text_by_id = {str(seg.order_idx): seg.text for seg in batch}
+    for key, analysis in analyses.items():
+        kept = [e for e in analysis.exceptions if verify_exception(e, text_by_id[key])]
+        if len(kept) < len(analysis.exceptions):
+            log.info(
+                "clause %s: dropped exception(s) the clause does not state: %s",
+                key, [e for e in analysis.exceptions if e not in kept],
+            )
+        analysis.exceptions = kept
+    return analyses
 
 
 async def analyze(

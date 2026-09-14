@@ -139,7 +139,7 @@ def test_only_decisive_facts_are_reported_as_missing():
     assert "body_system" not in DECISIVE_FACTS
     assert "estimated_cost_inr" not in DECISIVE_FACTS
     assert "notes" not in DECISIVE_FACTS
-    assert "policy_age_value" in DECISIVE_FACTS
+    assert "time_since_policy_start_value" in DECISIVE_FACTS
 
     # The prompt renderer must use the same source, not a copy of it.
     from app.llm.prompts import render_reasoning_request
@@ -147,7 +147,7 @@ def test_only_decisive_facts_are_reported_as_missing():
     facts = {k: None for k in DECISIVE_FACTS} | {"body_system": None, "notes": ""}
     rendered = render_reasoning_request("x", facts, [])
     assert "body_system" not in rendered
-    assert "policy_age_value" in rendered
+    assert "time_since_policy_start_value" in rendered
 
 
 def test_policy_age_keeps_its_unit():
@@ -164,13 +164,13 @@ def test_policy_age_keeps_its_unit():
     """
     from app.pipeline.scenario import policy_age_days
 
-    assert policy_age_days({"policy_age_value": 2, "policy_age_unit": "weeks"}) == 14
-    assert policy_age_days({"policy_age_value": 2, "policy_age_unit": "months"}) == 60
-    assert policy_age_days({"policy_age_value": 5, "policy_age_unit": "years"}) == 1825
-    assert policy_age_days({"policy_age_value": 30, "policy_age_unit": "days"}) == 30
+    assert policy_age_days({"time_since_policy_start_value": 2, "time_since_policy_start_unit": "weeks"}) == 14
+    assert policy_age_days({"time_since_policy_start_value": 2, "time_since_policy_start_unit": "months"}) == 60
+    assert policy_age_days({"time_since_policy_start_value": 5, "time_since_policy_start_unit": "years"}) == 1825
+    assert policy_age_days({"time_since_policy_start_value": 30, "time_since_policy_start_unit": "days"}) == 30
 
     # A fortnight must NOT clear a 30-day bar.
-    assert policy_age_days({"policy_age_value": 2, "policy_age_unit": "weeks"}) < 30
+    assert policy_age_days({"time_since_policy_start_value": 2, "time_since_policy_start_unit": "weeks"}) < 30
 
 
 def test_unstated_policy_age_stays_none():
@@ -182,6 +182,214 @@ def test_unstated_policy_age_stays_none():
     from app.pipeline.scenario import policy_age_days
 
     assert policy_age_days({}) is None
-    assert policy_age_days({"policy_age_value": None, "policy_age_unit": None}) is None
-    assert policy_age_days({"policy_age_value": 5, "policy_age_unit": "fortnights"}) is None
-    assert policy_age_days({"policy_age_value": 0, "policy_age_unit": "months"}) is None
+    assert policy_age_days({"time_since_policy_start_value": None, "time_since_policy_start_unit": None}) is None
+    assert policy_age_days({"time_since_policy_start_value": 5, "time_since_policy_start_unit": "fortnights"}) is None
+    assert policy_age_days({"time_since_policy_start_value": 0, "time_since_policy_start_unit": "months"}) is None
+
+
+def test_notes_that_answer_the_question_are_not_shown_to_the_reasoner():
+    """Regression test for `not-in-document`.
+
+    Asked "Does this policy cover my car being stolen from the hospital car
+    park?", the fact extractor wrote in its free-text notes: "This policy does
+    not cover car theft from the hospital car park." The extractor never sees
+    the policy, so that sentence is invented - and it reached the reasoning
+    step under FACTS UNDERSTOOD, where the verdict followed it.
+
+    Removing notes altogether was measured and cost three cases, because notes
+    usually restate the situation in words that help find the right clause. So
+    only a note claiming coverage the person never mentioned is dropped.
+    """
+    from app.llm.prompts import render_reasoning_request
+
+    scenario = "Does this policy cover my car being stolen from the hospital car park?"
+    facts = {"notes": "This policy does not cover car theft from the hospital car park."}
+    assert "does not cover car theft" not in render_reasoning_request(scenario, facts, [])
+
+
+def test_notes_repeating_the_persons_own_words_are_kept():
+    from app.llm.prompts import render_reasoning_request
+
+    scenario = "The insurer told me the scan is not covered. I have held the policy two years."
+    facts = {"notes": "Insurer said the scan is not covered."}
+    assert "Insurer said the scan is not covered." in render_reasoning_request(scenario, facts, [])
+
+    # And a note with no coverage language at all is untouched.
+    facts = {"notes": "Stayed in a room costing 9,000 rupees a night for surgery."}
+    assert "9,000 rupees a night" in render_reasoning_request("x", facts, [])
+
+
+# --- 5e: the answer checked against the arithmetic --------------------------
+
+PED_TEXT = (
+    "3.2 Pre-existing Disease Waiting Period Expenses related to the treatment of a "
+    "Pre-existing Disease shall be excluded until the expiry of thirty six months."
+)
+INPATIENT_TEXT = "2.1 In-patient Hospitalisation The Company shall indemnify Medical Expenses."
+PED_QUOTE = "shall be excluded until the expiry of thirty six months"
+INPATIENT_QUOTE = "The Company shall indemnify Medical Expenses"
+
+
+def _clauses():
+    from app.pipeline.scenario import ShortlistClause
+
+    return [
+        ShortlistClause("2.1", "t:1", "2.1", "coverage", INPATIENT_TEXT, 1.0),
+        ShortlistClause("3.2", "t:2", "3.2", "waiting_period", PED_TEXT, 1.0,
+                        waiting_period_days=1080),
+    ]
+
+
+def _citation(clause_id, effect):
+    from app.pipeline.scenario import Citation
+
+    return Citation(clause_id=clause_id, quote="q", effect=effect)
+
+
+def _computed(years_held):
+    from app.pipeline.scenario import compute
+
+    return compute(
+        {"time_since_policy_start_value": years_held, "time_since_policy_start_unit": "years"},
+        _clauses(),
+    )
+
+
+def test_citing_a_served_waiting_period_as_a_refusal_is_a_contradiction():
+    """`ped-waiting-served`: five years in, told 3.2 was satisfied, refused under 3.2."""
+    from app.pipeline.scenario import find_contradictions
+
+    cited = _citation("3.2", "denies")
+    problems, irrelevant = find_contradictions([cited], "not_covered", _computed(5))
+    assert len(problems) == 1 and "3.2" in problems[0] and "no longer applies" in problems[0]
+    assert irrelevant == [cited]
+
+
+def test_citing_a_ruled_out_reduction_is_a_contradiction():
+    """`room-rent-within-cap`: 8,000 a day against a 10,000 cap, cited as reducing."""
+    from app.pipeline.scenario import ShortlistClause, compute, find_contradictions
+
+    room = ShortlistClause("5.1", "t:3", "5.1", "sub_limit", "Room rent 1% of SI.", 1.0,
+                           cap_percent_of_sum_insured=1)
+    facts = {"sum_insured_value": 10, "sum_insured_unit": "lakh", "room_rent_per_day_inr": 8000}
+    problems, irrelevant = find_contradictions(
+        [_citation("5.1", "reduces")], "conditional", compute(facts, [room])
+    )
+    assert "WITHIN" in problems[0]
+    assert [c.clause_id for c in irrelevant] == ["5.1"]
+
+
+def test_a_clause_that_is_still_live_is_not_a_contradiction():
+    """Six months into a 36-month wait, citing 3.2 as a refusal is the right answer."""
+    from app.pipeline.scenario import find_contradictions
+
+    assert find_contradictions([_citation("3.2", "denies")], "not_covered", _computed(0.5)) == ([], [])
+
+
+def test_a_cleared_clause_cited_as_permitting_is_not_a_contradiction():
+    from app.pipeline.scenario import find_contradictions
+
+    assert find_contradictions([_citation("3.2", "permits")], "covered", _computed(5)) == ([], [])
+
+
+def test_a_refusal_and_a_reduction_together_is_a_contradiction():
+    """`senior-but-excluded`: a nose job bought at 70 - "not covered ... however
+    the 20% co-payment applies" - answered conditional."""
+    from app.pipeline.scenario import find_contradictions
+
+    cited = [_citation("4.1", "denies"), _citation("5.3", "reduces")]
+    problems, irrelevant = find_contradictions(cited, "conditional", _computed(5))
+    assert len(problems) == 1 and "4.1" in problems[0] and "5.3" in problems[0]
+    # No arithmetic proves which is wrong, so nothing is dropped.
+    assert irrelevant == []
+
+
+def test_a_discretionary_refusal_alone_is_not_a_contradiction():
+    """`late-notice` is rightly conditional while citing 6.1 as denying: the
+    Company MAY repudiate. Without a reduction beside it there is no clash."""
+    from app.pipeline.scenario import find_contradictions
+
+    assert find_contradictions([_citation("6.1", "denies")], "conditional", _computed(5)) == ([], [])
+    cited = [_citation("4.1", "denies"), _citation("5.3", "reduces")]
+    assert find_contradictions(cited, "not_covered", _computed(5)) == ([], [])
+
+
+def _fake_model(monkeypatch, answers):
+    """Replace the model: facts first, then the given reasoning answers in order."""
+    from app.pipeline import scenario
+
+    sent = []
+    queue = list(answers)
+
+    async def fake_complete_json(messages, schema, **kwargs):
+        if schema is scenario.FACTS_SCHEMA:
+            return {"time_since_policy_start_value": 5, "time_since_policy_start_unit": "years"}
+        sent.append(messages)
+        return queue.pop(0)
+
+    monkeypatch.setattr(scenario.client, "complete_json", fake_complete_json)
+    return sent
+
+
+def _answer(verdict, clause_id, quote, effect):
+    return {
+        "verdict": verdict, "reasoning": "r", "missing_information": [],
+        "deciding_clauses": [{"clause_id": clause_id, "quote": quote, "effect": effect}],
+    }
+
+
+def test_a_contradiction_gets_one_retry_with_the_calculation_in_front_of_it(monkeypatch):
+    import asyncio
+
+    from app.pipeline.scenario import run_scenario
+
+    sent = _fake_model(monkeypatch, [
+        _answer("not_covered", "3.2", PED_QUOTE, "denies"),
+        _answer("covered", "2.1", INPATIENT_QUOTE, "permits"),
+    ])
+    result = asyncio.run(run_scenario("held five years", _clauses()))
+
+    assert result.verdict == "covered"
+    assert len(sent) == 2
+    assert "no longer applies" in sent[1][-1]["content"]  # the retry names the calculation
+
+
+def test_a_citation_still_contradicting_after_the_retry_is_dropped(monkeypatch):
+    """The verdict is never overridden. The citation code can PROVE wrong goes,
+    and a definite verdict left with nothing behind it is downgraded."""
+    import asyncio
+
+    from app.pipeline.scenario import run_scenario
+
+    stubborn = _answer("not_covered", "3.2", PED_QUOTE, "denies")
+    sent = _fake_model(monkeypatch, [stubborn, stubborn])
+    result = asyncio.run(run_scenario("held five years", _clauses()))
+
+    assert len(sent) == 2  # one retry, not a loop
+    assert result.citations == []
+    assert result.verdict == "insufficient_information"
+
+
+def test_a_consistent_answer_makes_no_second_call(monkeypatch):
+    import asyncio
+
+    from app.pipeline.scenario import run_scenario
+
+    sent = _fake_model(monkeypatch, [_answer("covered", "2.1", INPATIENT_QUOTE, "permits")])
+    assert asyncio.run(run_scenario("held five years", _clauses())).verdict == "covered"
+    assert len(sent) == 1
+
+
+def test_the_policy_duration_field_is_not_named_like_an_age():
+    """The model reads a schema key as an instruction.
+
+    Named `policy_age_value`, it received the person's AGE: "I bought this
+    policy at 67 and am claiming three years later" came back with 67 in it and
+    no unit, and the three years were lost. Every duration field is kept free
+    of the word "age" so that cannot be reintroduced by a tidy-minded rename.
+    """
+    from app.pipeline.scenario import FACTS_SCHEMA
+
+    durations = [k for k in FACTS_SCHEMA["properties"] if k.endswith(("_value", "_unit"))]
+    assert "time_since_policy_start_value" in durations
+    assert not [k for k in durations if "age" in k.split("_")]

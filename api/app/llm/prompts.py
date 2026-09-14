@@ -36,9 +36,10 @@ because these categories genuinely overlap: a room-rent cap *is* describing
 coverage, it just happens to be describing its ceiling.
 """
 
+from app.grounding import normalize
 from app.taxonomy import ClauseType
 
-PROMPT_VERSION = "v15-cover-window-section"
+PROMPT_VERSION = "v22-consistency-retry"
 
 CLASSIFY_SYSTEM = """\
 You are an expert on Indian (IRDAI-regulated) health insurance policy wordings.
@@ -235,10 +236,18 @@ policy can answer at all - and it can only do that if it knows what was never
 said.
 
 Examples of the distinction:
-- "I had knee surgery"                -> policy_age_value: null, unit: null
-- "8 months after buying the policy"  -> policy_age_value: 8, unit: months
-- "two weeks after my policy started" -> policy_age_value: 2, unit: weeks
-- "I have held it five years"         -> policy_age_value: 5, unit: years
+- "I had knee surgery"                -> time_since_policy_start_value: null, unit: null
+- "8 months after buying the policy"  -> time_since_policy_start_value: 8, unit: months
+- "two weeks after my policy started" -> time_since_policy_start_value: 2, unit: weeks
+- "I have held it five years"         -> time_since_policy_start_value: 5, unit: years
+- "admitted a year after I took out cover" -> time_since_policy_start_value: 1, unit: years
+- "six months into the policy"        -> time_since_policy_start_value: 6, unit: months
+
+An AGE is never how long the policy has been held. "I was 61 when the cover
+began and I claimed four years later" is age_at_policy_start: 61 AND
+time_since_policy_start_value: 4, unit: years - two different numbers in two different
+fields. A time_since_policy_start_value always comes with its unit; if there is no length
+of time with a unit, it is null.
 
 NEVER convert between units. "Two weeks" is 2 + weeks, not 2 + months and
 not 14 + days. Report the number and the word the person actually used;
@@ -270,7 +279,7 @@ bill. "Four days at 12,000 a day" is 12000, not 48000.
 
 EXPENSES BEFORE OR AFTER A HOSPITAL STAY: how far from the stay, and which side.
 This counts from a HOSPITAL STAY, not from when the policy began - it is never
-the same number as policy_age.
+the same number as time_since_policy_start.
 
 - "tests fifty days before I was admitted"  -> expense_timing_value: 50, expense_timing_unit: days, expense_timing_anchor: before_admission
 - "a scan 120 days after I was discharged"  -> 120, days, after_discharge
@@ -441,6 +450,24 @@ refusal, and never promise cover the clauses do not give.
 """
 
 
+# Phrases that state what a policy pays. The fact extractor is never shown the
+# policy, so when one of these turns up in its free-text notes and the person
+# did not say it, the extractor has answered the question instead of reading
+# it. Measured: "This policy does not cover car theft" in the notes turned an
+# honest insufficient_information into not_covered, six samples of six.
+_COVERAGE_CLAIMS = (
+    "does not cover", "doesn't cover", "not cover", "not covered", "is covered",
+    "are covered", "will be covered", "excluded", "not payable", "is payable",
+    "will not pay", "will pay",
+)
+
+
+def _invents_coverage(note: str, scenario: str) -> bool:
+    """True if the note claims coverage in words the person did not use."""
+    note, said = normalize(note), normalize(scenario)
+    return any(p in note and p not in said for p in _COVERAGE_CLAIMS)
+
+
 def render_reasoning_request(
     scenario: str, facts: dict, clauses,
     waiting_block: str = "", reduction_block: str = "",
@@ -455,6 +482,8 @@ def render_reasoning_request(
     are built from one list, in one place, in `pipeline/scenario.py`.
     """
     known = {k: v for k, v in facts.items() if v not in (None, "", [], "unknown")}
+    if isinstance(known.get("notes"), str) and _invents_coverage(known["notes"], scenario):
+        del known["notes"]
     # Imported rather than redeclared: the model's list and the user's list are
     # the same list. See DECISIVE_FACTS in pipeline/scenario.py for why.
     from app.pipeline.scenario import DECISIVE_FACTS
@@ -502,6 +531,15 @@ def render_reasoning_request(
         # Surfaced separately from the body text. An exclusion carrying a
         # carve-out was being read as an unconditional bar, because the escape
         # hatch sits at the end of a long sentence.
+        #
+        # Removing this line was measured, and reverted. It had been copied into
+        # quotations and was suspected of drawing citations to the one exclusion
+        # carrying it. Without it, citation recall rose (0.742 -> 0.806), but
+        # certified burn surgery was refused as "still cosmetic" and an accident
+        # ten days into a policy came back conditional - three samples of three
+        # each - while the two cases it was meant to fix stayed wrong. It is
+        # safe to show now because every exception is verified against the
+        # clause text first (app/grounding.py, verify_exception).
         if getattr(clause, "exceptions", None):
             lines.append(
                 "EXCEPTIONS - this clause does NOT apply when: "

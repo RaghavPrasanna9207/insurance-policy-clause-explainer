@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "evals"))
 
 from run_scenario_eval import (  # noqa: E402
     compare_with_previous,
+    majority,
     stability_section,
     unstable_cases,
     watchlist,
@@ -128,3 +129,32 @@ def test_watchlist_holds_failing_and_wobbly_cases_and_skips_reliable_ones():
                "wobbly": ("covered", True)}),
     ]
     assert watchlist(cases, history) == ["failing", "wobbly"]
+
+
+# --- asking each case more than once --------------------------------------
+
+
+def samples(*runs: dict[str, str], expected: str = "covered"):
+    """Each positional arg is one run: {case_id: verdict it got}."""
+    return [{"rows": [row(cid, expected, got, True) for cid, got in run.items()]} for run in runs]
+
+
+def test_a_unanimous_right_answer_is_right():
+    out = majority(samples({"a": "covered"}, {"a": "covered"}, {"a": "covered"}))
+    assert out == [{"id": "a", "expected": "covered", "verdicts": ["covered"] * 3,
+                    "majority": "covered", "agreed": 3, "ok": True}]
+
+
+def test_two_of_three_decides_it_in_either_direction():
+    right = majority(samples({"a": "covered"}, {"a": "conditional"}, {"a": "covered"}))
+    wrong = majority(samples({"a": "conditional"}, {"a": "covered"}, {"a": "conditional"}))
+    assert right[0]["ok"] and right[0]["agreed"] == 2
+    assert not wrong[0]["ok"] and wrong[0]["majority"] == "conditional"
+
+
+def test_a_three_way_split_has_no_majority_and_counts_as_wrong():
+    """Picking one of three disagreeing answers would be choosing a result, not
+    measuring one. Even if one of the three happened to be right."""
+    out = majority(samples({"a": "covered"}, {"a": "conditional"}, {"a": "not_covered"}))
+    assert out[0]["majority"] is None
+    assert not out[0]["ok"]

@@ -35,6 +35,7 @@ Usage:
 import argparse
 import asyncio
 import json
+from collections import Counter
 import sys
 import time
 from datetime import datetime, timezone
@@ -552,6 +553,73 @@ def report(res: dict) -> str:
     return "\n".join(lines)
 
 
+def majority(samples: list[dict]) -> list[dict]:
+    """Per case across repeated runs: every verdict seen, and the majority one.
+
+    WHY. The model does not answer identically twice (M9, M10), so one full run
+    is one sample and its score moves by two or three cases on its own. Asking
+    each case several times and taking the majority measures what the system
+    USUALLY answers, which is the thing a reader of the headline number assumes
+    it means.
+
+    A strict majority is required. With three samples and four possible
+    verdicts a three-way split can happen, and it counts as wrong: picking one
+    of three disagreeing answers would be choosing a result, not measuring one.
+    """
+    verdicts: dict[str, list[str]] = {}
+    expected: dict[str, str] = {}
+    for res in samples:
+        for r in res["rows"]:
+            verdicts.setdefault(r["id"], []).append(r["got"])
+            expected[r["id"]] = r["expected"]
+
+    out = []
+    for case_id, got in verdicts.items():
+        top, count = Counter(got).most_common(1)[0]
+        winner = top if count * 2 > len(got) else None
+        out.append({
+            "id": case_id, "expected": expected[case_id], "verdicts": got,
+            "majority": winner, "agreed": count, "ok": winner == expected[case_id],
+        })
+    return out
+
+
+def render_majority(samples: list[dict]) -> str:
+    rows = majority(samples)
+    n = len(samples)
+    lines = [f"Majority of {n} samples per case:", ""]
+    for r in rows:
+        flag = "  " if r["ok"] else "<-"
+        shown = r["majority"] or "no majority"
+        lines.append(
+            f"  {flag} {r['id']:30} {r['expected']:26} got {shown}  ({r['agreed']}/{n} agreed)"
+        )
+    right = sum(r["ok"] for r in rows)
+    unanimous = sum(r["agreed"] == n for r in rows)
+    lines += [
+        "",
+        f"  majority verdict accuracy : {right}/{len(rows)} = {right / max(len(rows), 1):.3f}",
+        f"  unanimous cases           : {unanimous}/{len(rows)}",
+        "",
+        "  per sample:  verdict  recall  false-cit  failed-quotes  detection (must be 1.000)",
+    ]
+    for i, res in enumerate(samples, 1):
+        lines.append(
+            f"    sample {i}   {res['verdict_accuracy']:.3f}    {res['citation_recall']:.3f}"
+            f"   {res['false_citation_rate']:.3f}      {res['fabricated_quotes']}"
+            f"              {res['detection_integrity']:.3f}"
+        )
+    return "\n".join(lines)
+
+
+async def run_repeats(n: int, use_cache: bool, only: list[str] | None) -> list[dict]:
+    """The first sample may replay the cache; every later one is asked afresh."""
+    results = [await run(use_cache=use_cache, only=only)]
+    for _ in range(n - 1):
+        results.append(await run(use_cache=use_cache, only=only, resample=True))
+    return results
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--no-cache", action="store_true")
@@ -569,6 +637,11 @@ def main() -> None:
         "--watchlist", action="store_true",
         help="run only the cases that failed or wobbled in the recorded history",
     )
+    parser.add_argument(
+        "--repeats", type=int, default=1,
+        help="ask each case N times (first may replay the cache, the rest afresh) "
+             "and score the majority verdict; combine with --only to split a long run",
+    )
     args = parser.parse_args()
 
     # Read before this run is recorded: the comparison is against what came
@@ -585,6 +658,18 @@ def main() -> None:
             print("The watchlist is empty: no recorded failures or wobbles.")
             return
         print(f"watchlist: {len(only)} of {len(cases)} cases\n")
+
+    if args.repeats > 1:
+        results = asyncio.run(run_repeats(args.repeats, not args.no_cache, only))
+        print()
+        print(render_majority(results))
+        if not args.no_report:
+            # Every sample is recorded: the fresh ones are exactly what the
+            # stability section counts. The single-run report is not written,
+            # because it describes one sample and this was several.
+            for res in results:
+                record_run(res)
+        return
 
     res = asyncio.run(
         run(use_cache=not args.no_cache, only=only, resample=args.resample)

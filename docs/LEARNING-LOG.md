@@ -3136,3 +3136,1010 @@ extractor change that looked as if it touched every verdict) and Concept 30 (a
 version label that made every change touch everything). The cache does not
 decide a change's reach; it just makes it visible, case by case.
 </details>
+
+---
+
+# M11 — Reading the inputs: two bugs upstream of every verdict
+
+## The starting position
+
+The scenario simulator answers a what-if question about an Indian health
+policy with one of four verdicts (`covered`, `not_covered`, `conditional`,
+`insufficient_information`) and the clauses that decide it. It runs in steps:
+
+```
+question ──> extract facts ──> arithmetic in code ──> reasoning ──> quote check
+             (LLM)             waiting.py, reduction.py,  (LLM)
+                               window.py
+```
+
+Its quality is measured by 40 hand-written cases in
+`evals/golden/scenarios.json`. At the start of this milestone it scored 0.725
+on verdicts and 0.774 on citation recall, and 5 of its 40 answers contained a
+quotation that failed the verbatim check.
+
+Two things from earlier milestones matter here. The model does not answer
+identically twice, so one changed case is one sample, not a result; everything
+claimed below as fixed or broken was asked at least three times (`--resample`).
+And the planned next step was **code-added citations**: the arithmetic modules
+already know which clause decides some cases, so code, rather than the model,
+could add that citation.
+
+---
+
+## Checking what a fix would buy, before building it
+
+Code-added citations were checked against the latest report before any code was
+written. Seven cases were missing a citation they needed. Only one of them, the
+co-payment clause 5.3 in `senior-copay`, is decided by the arithmetic modules.
+The other six (the cosmetic exclusion's accident carve-out, the IVF exclusion,
+the breach-of-law exclusion, the contribution clause, the AYUSH clause, the
+ambulance clause) turn on reading language, which code cannot do.
+
+Worse, adding citations blindly would break a passing case. In
+`senior-but-excluded`, someone who bought the policy at 70 has a nose job. The
+co-payment arithmetically applies, but the claim is refused outright, and the
+case lists 5.3 under `must_not_cite`: there is nothing to take 20% of. Code
+knows the co-payment applies. It does not know the claim is refused.
+
+So the fix would have bought one case of 31. It was set aside, and the same
+report was read for something else: the *reasons* the failing cases gave. Four
+of them said a version of this:
+
+```
+ped-waiting-served:         "The policy does not specify how long the policy has been held."
+accident-in-initial-period: "However, the policy age was not stated"
+copay-just-under-sixty:     "the duration for which you have held the policy was not stated"
+non-disclosure:             "The policy does not specify how long the policy has been held."
+```
+
+Every one of those questions states it: *"5 years after taking the policy
+out"*, *"ten days after my policy started"*, *"four years later"*, *"two years
+into the policy"*.
+
+> **The lesson:** a score says how many cases failed. The failures' own
+> explanations say why, and here they pointed where no metric was looking.
+
+---
+
+## Failure 31: every check did its job, on a fact that was wrong
+
+The first step of a scenario asks the model to extract facts from the question
+into a schema. Two of the fields held how long the policy has been held, as a
+number and a unit:
+
+```python
+# api/app/pipeline/scenario.py, before this milestone
+"policy_age_value": {"type": ["integer", "null"]},
+"policy_age_unit": {"type": ["string", "null"], "enum": ["days", "weeks", "months", "years", None]},
+```
+
+Extracted facts are cached, so what every eval case had actually received could
+be replayed without calling the model. Nine of forty were wrong or missing:
+
+| What came back | Cases |
+|---|---|
+| Stated, returned null | `ped-waiting-served` ("5 years after taking the policy out"), `accident-in-initial-period` ("ten days after my policy started"), `non-disclosure` ("two years into the policy"), `copay-and-room-breach` ("have held it five years") |
+| The person's **age** in the duration field, with no unit | `senior-copay` (67), `copay-just-under-sixty` (58), `senior-but-excluded` (70) |
+| Not stated, only derivable (72 now, 70 at the start) | `copay-applies-emergency`, where null is correct |
+| No number given ("for years") | `dental-no-accident`, where null is correct |
+
+Follow one through. For *"I was hospitalised for it 5 years after taking the
+policy out"*, the extractor returned null. `policy_age_days()` correctly turned
+null into None. `waiting.py` correctly reported every waiting period as
+undeterminable:
+
+```
+clause 3.2: requires 3 years, but how long the policy has been held was NOT STATED,
+so whether this bar has lifted cannot be determined
+```
+
+And the reasoning step correctly concluded that a missing fact means
+`insufficient_information`. Every stage did exactly what it was built to do.
+The answer was wrong because the first input was.
+
+The three age cases were half-protected by an earlier fix: `policy_age_days()`
+refuses a value with no unit, so 67 never became 67 days. But the reasoning
+prompt lists every extracted fact, so the model was still shown
+`policy_age_value: 67`.
+
+**Why nothing caught this for several milestones:** the scenario eval scores
+only the final verdict and citations. A wrong fact is invisible to it, except
+as a wrong verdict three steps later with a plausible reason attached. The
+extraction step had no measurement of its own.
+
+---
+
+## Measuring the extractor on its own
+
+The fix was developed against the extraction step alone. A script called the
+extractor directly, bypassed the cache (a cached answer re-read is a copy, not
+a sample), and checked the duration and age fields against expected values, in
+three groups:
+
+- **broken**: the eval questions above whose facts came back wrong;
+- **control**: eval questions whose facts came back right, which must stay right;
+- **held-out**: sentences in no eval case and no prompt example, to tell a fix
+  that generalises from one that memorises.
+
+The first held-out run showed the bug was worse than a missing value:
+
+```
+"I was 62 when I bought the policy, and I needed a bypass six years later."
+    policy_age_value: 62, unit: null, age_at_policy_start: 56
+```
+
+The age went into the duration field, and the six years went into a
+subtraction nobody asked for: 62 − 6 = 56. Given to the co-payment check, 56 at
+inception clears a senior-citizen co-payment this person owes.
+
+---
+
+## Concept 31: a schema key is part of the prompt
+
+Constrained decoding (Concept 1) forces the model's output to follow a JSON
+Schema. What is easy to miss is what that means token by token. The grammar
+built from the schema lays the properties out in the order they are declared,
+so when the model reaches the duration field there is exactly one legal
+continuation, the key itself, spelled out. The output so far ends:
+
+```
+..."condition": "high blood pressure", "body_system": null, "policy_age_value":
+```
+
+The next token, the value, is predicted from everything before it. The last
+thing the model has "read" before writing that number is not the system
+prompt, hundreds of tokens back. It is the key it has just written.
+
+So a key name is an instruction, and the nearest one. `policy_age` sits very
+close in meaning to "age at the policy", and the model filled it with an age.
+
+That is a hypothesis, and a cheap one to test, because a key can be renamed
+without touching anything else. Four variants on 25 sentences, one fresh call
+each:
+
+| Variant | Broken (8) | Control (10) | Held-out (7) | Total |
+|---|---|---|---|---|
+| Current prompt, `policy_age_value` | 2 | 10 | 5 | 17 |
+| Renamed to `policy_held_for_value` | 4 | 8 | 5 | 17 |
+| Two new examples, old name | 7 | 10 | 5 | 22 |
+| Both | 6 | 9 | 6 | 21 |
+
+The rename-only row is the informative one. It ended the age confusion
+completely: no age landed in the duration field and no subtraction appeared.
+And it broke sentences that used to work. *"Two weeks after my policy
+started"*, *"8 months after buying this policy"*, *"three weeks into my new
+policy"* all came back null. "Held for" matched "I have held it for" and not
+much else. The name moved which phrasings the model recognised, in both
+directions, which is strong evidence that the name was doing the work.
+
+A name had to fit both kinds of phrasing: `time_since_policy_start`. Before
+trying it, **eight more held-out sentences were written**. The first seven had
+now been looked at while choosing between variants, and a set you have tuned
+against is no longer held out. Then the best candidates ran on all 33
+sentences, twice each, the second time in reverse order. The inference server
+reuses the previous request's cached prefix, so request order is a genuine
+source of variation (M10: repeat is not sequence).
+
+| Variant | Forward | Reverse |
+|---|---|---|
+| New examples, `policy_age_value` | 29 / 33 | 30 / 33 |
+| New examples, `time_since_policy_start_value` | **31 / 33** | **31 / 33** |
+
+Most of the old name's misses were a subtraction between two ages (72 now and
+70 at the start became "2 years"), three per run. The new name's two misses were
+one subtraction (*"I am 70. I bought this policy at 55"* became 15 years: the
+right number, done at the wrong stage) and *"My mother, who is 75"*, recorded
+as 75 **at policy start**. That would impose a co-payment nobody has
+established, and it is recorded as open.
+
+The committed change:
+
+```python
+# api/app/pipeline/scenario.py
+"time_since_policy_start_value": {"type": ["integer", "null"]},
+"time_since_policy_start_unit": {
+    "type": ["string", "null"],
+    "enum": ["days", "weeks", "months", "years", None],
+},
+```
+
+```
+# api/app/llm/prompts.py, FACTS_SYSTEM (the new lines)
+- "admitted a year after I took out cover" -> time_since_policy_start_value: 1, unit: years
+- "six months into the policy"        -> time_since_policy_start_value: 6, unit: months
+
+An AGE is never how long the policy has been held. "I was 61 when the cover
+began and I claimed four years later" is age_at_policy_start: 61 AND
+time_since_policy_start_value: 4, unit: years - two different numbers in two different
+fields. A time_since_policy_start_value always comes with its unit; if there is no length
+of time with a unit, it is null.
+```
+
+Two details of discipline. First, the committed prompt was compared **byte for
+byte** with the text that was measured. An edit had re-wrapped two of those
+lines, and on a 7B model a line break is a different prompt (Failure 28).
+Second, a test now forbids the word `age` in any duration key, so a
+tidy-minded rename cannot bring the bug back:
+
+```python
+# api/tests/test_scenario.py
+durations = [k for k in FACTS_SCHEMA["properties"] if k.endswith(("_value", "_unit"))]
+assert not [k for k in durations if "age" in k.split("_")]
+```
+
+The script became `evals/check_fact_extraction.py`: 18 eval sentences and 15
+held-out ones, uncached, about three minutes. Its first run on the committed
+code gave eval 18/18 and held-out 14/15. The mother-75 sentence came out right
+that time, so it is a wobble: wrong in two runs of three.
+
+---
+
+## What the verdicts did
+
+The key name appears in every reasoning prompt, under "FACTS UNDERSTOOD" when
+stated and under "NOT STATED" when not. So this change reached all 40 cases,
+and the cache could isolate nothing (Concept 29): every case was a fresh
+sample. Verdict accuracy was **0.800**, against 0.725. The cases that moved,
+each asked three times:
+
+| Case | Samples | Reading |
+|---|---|---|
+| `non-disclosure` | ✓ ✓ ✓ | fixed; had never passed |
+| `copay-just-under-sixty` | ✓ ✓ ✓ | fixed; the right verdict had never appeared in any earlier sample |
+| `ped-waiting-served` | ✗ ✗ ✗ | right facts, still wrong, now `not_covered` |
+| `accident-in-initial-period` | ✗ ✗ ✗ | right facts, still wrong, now `not_covered` |
+| `icu-rate-breach` | ✓ ✓ ✓ | better, but its facts did not change and it has wobbled before, so not claimed |
+
+The two that stayed wrong changed *how* they were wrong, and each now fails at
+a later step. `ped-waiting-served` is told "Already satisfied: 3.1, 3.2, 3.3,
+3.4", and replies that five years has not served a 36-month wait.
+`accident-in-initial-period` is told "clause 3.1 ... still applies and blocks
+treatment covered by THIS clause", and follows that line over the clause's own
+"except claims arising out of an Accident". Both are recorded as open.
+
+---
+
+## Failure 32: eight fabricated quotes, and half were our own words
+
+The same run reported 8 answers with a quotation that failed the verbatim
+check, up from 5. Replaying those answers from the cache and printing each
+failed quote showed that none had invented policy content. Four looked like
+this:
+
+```
+ped-waiting-served, clause 3.2
+  QUOTED : '... after the date of inception of the first policy with the Company.
+            EXCEPTIONS - this clause does NOT apply when: direct complications of a pre-existing disease'
+  CLAUSE : '... after the date of inception of the first policy with the Company.'
+```
+
+That is the clause, correctly copied, followed by a line the policy never
+contained. The line is written by the pipeline: the reasoning prompt prints
+each clause's extracted exceptions directly beneath its text.
+
+```python
+# api/app/llm/prompts.py, render_reasoning_request()
+lines.append(clause.text.strip())
+if getattr(clause, "exceptions", None):
+    lines.append(
+        "EXCEPTIONS - this clause does NOT apply when: "
+        + "; ".join(clause.exceptions)
+    )
+```
+
+The model could not tell where the clause stopped and the annotation began.
+The verbatim check caught every one, and detection integrity stayed at 1.000,
+so the guarantee never failed. But the annotation it had copied raised a much
+worse question. "Direct complications of a pre-existing disease" is not an
+exception to clause 3.2. The clause *excludes* "a Pre-existing Disease and its
+direct complications". The annotation says the opposite of the policy.
+
+---
+
+## Failure 33: the pipeline was telling the model things the policy does not say
+
+At analysis time (stage 3), each clause's carve-outs are extracted into an
+`exceptions` list, and the scenario step prints them as above. Every extracted
+exception on the synthetic policy, beside the clause it came from:
+
+| Clause | Extracted exception | The policy |
+|---|---|---|
+| 3.1 initial waiting | claims arising out of an Accident | ✓ "except claims arising out of an Accident" |
+| 4.1 cosmetic | necessitated by an Accident, Burn or Cancer; certified … medically necessary | ✓ "unless such surgery is necessitated by …" |
+| 4.6 dental | necessitated by an Accident and requiring hospitalisation | ✓ "unless necessitated by …" |
+| 3.2 pre-existing | direct complications of a pre-existing disease | ✗ excluded, not excepted |
+| 4.2 self-injury, alcohol | necessitated by an Accident, Burn or Cancer | ✗ 4.2 has no exception at all |
+| 4.4 breach of law | … committing a breach of law with criminal intent | ✗ that *is* the exclusion |
+| 4.5 infertility | reversal of sterilisation | ✗ on its list of things excluded |
+| 4.7 non-medical | items listed in Annexure III | ✗ "any other item listed in Annexure III" is excluded |
+
+**Five of eight were wrong.** Each was presented to the reasoning step as a
+statement of when an exclusion does *not* apply, in exactly the situation where
+it does.
+
+That explains a case that had failed in every run on record.
+`intoxication-injury`, *"I fell down the stairs after drinking heavily and
+fractured my hip"*, must be `not_covered` under 4.2's alcohol exclusion. The
+prompt told the model that 4.2 does not apply when the injury was
+"necessitated by an Accident". Falling down the stairs is an accident.
+
+Where did 4.2's exception come from? The first explanation offered was bleed
+from clause 4.1, the neighbour with exactly that wording, echoing the batching
+interference recorded in M2. **That was wrong, and the configuration showed
+why.** Analysis sends one clause per call (`analyze_batch_size = 1`, itself an
+M2 finding), so 4.2 never shared a generation with 4.1. The wording is the
+analysis prompt's own worked example:
+
+```
+# api/app/llm/prompts.py, CLASSIFY_SYSTEM
+- exceptions: the cases where this clause does NOT apply. Look for "unless",
+  "except", "other than", "save for", "provided that", "shall not apply".
+  ...
+    "cosmetic surgery ... unless necessitated by an Accident, Burn or Cancer"
+       -> ["necessitated by an Accident, Burn or Cancer"]
+```
+
+For a clause with no carve-out, the model returned the example's answer. A
+mechanism remembered from an earlier milestone is a hypothesis about this one,
+not a diagnosis of it.
+
+---
+
+## Concept 32: checking an extraction by its grammar, not only its text
+
+This project already has a tool for "the model claims the document says X":
+the verbatim check (M5). Applied to exceptions, it catches 4.2 (that text is
+not in the clause) and, by luck of paraphrase, 3.2 and 4.7. It cannot catch 4.4
+or 4.5, because those spans *are* in their clauses, word for word. They are
+real text playing the wrong role.
+
+The role has a visible signature. In a policy wording, an exception is
+introduced by a word that says so, the same words the analysis prompt lists,
+and that word comes before the exception in the same sentence:
+
+```
+"... first policy with the Company, except claims arising out of an Accident."
+                                    ^^^^^^ exception word, same sentence
+
+"... including assisted reproduction services, gestational surrogacy,
+ reversal of sterilisation and any form of contraception, are excluded ..."
+     (no exception word anywhere before the span)
+```
+
+So an exception is kept only if the words are in the clause and an exception
+word precedes them in their sentence:
+
+```python
+# api/app/grounding.py
+EXCEPTION_MARKERS = (
+    "unless", "except", "other than", "save for", "provided that", "shall not apply",
+)
+_MARKER = re.compile(r"\b(?:" + "|".join(re.escape(m) for m in EXCEPTION_MARKERS) + r")\b")
+_SENTENCE_END = re.compile(r"[.!?]\s")
+
+
+def verify_exception(span: str, source_text: str) -> bool:
+    needle = normalize(span).strip(" .,;:")
+    if not needle:
+        return False
+    haystack = normalize(source_text)
+    start = haystack.find(needle)
+    while start != -1:
+        sentence_so_far = _SENTENCE_END.split(haystack[:start])[-1]
+        if _MARKER.search(sentence_so_far):
+            return True
+        start = haystack.find(needle, start + 1)
+    return False
+```
+
+Three details:
+- A sentence ends at a full stop *followed by a space*, so "3.1" and "1.5 lakh"
+  do not end one.
+- Unlike a quotation, there is no minimum length. The exception word is what
+  stops a short span from matching by accident.
+- A test holds the code's list of words and the prompt's list together, because
+  two lists that must agree should not be trusted to.
+
+The check runs in the analysis step, straight after the model's answer is
+parsed:
+
+```python
+# api/app/pipeline/analyze.py, _analyze_batch()
+analyses = _parse(payload)
+text_by_id = {str(seg.order_idx): seg.text for seg in batch}
+for key, analysis in analyses.items():
+    kept = [e for e in analysis.exceptions if verify_exception(e, text_by_id[key])]
+    ...
+    analysis.exceptions = kept
+```
+
+It sits after the cache, so the model call and its stored answer are untouched
+and nothing had to be re-analysed. Only what the system believes about that
+answer changed. On the synthetic policy it keeps 3.1, both conditions of 4.1
+(the second is still governed by the "unless" earlier in its sentence) and 4.6,
+and drops all five wrong ones.
+
+**Why dropping is the safe direction.** A dropped exception leaves the clause's
+full text in the prompt, so the model loses emphasis, not a fact. A wrong
+exception kept is the pipeline asserting something false.
+
+**What it does not catch.** A wrong span that happens to follow an exception
+word in the same sentence passes, for instance the words just after "unless"
+taken from the wrong part of a long sentence. This checks the common shape of
+the mistake. It does not prove correctness.
+
+---
+
+## What the verdicts did, again
+
+Removing five annotations changed every reasoning prompt, so again every case
+regenerated. Verdict accuracy stayed at **0.800**. Each case that moved, asked
+three times:
+
+| Case | Samples | Reading |
+|---|---|---|
+| `intoxication-injury` | ✓ ✓ ✓ | fixed; had never passed, and its cause is gone |
+| `copay-unknown-inception-age` | ✓ ✓ ✓ | steadier than before (✓ ✓ ✗) |
+| `non-disclosure`, `breach-of-law`, `infertility-ivf` | ✓ ✓ ✓ | verdicts still right |
+| `oral-chemo-limit` | ✗ ✗ ✗ | **broken**; passed in every earlier run |
+| `senior-but-excluded` | ✗ ✗ ✗ | was ✗ ✓ ✓, now consistently wrong |
+
+Answers with a failed quotation fell from 8 to **1** on the full run, and to 0
+in both resamples of those seven cases. Citation recall fell from 0.806 to
+0.742, because `oral-chemo-limit` and `non-disclosure` lost their deciding
+citation.
+
+Two predictions made before the run were wrong. `breach-of-law` and
+`infertility-ivf` were expected to start citing 4.4 and 4.5 once those clauses
+stopped claiming not to apply. They did not. Whatever makes the model cite the
+wrong clause there, it was not the exception line.
+
+`oral-chemo-limit` turns on clause 5.5, whose prompt text did not change. The
+lines removed were on 3.2 and section 4. That is the non-local effect of
+Failure 28 again. One unproven observation: four wrong answers now cite 4.1,
+the only exclusion still carrying an exceptions line. Emphasis may be drawing
+citations.
+
+**Why this was kept, when Failure 29's fix was reverted.** Both were
+structurally correct, and neither improved verdicts. The notes fix cost three
+cases to fix one. This change is verdict-neutral, removes 7 of 8 failed
+quotations, and does something no metric scores: it stops the system asserting
+falsehoods about the policy in its own voice. "The alcohol exclusion does not
+apply to accidents" was untrue in every answer whose prompt printed it. The
+trade is written down here, with its cost, rather than hidden behind an
+unchanged headline number.
+
+---
+
+## Where this leaves the numbers
+
+| | Start (v15) | Facts fixed (v17) | Exceptions checked (v18) |
+|---|---|---|---|
+| Verdict accuracy | 0.725 | 0.800 | 0.800 |
+| Citation recall | 0.774 | 0.806 | 0.742 |
+| False citation rate | 0.400 | 0.400 | 0.400 |
+| Answers with a failed quotation | 5 | 8 | 1 |
+| Detection integrity | 1.000 | 1.000 | 1.000 |
+
+Each column is one full run; the per-case claims above rest on three samples
+each. Clause classification and ranking read neither the facts nor the
+exceptions, so neither could move. (There is no v16 in this table: that label
+belongs to the reverted experiment in Failure 29.)
+
+**Still open:**
+
+- `ped-waiting-served`: given correct facts and a block saying every waiting
+  period is satisfied, the model still answers that five years has not served
+  36 months;
+- `accident-in-initial-period`: the waiting-period block says 3.1 "blocks" the
+  claim without mentioning 3.1's own accident carve-out, and the model follows
+  the block;
+- `oral-chemo-limit` and `senior-but-excluded`, broken by the exceptions change,
+  cause not found;
+- from before: the `notes` leak in `not-in-document` (M10), `cataract-served`,
+  `room-rent-within-cap`, `day-care-not-listed`;
+- the fact extractor sometimes records a third person's current age as age at
+  policy start (*"My mother, who is 75"*), and sometimes subtracts two ages
+  itself;
+- quote copying itself: the three correct exceptions are still printed beneath
+  their clauses, and can still be copied into a quotation.
+
+---
+
+## Check it yourself
+
+```bash
+cd api && .venv/Scripts/python.exe -m pytest -q          # 156 tests
+python evals/check_fact_extraction.py                    # the extractor alone, ~3 minutes
+python evals/run_scenario_eval.py --only intoxication-injury,oral-chemo-limit --resample
+```
+
+**Question to sit with:** a clause reads
+
+> *Hearing aids are excluded unless prescribed by an ENT specialist. Spectacles
+> are not covered under any circumstances.*
+
+The analysis returns `exceptions: ["prescribed by an ENT specialist",
+"Spectacles are not covered"]`. Before opening the answer, decide which of the
+two `verify_exception` keeps, and then which a plain substring check would
+keep.
+
+<details>
+<summary>Answer</summary>
+
+**`verify_exception` keeps the first and drops the second. A substring check
+keeps both.** (Both results were checked by running the function on this
+exact text.)
+
+Both spans appear in the clause word for word, so a substring check has nothing
+to object to. The difference is the exception word. "prescribed by an ENT
+specialist" is preceded by "unless" in its own sentence. "Spectacles are not
+covered" also has an "unless" before it, but in the previous sentence: the full
+stop and space after "specialist" end that sentence, and nothing in the new
+sentence before the span marks it as an exception, because it is not one. It is
+a second exclusion.
+
+That is the distinction this milestone turned on. A quotation check asks whether
+the words exist. An extraction also claims what the words are *doing*, and when
+that claim has a visible grammatical signature, it can be checked too.
+</details>
+
+---
+
+# M12 — Seven attempts, three kept, and a number that means what it says
+
+## The starting position
+
+The scenario simulator answers a what-if question about an Indian health
+policy with one of four verdicts (`covered`, `not_covered`, `conditional`,
+`insufficient_information`) and the clauses that decide it:
+
+```
+question ──> extract facts ──> arithmetic in code ──> reasoning ──> quote check
+             (LLM)             waiting.py, reduction.py,  (LLM)
+                               window.py
+```
+
+Its quality is measured by 40 hand-written cases in
+`evals/golden/scenarios.json`. At the end of M11 one full run scored 0.800 on
+verdicts and 0.742 on citation recall, two of the five cases with a
+"must not cite" clause cited it, and one answer had a quotation that failed the
+verbatim check. The open problems fell into four groups:
+
+1. eight wrong verdicts;
+2. eight cases missing the clause that decides them;
+3. two cases citing a clause they must not rely on;
+4. smaller issues: third-person ages misread by the fact extractor, the
+   pipeline's own annotations copied into quotations, and a score that moves
+   between runs of identical code.
+
+Reading the model's own explanations for the eight wrong verdicts grouped them
+into five causes:
+
+| Cause | Cases |
+|---|---|
+| A. The model overrides arithmetic it was given | `ped-waiting-served` (told a 36-month wait was satisfied at five years, refused anyway), `room-rent-within-cap` (told 8,000 is within a 10,000 cap, said "paid at 80%") |
+| B. A computed line omits the clause's own carve-out | `accident-in-initial-period` ("3.1 still applies and blocks", though 3.1 excepts accidents) |
+| C. A reduction softening a refusal | `senior-but-excluded` ("not covered … however the 20% co-payment applies" → `conditional`) |
+| D. Suspected: one clause over-emphasised | `cataract-served`, `oral-chemo-limit` and three missing citations all leaned on the cosmetic exclusion 4.1, the only clause still printed with an "EXCEPTIONS" line |
+| E. Facts or document gaps | `not-in-document` (the fact extractor wrote "This policy does not cover car theft"), `day-care-not-listed` (day care depends on an annexure the document does not contain) |
+
+---
+
+## How every step was run
+
+The previous milestones produced a working method, and this one used it for
+every change:
+
+- **One change at a time**, with a written prediction of which cases it reaches.
+  The LLM cache replays the stored answer for any prompt whose text did not
+  change (Concept 29), so a change's reach is visible as the count of
+  regenerated cases. A wrong count means the change touched something it
+  should not have.
+- **Three samples** before calling anything fixed or broken: one run plus
+  `--only <ids> --resample` twice.
+- **Revert** a change that is net negative over three samples, unless it removes
+  something false the pipeline was asserting. A revert is checked by running
+  the eval again: every case must replay.
+
+Four of the seven attempts below were reverted. Each revert was checked rather
+than assumed: the eval returned to exactly its previous score with 40 of 40
+answers replayed from the cache, which is only possible if every prompt is back
+to its previous text byte for byte.
+
+---
+
+## Step 0: measure a rule before writing it
+
+Two of the planned fixes were rules that fire on some answers and not others.
+Before any code existed, a script replayed every stored answer from the cache
+(no model calls) and counted which cases each rule would catch:
+
+| Rule | Would catch | Of which already right |
+|---|---|---|
+| (a) a clause the arithmetic cleared, cited as refusing, delaying or reducing | `ped-waiting-served`, `room-rent-within-cap`, `ambulance-admissible` | `ambulance-admissible` (right verdict, but citing three satisfied waiting periods as "reduces", which is itself wrong) |
+| (b) one clause cited as refusing AND another as reducing, verdict not `not_covered` | `senior-but-excluded` | none |
+| notes claiming coverage the person never mentioned | `not-in-document` | none |
+
+The measurement changed a rule before it was written. Rule (b) was first framed
+as "a refusing citation with a `conditional` verdict". The replay showed
+`late-notice` and `no-preauth-cashless` are correctly `conditional` while citing
+a clause as refusing, because the Company *may* repudiate. Only the pairing of a
+refusal with a reduction is a contradiction.
+
+---
+
+## Fix 1: the waiting-period line names the clause's own carve-out
+
+Asked about being hit by a car ten days into a policy, the system refused three
+times out of three. Clause 3.1 is a 30-day initial waiting period "except claims
+arising out of an Accident". The code that compares waiting periods told the
+model:
+
+```
+clause 3.1: requires 1 month, policy held 10 days -> this waiting period still
+applies and blocks treatment covered by THIS clause
+```
+
+True, and incomplete. The model followed "blocks" over the clause's carve-out.
+The line now carries the clause's exceptions, which M11 made trustworthy by
+verifying each one against the clause text:
+
+```python
+# api/app/pipeline/waiting.py, WaitingCheck.describe()
+if not self.exceptions:
+    return blocked
+carve_outs = "; ".join(f'"{e}"' for e in self.exceptions)
+return (
+    f"{blocked}, EXCEPT where the situation falls within this clause's "
+    f"own exception: {carve_outs}. Decide from the description whether it does"
+)
+```
+
+Whether a situation *is* an accident is language, so the line names the
+exception and leaves that decision to the model. Only an unserved period gets
+this; a satisfied or undeterminable one is not deciding the case, and extra
+emphasis on it has cost cases before (M7).
+
+**Predicted reach:** 2 cases, the only two questions under 30 days into a
+policy. **Measured:** 38 replayed, 2 regenerated. `accident-in-initial-period`
+✓ ✓ ✓; the guard `initial-waiting-period` stayed ✓ ✓ ✓.
+
+---
+
+## Fix 2: notes that answer the question are not shown
+
+The fact extractor has a free-text `notes` field. For *"Does this policy cover my
+car being stolen from the hospital car park?"* it wrote:
+
+```
+This policy does not cover car theft from the hospital car park.
+```
+
+The extractor is never shown the policy, so that sentence is invented, and it
+reached the reasoning step under "FACTS UNDERSTOOD". M10 tried removing notes
+entirely and measured it net negative (Failure 29): notes usually restate the
+situation in wording that helps find the right clause. So only the harmful kind
+is removed:
+
+```python
+# api/app/llm/prompts.py
+_COVERAGE_CLAIMS = (
+    "does not cover", "doesn't cover", "not cover", "not covered", "is covered",
+    "are covered", "will be covered", "excluded", "not payable", "is payable",
+    "will not pay", "will pay",
+)
+
+def _invents_coverage(note: str, scenario: str) -> bool:
+    note, said = normalize(note), normalize(scenario)
+    return any(p in note and p not in said for p in _COVERAGE_CLAIMS)
+```
+
+The comparison with the question is what keeps the rule narrow. Two eval cases
+say "the treatment itself was covered", and their notes repeat it. The person
+said it, so it stays.
+
+**Predicted reach:** 1 case. **Measured:** 39 replayed, 1 regenerated.
+`not-in-document` ✓ ✓ ✓.
+
+---
+
+## Failure 34: removing the emphasis, which was carrying information
+
+Cause D was a hypothesis. The cosmetic exclusion 4.1 was the only exclusion
+still printed with an "EXCEPTIONS - this clause does NOT apply when: …" line,
+and the reasoning prompt's section on exceptions used burn surgery under a
+cosmetic exclusion as its example. The model was citing 4.1 for cataracts, chemotherapy and IVF. Removing
+both should have reduced that clause's pull.
+
+It reached all 40 cases, and three samples of the cases that moved said:
+
+| Case | Samples | |
+|---|---|---|
+| `senior-but-excluded` | ✓ ✓ ✓ | fixed |
+| `cosmetic-after-accident` | ✗ ✗ ✗ | **broken**: certified burn surgery refused as "still cosmetic" |
+| `accident-in-initial-period` | ✗ ✗ ✗ | **broken**, three samples after Fix 1 had it ✓ ✓ ✓ |
+| `cataract-served`, `oral-chemo-limit` | ✗ ✗ ✗ | the two targets, **not fixed** |
+
+Citation recall rose (0.742 → 0.806), but verdicts were net −1, and the break
+was exactly the case the line was originally added for. And the targets failed
+without the emphasis just as they had with it, so emphasis was not their cause.
+Reverted.
+
+> **The lesson:** a line added for a reason carries that reason even after the
+> reason is forgotten. Before removing prompt text, find out what it was put in
+> to fix, and include that case in the guards.
+
+---
+
+## Concept 33: checking the answer against the arithmetic
+
+The reasoning prompt already said "Never contradict those results and never
+recompute them." For `ped-waiting-served` it was told
+"Already satisfied, so IRRELEVANT here: 3.1, 3.2, 3.3, 3.4" and answered that
+five years has not served clause 3.2's 36 months, citing 3.2 as the refusal.
+
+An instruction is a request. The contradiction itself is mechanical to detect:
+the answer names a clause and an effect, and the arithmetic has already said
+whether that clause can have that effect.
+
+```python
+# api/app/pipeline/scenario.py, find_contradictions()
+for citation in citations:
+    if citation.effect not in _ADVERSE_EFFECTS:        # denies, delays, reduces
+        continue
+    cleared = served.get(citation.clause_id) or ruled_out.get(citation.clause_id)
+    if cleared is not None:
+        problems.append(
+            f"- You cited clause {citation.clause_id} as a reason this claim is "
+            f"{_ADVERSE_EFFECTS[citation.effect]}, but it was calculated: "
+            f"{cleared.describe()}."
+        )
+        irrelevant.append(citation)
+
+denying = [c.clause_id for c in citations if c.effect == "denies"]
+reducing = [c.clause_id for c in citations if c.effect == "reduces"]
+if denying and reducing and verdict != Verdict.NOT_COVERED:
+    problems.append(...)   # "a refused claim has nothing to reduce"
+```
+
+What happens next follows the shape of the existing retry for an answer that
+arrives with no citations:
+
+```python
+# api/app/pipeline/scenario.py, run_scenario()
+problems, _ = find_contradictions(citations, verdict, computed)
+if problems:
+    payload = await reason(
+        scenario, facts, considered, computed,
+        nudge=CONSISTENCY_NUDGE.format(problems="\n".join(problems)),
+        use_cache=not resample,
+    )
+    citations, verdict = _read_answer(payload, source_by_id)
+    _, irrelevant = find_contradictions(citations, verdict, computed)
+    if irrelevant:
+        citations = [c for c in citations if c not in irrelevant]
+        if verdict != Verdict.INSUFFICIENT_INFORMATION and not citations:
+            verdict = Verdict.INSUFFICIENT_INFORMATION
+```
+
+Three design decisions:
+
+1. **One retry, with the calculation quoted back.** The retry is a second user
+   turn, so it has a different cache key and cannot be served the answer that
+   failed.
+2. **Code may remove a citation it can prove wrong, and never sets a verdict.**
+   A clause the arithmetic cleared cannot be refusing the claim; that is proof.
+   What the right verdict *is* still needs reading the situation.
+3. **The arithmetic is computed once** (`compute()`), then used both to render
+   the prompt and to check the answer. Two separate computations would be two
+   lists that must agree.
+
+That refactor touched the code that renders every prompt, so it carried a risk
+of changing the text sent for all 40 cases. **Predicted reach:** the 4 cases
+Step 0 found. **Measured:** 36 replayed, 4 regenerated, which also proves the
+refactor changed no prompt by a single byte.
+
+| Case | Samples | |
+|---|---|---|
+| `ped-waiting-served` | ✓ ✓ ✓ | fixed; had never passed |
+| `ambulance-admissible` | ✓ ✓ ✓ | verdict held; the wrong waiting-period citations are gone |
+| `room-rent-within-cap` | ✗ ✓ ✓ | better than ✗ ✗ ✗; the miss kept citing 5.1 after the retry, so the citation was dropped and the verdict downgraded |
+| `senior-but-excluded` | ✗ ✗ ✗ | the retry did not persuade the model |
+
+Rule (b) shows the limit. Its answer contradicts itself, and there is no
+arithmetic to say which half is wrong, so code has nothing to remove.
+
+---
+
+## Failure 35: a true fact that fixed three other cases and not its own
+
+`day-care-not-listed`: six hours on a drip, same-day discharge. Day care is paid
+only for treatments "listed in Annexure II", and the synthetic policy contains
+no Annexure II. The honest answer is that the document cannot settle it. The
+model answered `covered`.
+
+A missing section is an absence, so nothing on the page shows it, and whether a
+section exists is a lookup rather than a judgement. Code found every
+`Annexure <n>` a clause relies on that no segment was filed under (2.4 → II,
+4.7 → III, confirmed on the real policy), and printed one line under each
+clause: "NOT IN THIS DOCUMENT - this clause relies on Annexure II, which is not
+included, so what it lists cannot be checked."
+
+| Case | Samples | |
+|---|---|---|
+| `day-care-not-listed` (the target) | ✗ ✗ ✗ | **not fixed** |
+| `cataract-served`, `senior-but-excluded`, `oral-chemo-limit` | ✓ ✓ ✓ | fixed |
+| `copay-unknown-inception-age` | ✗ ✗ ✗ | broken |
+| `breach-of-law` | ✗ ✗ ✗ | broken: now tells someone injured while being arrested for shoplifting that they are covered |
+| `ped-waiting-served`, `initial-waiting-period` | ✗ ✓ ✗, ✗ ✗ ✓ | wobbling, from ✓ ✓ ✓ |
+
+By count that is about net −0.3 of a case. The deciding point was not the
+count. The mechanism did nothing for the case it was built for, and the three
+cases it fixed are about cataracts, chemotherapy and cosmetic surgery, none of
+which touches an annexure. They moved because an extra line changed every
+prompt, the non-local effect M10 recorded as Failure 28. Keeping a change for
+effects it was not designed to cause, and cannot explain, is tuning against
+noise that happens to be favourable today. Reverted, including the plumbing it
+needed.
+
+---
+
+## Failure 36: a second turn that chose the same wrong clauses
+
+Five cases reached the right verdict and cited the wrong clause in every run on
+record: a hospital definition instead of the AYUSH clause, basic in-patient
+cover instead of the ambulance clause, the adventure-sports exclusion instead of
+the breach-of-law exclusion beside it. One hypothesis: a single generation was
+deciding the verdict, writing the reasoning and choosing citations, and the last
+job was being done badly. It is the same argument the pipeline's design already
+makes for extracting facts in a separate call from reasoning.
+
+The test was a follow-up turn in the same conversation: the reasoning prompt,
+then the model's own verdict and reasoning (not its earlier citations, so they
+could not anchor it), then "keep that verdict, now choose the clauses that
+decide it". The prompt was an exact prefix of the reasoning call, so the
+inference server could reuse its work.
+
+Measured on 12 cases twice (the 5 misses, 5 already-right citations, 2 guards):
+all verdicts right, no new false citations, and **the same wrong clause in four
+of the five misses, both times**. The fifth now cited 4.1, but its quotation
+failed verification in both samples. The cost was about five seconds on every
+question.
+
+That is a clean negative result. Given the verdict and asked only which clause
+decides it, the model still picks the adventure-sports exclusion for
+shoplifting. The single generation was not the problem: the model's reading of
+which clause is specific to a situation is. Reverted.
+
+---
+
+## Failure 37: two attempts at third-person ages, both worse
+
+The fact extractor sometimes records "My mother, who is 75" as 75 **at policy
+start**, which would impose a senior-citizen co-payment nobody established.
+First, the held-out check (`evals/check_fact_extraction.py`) gained five
+third-person sentences written before any change. One of them ("My mother took
+this policy out at 61") *does* state an age at the start, so a fix could not
+pass by simply never filling that field for someone else. On the unchanged
+prompt, "My father, 82" failed the same way. The bug was real on a sentence
+nobody had looked at.
+
+- **A one-line example** ("my husband is 64" → `age`: 64,
+  `age_at_policy_start`: null): `father-82` still wrong in both runs, and
+  `mother-75`, right at baseline, now wrong in both. Reverted.
+- **A rename.** The wrong answers had a pattern: `age` came back empty and the
+  number landed in the next age field, as if `age` meant "the speaker's age".
+  Concept 31 says a key name is an instruction, so `age` was renamed
+  `patient_age_now` in a scratch copy of the prompt. First-person ages still
+  worked, and *every* third-person sentence failed, in both runs.
+
+Concept 31 is a mechanism, not a recipe. A name does steer the value written
+after it, but that does not mean the name you guess will steer it the right way.
+Each rename is an experiment. Recorded as open.
+
+---
+
+## Concept 34: majority of three, and a number that means what it says
+
+Every verdict accuracy in this log before now is one sample. The model does not
+answer identically twice (M9), so a single full run's score moves by two or
+three cases on its own. A reader of "0.875" assumes it describes what the system
+usually answers. One run cannot say that.
+
+`--repeats N` asks each case N times: the first may replay the cache, the rest
+are asked afresh. It scores the majority verdict.
+
+```python
+# evals/run_scenario_eval.py, majority()
+top, count = Counter(got).most_common(1)[0]
+winner = top if count * 2 > len(got) else None
+```
+
+A strict majority is required. With three samples and four verdicts, a
+three-way split is possible, and it counts as wrong: picking one of three
+disagreeing answers would be choosing a result, not measuring one.
+
+Three samples of 40 cases take longer than the ten-minute limit on one
+command, so they ran in three chunks with `--only`. Majority counts add across
+chunks. One built-in check: sample 1 of each chunk replays the stored answers,
+so it must reproduce the last single run. It did, 35 of 40, confirming that
+three reverts had left the prompt exactly as it was.
+
+---
+
+## Where this leaves the numbers
+
+| | End of M11 | Now, sample 1 | Now, sample 2 | Now, sample 3 | **Now, majority of 3** |
+|---|---|---|---|---|---|
+| Verdict accuracy | 0.800 | 0.875 | 0.900 | 0.925 | **0.925** (37/40) |
+| Citation recall | 0.742 | 0.742 | 0.806 | 0.774 | |
+| False citation rate | 0.400 | 0.200 | 0.400 | 0.000 | |
+| Answers with a failed quotation | 1 | 1 | 1 | 0 | |
+
+37 of 40 cases gave the same verdict in all three samples. Detection integrity
+was 1.000 in the consolidated report (`evals/REPORT.md`), which replays sample
+1's answers. The majority summary did not print it for any sample: that column
+was added only after this run, so samples 2 and 3 have no recorded figure. Clause
+classification (macro-F1 1.000) and ranking (8 of 9) did not move.
+
+Against the bar set before starting: verdict accuracy of at least 0.850 was met
+(0.925), and at most one failed quotation was met. Zero false citations was not
+met (0.200 on average), and neither was citation recall of at least 0.806
+(0.774 on average).
+
+**Kept:** Fix 1 (carve-outs in the waiting-period line), Fix 2 (notes that claim
+coverage), Concept 33 (the consistency check), Concept 34 (`--repeats`).
+**Reverted:** removing the exceptions line, the missing-annexure line, the
+separate citation turn, the third-person age example.
+
+**Still open:**
+
+- `senior-but-excluded`: refuses and applies a co-payment in the same answer,
+  3/3, and the consistency retry does not change it;
+- `room-rent-within-cap`: in the final run the retry kept citing the ruled-out
+  cap 3/3, so the citation was dropped and the answer downgraded to
+  `insufficient_information`;
+- `day-care-not-listed`: stating the missing annexure did not help;
+- 2-of-3 wobbles: `cataract-served`, `oral-chemo-limit`,
+  `copay-unknown-inception-age`;
+- citations the model gets wrong even in a dedicated turn: 4.4, 6.6, 2.6, 2.5;
+- third-person ages in the fact extractor, after two failed attempts; and the
+  extractor sometimes subtracts two stated ages itself, which is accepted (the
+  number is right).
+
+---
+
+## Check it yourself
+
+```bash
+cd api && .venv/Scripts/python.exe -m pytest -q          # 172 tests
+python evals/run_scenario_eval.py                        # one run; after no change, 40 replayed
+python evals/run_scenario_eval.py --repeats 3 --only ped-waiting-served,room-rent-within-cap
+python evals/check_fact_extraction.py                    # the extractor alone
+```
+
+**Question to sit with:** the consistency check fired on `ambulance-admissible`,
+whose verdict was already right. Before opening the answer: was that a false
+trigger that should have been prevented, and what did the retry risk?
+
+<details>
+<summary>Answer</summary>
+
+**Not a false trigger.** The check is about the answer's consistency, not its
+verdict. The answer cited clauses 3.1, 3.2 and 3.3 as *reducing* the ambulance
+claim, and all three are waiting periods the arithmetic showed were satisfied
+years earlier. Those citations were provably wrong, and a reader would have been
+shown three irrelevant clauses as the reasons their claim is cut.
+
+The risk was real: a retry is a fresh sample, and a fresh sample of a right
+answer can come back wrong. That is why the case was listed as a guard before
+the change was made, and checked three times after. The verdict held, and the
+wrong citations were gone.
+
+The general point: a check that fires only on wrong verdicts can only be built
+by knowing the right verdict, and that is the one thing code does not know here.
+What code does know is which statements inside an answer contradict arithmetic
+it has already done, so that is what it checks.
+</details>

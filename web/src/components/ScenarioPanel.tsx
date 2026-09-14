@@ -65,7 +65,7 @@ const EXAMPLES = [
 ]
 
 const FACT_LABELS: Record<string, string> = {
-  policy_age_value: 'how long you have held the policy',
+  time_since_policy_start_value: 'how long you have held the policy',
   age: 'your age',
   pre_existing_condition: 'whether this condition existed before you bought the policy',
   hospitalised: 'whether you were admitted overnight',

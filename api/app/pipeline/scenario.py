@@ -83,8 +83,8 @@ def policy_age_days(facts: dict[str, Any]) -> int | None:
     waiting period then comes back UNKNOWN, which is what lets the verdict
     be insufficient_information rather than a guess.
     """
-    value = facts.get("policy_age_value")
-    unit = facts.get("policy_age_unit")
+    value = facts.get("time_since_policy_start_value")
+    unit = facts.get("time_since_policy_start_unit")
     if not value or value <= 0 or unit not in _DAYS_PER_UNIT:
         return None
     return value * _DAYS_PER_UNIT[unit]
@@ -112,7 +112,7 @@ def expense_offset_days(facts: dict[str, Any]) -> int | None:
 # lists that must agree should not be two lists - the same rule that applies to
 # the context window and its token budget.
 DECISIVE_FACTS = (
-    "policy_age_value",
+    "time_since_policy_start_value",
     "age",
     "pre_existing_condition",
     "hospitalised",
@@ -208,8 +208,20 @@ FACTS_SCHEMA: dict[str, Any] = {
         # other side of the same comparison. Converting units is arithmetic
         # and belongs to Python; reporting what the sentence said is
         # reading, and belongs to the model.
-        "policy_age_value": {"type": ["integer", "null"]},
-        "policy_age_unit": {
+        #
+        # THE NAME IS PART OF THE INSTRUCTION. This was `policy_age_value`,
+        # and the model read "policy age" as "age at the policy": for "I
+        # bought this policy at 67 and am claiming three years later" it wrote
+        # 67 here with no unit, and the three years were lost. Renamed to
+        # `policy_held_for_value`, the ages stopped landing here - and "ten
+        # days after my policy started" stopped landing here too, because
+        # "held for" only matched "I have held it for". With the same prompt
+        # examples, this name read 31 of 33 test sentences in both orderings
+        # tried; the old name read 29 and 30, most of its misses a subtraction
+        # between two ages that nobody asked it to do. A schema key is the
+        # last thing the model reads before it writes the value.
+        "time_since_policy_start_value": {"type": ["integer", "null"]},
+        "time_since_policy_start_unit": {
             "type": ["string", "null"],
             "enum": ["days", "weeks", "months", "years", None],
         },
@@ -263,7 +275,7 @@ FACTS_SCHEMA: dict[str, Any] = {
     },
     "required": [
         "procedure", "condition", "body_system",
-        "policy_age_value", "policy_age_unit",
+        "time_since_policy_start_value", "time_since_policy_start_unit",
         "age", "age_at_policy_start", "hospitalised", "hours_since_admission",
         "estimated_cost_inr", "sum_insured_value", "sum_insured_unit",
         "room_rent_per_day_inr", "room_is_icu",
@@ -373,48 +385,68 @@ def _reasoning_schema(clause_ids: list[str]) -> dict[str, Any]:
     }
 
 
+@dataclass
+class Computed:
+    """Everything worked out in Python before the model sees the question.
+
+    Computed once and shared: the reasoning prompt is rendered from it, and the
+    model's answer is checked against it afterwards (find_contradictions).
+    """
+
+    waiting: list[waiting.WaitingCheck]
+    reductions: list[reduction.ReductionCheck]
+    windows: list[window.WindowCheck]
+
+
+def compute(facts: dict[str, Any], clauses: list[ShortlistClause]) -> Computed:
+    held = policy_age_days(facts)
+    return Computed(
+        # Every waiting period compared against the stated policy age, in
+        # Python, before the model sees anything. Nothing is guessed: if the
+        # person said nothing, every waiting period comes back UNKNOWN rather
+        # than being compared against an invented figure.
+        waiting=waiting.evaluate(clauses, held),
+        # And the second family of comparisons, added after the first was
+        # fixed: a waiting period decides whether the claim is PAID, a
+        # reduction decides whether it is paid IN FULL. Only the first question
+        # was being asked, so a senior citizen was told "covered" while losing
+        # a fifth of the claim.
+        reductions=reduction.evaluate(clauses, facts, held),
+        # The third family: whether an expense before admission or after
+        # discharge fell inside the policy's window. Silent unless raised.
+        windows=window.evaluate(
+            clauses, facts.get("expense_timing_anchor"), expense_offset_days(facts)
+        ),
+    )
+
+
 async def reason(
     scenario: str,
     facts: dict[str, Any],
     clauses: list[ShortlistClause],
+    computed: Computed,
     *,
-    nudge_citations: bool = False,
+    nudge: str | None = None,
     use_cache: bool = True,
 ) -> dict[str, Any]:
     ids = [c.clause_id for c in clauses]
-    held = policy_age_days(facts)
-    # Every waiting period compared against the stated policy age, in Python,
-    # before the model sees anything. The result is handed over as settled fact.
-    # Prefer days when stated, else convert months. Neither is guessed: if
-    # the person said nothing, both stay None and every waiting period comes
-    # back UNKNOWN rather than being compared against an invented figure.
-    checks = waiting.evaluate(clauses, held)
-    # And the second family of comparisons, added after the first was fixed:
-    # a waiting period decides whether the claim is PAID, a reduction decides
-    # whether it is paid IN FULL. Only the first question was being asked, so
-    # a senior citizen was told "covered" while losing a fifth of the claim.
-    cuts = reduction.evaluate(clauses, facts, held)
-    # The third family: whether an expense before admission or after discharge
-    # fell inside the policy's window. Silent unless the person raised it.
-    windows = window.evaluate(
-        clauses, facts.get("expense_timing_anchor"), expense_offset_days(facts)
-    )
     messages = [
         {"role": "system", "content": REASON_SYSTEM},
         {
             "role": "user",
             "content": render_reasoning_request(
                 scenario, facts, clauses,
-                waiting.render(checks), reduction.render(cuts),
-                window.render(windows),
+                waiting.render(computed.waiting),
+                reduction.render(computed.reductions),
+                window.render(computed.windows),
             ),
         },
     ]
-    if nudge_citations:
+    if nudge:
         # Appended as a second user turn rather than edited into the first, so
         # the retry is a different cache key and cannot be served the very
         # response that failed.
-        messages.append({"role": "user", "content": CITATION_NUDGE})
+        messages.append({"role": "user", "content": nudge})
     return await client.complete_json(
         messages, _reasoning_schema(ids), use_cache=use_cache,
     )
@@ -426,6 +458,97 @@ clause_id and an exact quote copied from that clause's text.
 
 If no clause in the list actually decides this, the verdict is
 insufficient_information."""
+
+
+CONSISTENCY_NUDGE = """Your previous answer contradicts results that were calculated, not estimated:
+
+{problems}
+
+Answer the question again, and do not rely on anything these results rule out."""
+
+# Effects that say a clause is working against this claim - and how to say so
+# to the model. A clause the arithmetic has cleared cannot be doing any of them.
+_ADVERSE_EFFECTS = {"denies": "refused", "delays": "delayed", "reduces": "reduced"}
+
+
+def find_contradictions(
+    citations: list[Citation], verdict: str, computed: Computed
+) -> tuple[list[str], list[Citation]]:
+    """Where the model's answer disagrees with what Python already worked out.
+
+    Returns (problems, irrelevant): a sentence for each contradiction, to put in
+    front of the model, and the citations that are provably wrong - a clause
+    cited as working against the claim that the arithmetic has cleared.
+
+    WHY THIS EXISTS. The prompt already says "never contradict these results",
+    and the model still did, three samples of three:
+      - told "Already satisfied: 3.2", it refused a claim five years into a
+        36-month pre-existing disease wait, citing 3.2;
+      - told 5.1 was "ruled out by the numbers" (8,000 within a 10,000 cap), it
+        said the room would be paid at 80%, citing 5.1.
+    An instruction can be ignored. A check in code cannot, and it only has to
+    compare the citations against results that already exist.
+
+    It never changes a verdict. It finds the disagreement; the model answers
+    again with the disagreement in front of it.
+    """
+    served = {
+        c.clause_id: c for c in computed.waiting
+        if c.status is waiting.WaitingStatus.SERVED
+    }
+    ruled_out = {
+        c.clause_id: c for c in computed.reductions
+        if c.status is reduction.ReductionStatus.DOES_NOT_APPLY
+    }
+
+    problems: list[str] = []
+    irrelevant: list[Citation] = []
+    for citation in citations:
+        if citation.effect not in _ADVERSE_EFFECTS:
+            continue
+        cleared = served.get(citation.clause_id) or ruled_out.get(citation.clause_id)
+        if cleared is not None:
+            problems.append(
+                f"- You cited clause {citation.clause_id} as a reason this claim is "
+                f"{_ADVERSE_EFFECTS[citation.effect]}, but it was calculated: "
+                f"{cleared.describe()}."
+            )
+            irrelevant.append(citation)
+
+    # A refusal and a reduction cannot both decide one claim: a co-payment or a
+    # cap takes a share of a claim that IS paid. The model wrote exactly this
+    # contradiction for a nose job bought at 70 - "not covered ... however the
+    # 20% co-payment applies" - and answered conditional. No arithmetic is
+    # involved, so nothing is dropped; the model is asked to decide.
+    denying = [c.clause_id for c in citations if c.effect == "denies"]
+    reducing = [c.clause_id for c in citations if c.effect == "reduces"]
+    if denying and reducing and verdict != Verdict.NOT_COVERED:
+        problems.append(
+            f"- You cited {', '.join(denying)} as refusing this claim and "
+            f"{', '.join(reducing)} as reducing it. Both cannot decide it: a "
+            f"co-payment, cap or sub-limit reduces a claim that IS paid, and a "
+            f"refused claim has nothing to reduce. Decide first whether it is refused."
+        )
+    return problems, irrelevant
+
+
+def _read_answer(
+    payload: dict[str, Any], source_by_id: dict[str, str]
+) -> tuple[list[Citation], str]:
+    """The model's citations, each verified against its clause, and its verdict."""
+    raw_citations = payload.get("deciding_clauses", [])
+    checks: list[QuoteCheck] = verify_citations(raw_citations, source_by_id)
+    citations = [
+        Citation(
+            clause_id=check.clause_id,
+            quote=raw.get("quote", ""),
+            effect=raw.get("effect", "permits"),
+            verified=check.verified,
+            unverified_reason=check.reason,
+        )
+        for raw, check in zip(raw_citations, checks)
+    ]
+    return citations, payload.get("verdict", Verdict.INSUFFICIENT_INFORMATION)
 
 
 # --- the whole stage ------------------------------------------------------
@@ -454,26 +577,15 @@ async def run_scenario(
             missing_facts=missing,
         )
 
-    payload = await reason(scenario, facts, considered, use_cache=not resample)
+    computed = compute(facts, considered)
+    payload = await reason(
+        scenario, facts, considered, computed, use_cache=not resample
+    )
 
     # 5d: verification. Every quotation must actually occur in the clause it
     # was attributed to.
     source_by_id = {c.clause_id: c.text for c in considered}
-    raw_citations = payload.get("deciding_clauses", [])
-    checks: list[QuoteCheck] = verify_citations(raw_citations, source_by_id)
-
-    citations = [
-        Citation(
-            clause_id=check.clause_id,
-            quote=raw.get("quote", ""),
-            effect=raw.get("effect", "permits"),
-            verified=check.verified,
-            unverified_reason=check.reason,
-        )
-        for raw, check in zip(raw_citations, checks)
-    ]
-
-    verdict = payload.get("verdict", Verdict.INSUFFICIENT_INFORMATION)
+    citations, verdict = _read_answer(payload, source_by_id)
 
     # A definite verdict with nothing to back it is not a definite verdict.
     # The schema cannot express "citations are required unless the verdict is
@@ -488,22 +600,10 @@ async def run_scenario(
     if verdict != Verdict.INSUFFICIENT_INFORMATION and not citations:
         log.info("verdict %s arrived with no citations; retrying once", verdict)
         payload = await reason(
-            scenario, facts, considered, nudge_citations=True,
+            scenario, facts, considered, computed, nudge=CITATION_NUDGE,
             use_cache=not resample,
         )
-        raw_citations = payload.get("deciding_clauses", [])
-        checks = verify_citations(raw_citations, source_by_id)
-        citations = [
-            Citation(
-                clause_id=check.clause_id,
-                quote=raw.get("quote", ""),
-                effect=raw.get("effect", "permits"),
-                verified=check.verified,
-                unverified_reason=check.reason,
-            )
-            for raw, check in zip(raw_citations, checks)
-        ]
-        verdict = payload.get("verdict", Verdict.INSUFFICIENT_INFORMATION)
+        citations, verdict = _read_answer(payload, source_by_id)
 
         if verdict != Verdict.INSUFFICIENT_INFORMATION and not citations:
             # Still nothing. Downgrade is the safe direction: it turns an
@@ -511,6 +611,30 @@ async def run_scenario(
             # leaving a confident answer standing on nothing.
             log.warning("verdict %s still had no citations; downgrading", verdict)
             verdict = Verdict.INSUFFICIENT_INFORMATION
+
+    # 5e: consistency. The answer is checked against what Python already
+    # worked out, and a contradiction gets one retry with the calculation in
+    # front of the model - the same shape as the citation retry above.
+    problems, _ = find_contradictions(citations, verdict, computed)
+    if problems:
+        log.info("answer contradicts computed results; retrying once: %s", problems)
+        payload = await reason(
+            scenario, facts, considered, computed,
+            nudge=CONSISTENCY_NUDGE.format(problems="\n".join(problems)),
+            use_cache=not resample,
+        )
+        citations, verdict = _read_answer(payload, source_by_id)
+
+        # Still citing a clause the arithmetic cleared: that citation is
+        # provably wrong, so it goes. The verdict is left alone - code can show
+        # a citation is wrong, but not what the right answer is.
+        _, irrelevant = find_contradictions(citations, verdict, computed)
+        if irrelevant:
+            log.warning("dropping citation(s) the arithmetic rules out: %s",
+                        [c.clause_id for c in irrelevant])
+            citations = [c for c in citations if c not in irrelevant]
+            if verdict != Verdict.INSUFFICIENT_INFORMATION and not citations:
+                verdict = Verdict.INSUFFICIENT_INFORMATION
 
     return ScenarioResult(
         verdict=verdict,

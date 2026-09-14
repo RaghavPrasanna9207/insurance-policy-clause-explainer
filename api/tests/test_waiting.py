@@ -6,7 +6,7 @@ project's rule is that arithmetic does not go to a language model. These tests
 pin the comparison down exactly, which is only possible because it is code.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from app.pipeline.waiting import WaitingStatus, evaluate, render
 
@@ -15,6 +15,7 @@ from app.pipeline.waiting import WaitingStatus, evaluate, render
 class FakeClause:
     clause_id: str
     waiting_period_days: int | None = None
+    exceptions: list[str] = field(default_factory=list)
 
 
 def test_an_elapsed_waiting_period_is_served():
@@ -152,3 +153,30 @@ def test_blocking_periods_still_get_their_own_line():
     assert "IRRELEVANT here" in block          # 3.1 satisfied
     assert "still applies" in block            # 3.2 blocks
     assert "3.2" in block
+
+
+INITIAL = FakeClause("3.1", 30, ["claims arising out of an Accident"])
+
+
+def test_a_blocking_period_names_its_own_exception():
+    """Regression test for `accident-in-initial-period`.
+
+    Hit by a car ten days into a policy whose 30-day initial waiting period
+    says "except claims arising out of an Accident". The block said only that
+    3.1 "still applies and blocks treatment", and the model followed that line
+    over the clause's own carve-out, three samples out of three. The arithmetic
+    was right and incomplete: the bar is not served, AND the bar has an
+    exception. Whether an accident happened is language, so the block names the
+    exception and leaves that call to the model.
+    """
+    block = render(evaluate([INITIAL], days_held=10))
+    assert "still applies" in block
+    assert "claims arising out of an Accident" in block
+
+
+def test_a_served_or_unknown_period_does_not_repeat_its_exception():
+    """A served bar decides nothing, and an unknown one is about a missing
+    fact. Printing the carve-out on either adds emphasis to a clause that is
+    not deciding the case - the lesson of the served-periods line above."""
+    assert "Accident" not in render(evaluate([INITIAL], days_held=400))
+    assert "Accident" not in render(evaluate([INITIAL], days_held=None))
