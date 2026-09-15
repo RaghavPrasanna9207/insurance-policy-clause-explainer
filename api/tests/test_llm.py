@@ -250,3 +250,30 @@ async def test_transport_errors_are_retried_unchanged(monkeypatch):
     )
 
     assert seen == [seen[0], seen[0]], "transport retry must not change the ceiling"
+
+
+def test_a_prompt_that_leaves_no_room_for_the_answer_is_reported(caplog):
+    """Ollama truncates an over-long prompt without an error (Failure 10).
+
+    The only signal is the token count it reports back, so the client checks
+    it on every call - and names which of two failures it saw, because a prompt
+    that was cut and an answer that lost its margin are different problems.
+    """
+    options = {"num_ctx": 8_192, "num_predict": 1_600}
+
+    client._check_context(6_000, options)
+    assert client.last_prompt_tokens == 6_000
+    assert not caplog.records, "6,000 + 1,600 fits in 8,192"
+
+    # The measured case on a real policy: fits, but the answer's margin is gone.
+    client._check_context(7_326, options)
+    assert client.last_prompt_tokens == 7_326
+    assert "leaving 866" in caplog.text
+    assert "truncated" not in caplog.text, "7,326 < 8,192: nothing was truncated"
+
+    caplog.clear()
+    client._check_context(8_192, options)
+    assert "probably truncated" in caplog.text
+
+    client._check_context(None, options)  # older Ollama builds omit the field
+    assert client.last_prompt_tokens is None

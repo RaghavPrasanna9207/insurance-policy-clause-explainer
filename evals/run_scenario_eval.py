@@ -50,7 +50,12 @@ from app.llm.prompts import PROMPT_VERSION  # noqa: E402
 from app.llm import cache, client  # noqa: E402
 from app.pipeline.analyze import analyze  # noqa: E402
 from app.pipeline.ingest import ingest  # noqa: E402
-from app.pipeline.scenario import ShortlistClause, extract_facts, run_scenario  # noqa: E402
+from app.pipeline.scenario import (  # noqa: E402
+    ShortlistClause,
+    citation_ids,
+    extract_facts,
+    run_scenario,
+)
 from app.pipeline.score import score  # noqa: E402
 from app.pipeline.segment import segment  # noqa: E402
 
@@ -66,23 +71,28 @@ HELDOUT_PATHS = {
 REPORT_PATH = REPO_ROOT / "evals" / "scenario-report.md"
 
 
-async def build_clauses() -> list[ShortlistClause]:
+async def build_clauses(pdf: Path = GOLDEN_PDF) -> list[ShortlistClause]:
     """Run the map pipeline once; every scenario reuses the result."""
-    result = ingest(GOLDEN_PDF)
+    result = ingest(pdf)
     segments = segment(result)
     analyses = await analyze(segments)
     scored = score(segments, analyses)
 
+    analysed = [
+        seg for seg in segments
+        if str(seg.order_idx) in analyses and str(seg.order_idx) in scored
+    ]
+    # The same ids the scenario endpoint gives the model, from the same function.
+    ids = citation_ids([(seg.number, seg.order_idx) for seg in analysed])
+
     clauses = []
-    for seg in segments:
-        analysis = analyses.get(str(seg.order_idx))
-        sc = scored.get(str(seg.order_idx))
-        if analysis is None or sc is None:
-            continue
+    for seg, clause_id in zip(analysed, ids):
+        analysis = analyses[str(seg.order_idx)]
+        sc = scored[str(seg.order_idx)]
         clauses.append(
             ShortlistClause(
-                clause_id=seg.number or f"c{seg.order_idx}",
-                ref=f"golden:{seg.order_idx}",
+                clause_id=clause_id,
+                ref=f"{pdf.stem}:{seg.order_idx}",
                 number=seg.number,
                 clause_type=analysis.clause_type,
                 text=seg.text,
@@ -103,7 +113,7 @@ async def build_clauses() -> list[ShortlistClause]:
 
 async def run(
     use_cache: bool, only: list[str] | None = None, resample: bool = False,
-    cases_path: Path = CASES_PATH,
+    cases_path: Path = CASES_PATH, pdf: Path = GOLDEN_PDF,
 ) -> dict:
     if not use_cache:
         cache.clear()
@@ -116,8 +126,8 @@ async def run(
             raise SystemExit(f"unknown case id(s): {', '.join(unknown)}")
         cases = [c for c in cases if c["id"] in only]
     print(f"model: {settings.model}")
-    print("preparing policy...")
-    clauses = await build_clauses()
+    print(f"preparing policy {pdf.name}...")
+    clauses = await build_clauses(pdf)
     print(f"  {len(clauses)} analysed clauses\n")
 
     source_by_id = {c.clause_id: c.text for c in clauses}
@@ -202,7 +212,7 @@ async def run(
         "rows": rows,
         # Another case file is never the report's 40 cases, so it is recorded
         # like a subset and never overwrites the main report.
-        "subset": only is not None or cases_path != CASES_PATH,
+        "subset": only is not None or cases_path != CASES_PATH or pdf != GOLDEN_PDF,
         "verdict_accuracy": sum(r["verdict_ok"] for r in rows) / max(total, 1),
         "citation_recall": (
             sum(r["citation_ok"] for r in citable) / len(citable) if citable else 1.0
@@ -648,13 +658,15 @@ def render_majority(samples: list[dict]) -> str:
 
 
 async def run_repeats(
-    n: int, use_cache: bool, only: list[str] | None, cases_path: Path = CASES_PATH
+    n: int, use_cache: bool, only: list[str] | None, cases_path: Path = CASES_PATH,
+    pdf: Path = GOLDEN_PDF,
 ) -> list[dict]:
     """The first sample may replay the cache; every later one is asked afresh."""
-    results = [await run(use_cache=use_cache, only=only, cases_path=cases_path)]
+    results = [await run(use_cache=use_cache, only=only, cases_path=cases_path, pdf=pdf)]
     for _ in range(n - 1):
         results.append(
-            await run(use_cache=use_cache, only=only, resample=True, cases_path=cases_path)
+            await run(use_cache=use_cache, only=only, resample=True,
+                      cases_path=cases_path, pdf=pdf)
         )
     return results
 
@@ -685,12 +697,24 @@ def main() -> None:
         help="ask each case N times (first may replay the cache, the rest afresh) "
              "and score the majority verdict; combine with --only to split a long run",
     )
+    parser.add_argument(
+        "--policy", type=Path, default=GOLDEN_PDF,
+        help="a different policy PDF, e.g. one from evals/real (requires --cases)",
+    )
+    parser.add_argument(
+        "--cases", type=Path, default=None,
+        help="a scenario file written for --policy",
+    )
     args = parser.parse_args()
+    # The golden cases cite the golden policy's clause numbers, so asking them
+    # of any other document would score answers against the wrong answer key.
+    if args.policy != GOLDEN_PDF and args.cases is None:
+        parser.error("--policy needs --cases written for that policy")
 
     # Read before this run is recorded: the comparison is against what came
     # BEFORE, and the watchlist is chosen from it.
     history = load_history()
-    cases_path = HELDOUT_PATHS[args.heldout] if args.heldout else CASES_PATH
+    cases_path = args.cases or (HELDOUT_PATHS[args.heldout] if args.heldout else CASES_PATH)
     cases = json.loads(cases_path.read_text(encoding="utf-8"))["cases"]
 
     only = None
@@ -704,7 +728,9 @@ def main() -> None:
         print(f"watchlist: {len(only)} of {len(cases)} cases\n")
 
     if args.repeats > 1:
-        results = asyncio.run(run_repeats(args.repeats, not args.no_cache, only, cases_path))
+        results = asyncio.run(
+            run_repeats(args.repeats, not args.no_cache, only, cases_path, args.policy)
+        )
         print()
         print(render_majority(results))
         if not args.no_report:
@@ -717,7 +743,7 @@ def main() -> None:
 
     res = asyncio.run(
         run(use_cache=not args.no_cache, only=only, resample=args.resample,
-            cases_path=cases_path)
+            cases_path=cases_path, pdf=args.policy)
     )
 
     print()

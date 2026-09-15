@@ -170,6 +170,29 @@ class ShortlistClause:
     section_path: str = ""
 
 
+def citation_ids(numbered: list[tuple[str, int]]) -> list[str]:
+    """The id the model cites for each clause: its own number, made unique.
+
+    Takes (number, order_idx) per clause, in document order. A repeated number
+    gets a suffix - "10", "10#2" - because the id enum and the quote check both
+    look a clause up by id, and two clauses under one id would make a citation
+    ambiguous and verify a quote against the wrong text.
+
+    Real wordings repeat numbers routinely (the Star Health standard policy
+    restarts its numbering in each section). This lived inline in the scenario
+    endpoint while the eval built ids its own way without the suffix; on the
+    synthetic policy, which repeats no number, the two could not disagree, so
+    nothing showed they had drifted. One function, so they cannot.
+    """
+    seen: dict[str, int] = {}
+    ids = []
+    for number, order_idx in numbered:
+        base = number or f"c{order_idx}"
+        seen[base] = seen.get(base, 0) + 1
+        ids.append(base if seen[base] == 1 else f"{base}#{seen[base]}")
+    return ids
+
+
 @dataclass
 class Citation:
     clause_id: str

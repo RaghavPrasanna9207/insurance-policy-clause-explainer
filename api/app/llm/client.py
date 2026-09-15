@@ -55,6 +55,16 @@ log = logging.getLogger(__name__)
 # regenerated answer would look replayed.
 model_calls = 0
 
+# Prompt tokens Ollama reported for the most recent request it answered.
+#
+# Every size in this project's context budgeting is an ESTIMATE made in
+# characters (`scenario.CHARS_PER_TOKEN`), and the reservation for the system
+# prompt and answer was sized once, in M5, when that prompt was much shorter.
+# Ollama truncates an over-long prompt silently - that was Failure 10 - so an
+# estimate that has drifted would not announce itself. This is the measured
+# number, recorded so an eval can report it and checked on every call.
+last_prompt_tokens: int | None = None
+
 
 class LlmError(RuntimeError):
     """Raised when the model cannot produce usable output after retries."""
@@ -183,7 +193,39 @@ async def _post_chat(
             },
         )
         resp.raise_for_status()
-        return resp.json()["message"]["content"]
+        data = resp.json()
+        _check_context(data.get("prompt_eval_count"), options)
+        return data["message"]["content"]
+
+
+def _check_context(prompt_tokens: int | None, options: dict[str, Any]) -> None:
+    """Warn when a prompt, or a prompt and its longest allowed answer, overflow.
+
+    Two different failures, reported as what they are. A prompt that fills the
+    window was truncated before the model read it. A prompt that fits but
+    leaves less than num_predict has lost the answer's margin: generation past
+    the window makes Ollama discard earlier context mid-answer.
+
+    The first version reported both as "may have been truncated". Measured on
+    a real policy, a 7,326-token prompt was not truncated at all - it left 866
+    tokens for an answer sized to 1,600. A warning should say what was measured.
+    """
+    global last_prompt_tokens
+    last_prompt_tokens = prompt_tokens
+    if prompt_tokens is None:
+        return
+    if prompt_tokens >= options["num_ctx"]:
+        log.warning(
+            "prompt filled the %d-token context window - it was probably truncated",
+            options["num_ctx"],
+        )
+    elif prompt_tokens + options["num_predict"] > options["num_ctx"]:
+        log.warning(
+            "prompt used %d of %d context tokens, leaving %d for an answer capped at "
+            "num_predict=%d",
+            prompt_tokens, options["num_ctx"], options["num_ctx"] - prompt_tokens,
+            options["num_predict"],
+        )
 
 
 async def health() -> dict[str, Any]:

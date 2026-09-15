@@ -23,7 +23,7 @@ Detection integrity asks something different: of the quotations the model *inven
 
 **The number to quote is about 83–85%, not 0.950.** The 40 main cases have been used for many keep-or-revert decisions, and the reasoning prompt contains one of them as its example, so a score on them measures fit as much as skill. The two held-out batches were written separately; the gap between them and the main set is the estimate of how much of 0.950 is fit. Both batches were written by the same author as the fixes, so they are not fully independent. Details in [`docs/LEARNING-LOG.md`](docs/LEARNING-LOG.md#m14--a-score-on-questions-it-has-never-seen).
 
-**Every number above describes one synthetic document.** How the pipeline does on a real insurer's policy wording — longer, typeset differently, and possibly larger than the scenario simulator's context budget — has not been measured yet. That is the next milestone.
+**Every number above describes one synthetic document, and the system is not yet sound on real ones.** Run on three real insurer wordings (M15), the pipeline read a two-column page with its columns interleaved, turned page headers and a phone number into clauses, and — because real policies are 6–12× the synthetic one — showed the scenario simulator only 6–27 clauses per policy and no coverage clause at all. Ten questions about a real policy got 9 of 10 verdicts right, mostly for the wrong reasons. No accuracy figure for real policies should be quoted yet; the measurements and what they point to are in [`docs/LEARNING-LOG.md`](docs/LEARNING-LOG.md#m15--first-contact-with-real-policies).
 
 ---
 
@@ -71,7 +71,7 @@ Underpinning both: every clause stores character offsets into the document's ext
 
 ### Choices that look like omissions
 
-- **No vector DB, no embeddings, no BM25.** The 39-clause test policy is ~3,100 tokens, and the model runs with an 8,192-token context (qwen2.5 supports 32k; 16k was measured to exhaust this laptop's memory). Every clause fits in one prompt, and showing the model every clause that could matter beats retrieval on recall, at zero infrastructure cost. Whether a real insurer's wording fits the same way is the open question for the next milestone.
+- **No vector DB, no embeddings, no BM25.** The 39-clause test policy is ~3,100 tokens, and the model runs with an 8,192-token context (qwen2.5 supports 32k; 16k was measured to exhaust this laptop's memory). Every clause fits in one prompt, and showing the model every clause that could matter beats retrieval on recall, at zero infrastructure cost. **Measured in M15, a real insurer's wording does not fit**: the synthetic policy's clauses need ~4,100 tokens, real ones 22,000–43,000.
 - **No task queue.** `BackgroundTasks` + polling. Single-user local app.
 - **No cloud API.** Runs entirely on a local Ollama model. Your policy document never leaves your machine.
 
@@ -158,7 +158,8 @@ No real insurer policy wordings are committed to this repository.
 | M12 | Answers checked against the arithmetic; majority of three | ✅ |
 | M13 | Last main-set failures, quote trimming, answer-key corrections | ✅ |
 | M14 | Held-out scenario batches | ✅ 0.81–0.85 held-out |
-| M15 | Real IRDAI policy wordings — measure what breaks before fixing | next |
+| M15 | Real IRDAI policy wordings — measure what breaks before fixing | ⚠️ measured: reading order, segmentation and context budget fail on real wordings |
+| M16 | Fix ingestion and the shortlist for real wordings | next |
 
 Evaluation is the point, not an afterthought: model and prompt changes in this project are justified by measured numbers on the golden set, never by impressions. See [Results](#results) and [`evals/REPORT.md`](evals/REPORT.md).
 

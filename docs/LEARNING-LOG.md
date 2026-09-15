@@ -5056,3 +5056,527 @@ The general shape is worth keeping: a component metric is a diagnostic. It can
 tell you where to look and whether a stage improved. It cannot tell you whether
 the system did.
 </details>
+
+---
+
+# M15 — First contact with real policies
+
+## The starting position
+
+This system reads an Indian health insurance policy PDF in five stages: ingest
+the text with character offsets, segment it into clauses by rules, classify each
+clause with a local 7B model, score each clause's risk by arithmetic, and answer
+what-if questions ("I had knee surgery 8 months in") with cited clauses.
+
+At the end of M14, every number in this project described **one document**: a
+synthetic 39-clause policy, 5 pages, about 12,000 characters or 3,400 tokens,
+written for this repository by the same author as the code. On it, scenario
+verdicts scored 0.950 on the tuned cases and 0.81–0.85 on held-out ones.
+
+The design rests on a premise about size. There is deliberately no retrieval
+(Concept 15): instead of searching for relevant clauses, the scenario step is
+shown every clause, because a whole policy was believed to fit in the model's
+context. The clause budget is derived in `api/app/config.py`:
+
+```python
+num_ctx: int = 8_192
+scenario_reserved_tokens: int = 2_500   # system prompt, facts and the answer
+
+@property
+def scenario_token_budget(self) -> int:
+    return max(self.num_ctx - self.scenario_reserved_tokens, 1_000)   # 5,692
+```
+
+and clause text is converted to tokens by an estimate,
+`CHARS_PER_TOKEN = 3.5` in `api/app/pipeline/scenario.py`. None of this had
+ever met a real insurer's policy wording.
+
+**The rule for this milestone: measure, do not fix.** A fix chosen before the
+measurement is a guess about which problem is the biggest, and every earlier
+milestone that guessed paid for it.
+
+---
+
+## Getting real documents without committing them
+
+A policy wording belongs to the insurer that wrote it, so no PDF is committed.
+`evals/real/sources.json` records where each is published and a SHA-256
+fingerprint of the exact bytes measured, and `evals/real/fetch_policies.py`
+downloads them into `samples/real/`, which is git-ignored.
+
+Three wordings, chosen to differ:
+
+| Policy | Why |
+|---|---|
+| Star Health, **Arogya Sanjeevani** | IRDAI's standard product: every insurer must sell it with the same terms |
+| Niva Bupa, **ReAssure 2.0** | a retail product from a standalone health insurer |
+| HDFC ERGO, **my: Optima Secure** | a large retail product from a general insurer; the longest |
+
+The fingerprint exists because insurers revise wordings and re-upload them to
+the same address. Without it, a later run would silently measure a different
+document and compare the numbers as if nothing had changed. A mismatch stops
+the run:
+
+```python
+# evals/real/fetch_policies.py
+if digest != p["sha256"]:
+    changed = target.with_suffix(".changed.pdf")
+    changed.write_bytes(response.content)
+    ...
+    failed.append(p["id"])
+```
+
+That branch was tested by corrupting one fingerprint: the run exited 1, named
+the policy, and kept the new bytes aside for inspection.
+
+---
+
+## Concept 37: a probe is not an eval
+
+An **eval** compares answers against a key and produces a score. There is no
+key for these documents yet, and writing one now would be premature: a key
+names clauses by the ids the segmenter gives them, and if the segmentation is
+wrong, the key names artefacts.
+
+A **probe** asks a different question: *do the assumptions the design rests on
+hold for this input?* It needs no labels, only the ability to count.
+`evals/real/probe_real.py` asks, for each document:
+
+- does the segmenter find clause boundaries, or cut blindly at its size cap?
+- is a clause's number still a unique identifier?
+- how much of the policy fits in the scenario step's budget, and what is dropped?
+
+Probe first, eval second. It is the difference between checking a thermometer
+reads 100 in boiling water and using it to diagnose a fever.
+
+---
+
+## The size of a real policy
+
+| Policy | Pages | Characters | ≈ Tokens |
+|---|---:|---:|---:|
+| Synthetic golden policy | 5 | 12,022 | 3,400 |
+| Star Health, Arogya Sanjeevani | 26 | 75,870 | 21,700 |
+| Niva Bupa, ReAssure 2.0 | 24 | 79,552 | 22,700 |
+| HDFC ERGO, Optima Secure | 53 | 150,538 | 43,000 |
+
+Six to twelve times the synthetic document. Every page of all three had
+extractable text — none was a scanned image.
+
+---
+
+## What the segmenter did to them
+
+The segmenter (stage 2, no model) runs in seconds, so this was measured before
+anything else:
+
+| | Synthetic | Star | Niva Bupa | HDFC ERGO |
+|---|---:|---:|---:|---:|
+| Segments | 40 | 112 | 95 | 76 |
+| Cut at the 3,000-character cap, not at a boundary | 0 | 5 | 7 | **44** |
+| Median segment length (chars) | 286 | 178 | 503 | **2,930** |
+| Segments sharing a number with another | 0 | **58** | 19 | 42 |
+| Offset invariant `raw_text[start:end] == text` holds | yes | yes | yes | yes |
+
+Listing Star Health's segments one per line showed three defects, none of which
+the synthetic policy could have exposed.
+
+### Failure 47: page furniture became clauses
+
+Every Star page carries a running header, `7 / 25  Arogya Sanjeevani Policy,
+Star Health And Allied Insurance Co Ltd. UIN : ...`, and each one was
+segmented as a clause numbered with its page number: **26 of Star's 112
+segments are page headers.**
+
+How much of the number-sharing they explain took two wrong guesses to settle.
+The first guess was section numbering restarting; the second, after seeing the
+headers, was that headers were most of it. Counting found 19 of the 58
+segments sharing a number are headers; the other 39 are restarted numbering
+and list items. Both guesses were partly true and neither was the answer.
+
+The most striking case is a phone number. The policy prints a toll-free number
+`1800 425 2255.` that wraps, so a line begins `2255. Senior Citizens may call
+at 044-40020888`. The segmenter's numbering rule accepts a dotted number
+followed by a capital letter as a strong clause boundary — the test designed to
+tell "4.2 Room Rent" from "1.5 lakhs" — and this line passes it. After
+analysis and scoring, **clause "2255" ranked first by risk on the whole
+policy**, at 82.2.
+
+HDFC ERGO shows the same family in a table of sums insured: rows beginning
+`75 Lakhs` and `100 & 200 Lakhs` became clauses numbered `75` and `100`.
+
+### Failure 48: a defensive sort that interleaved two columns
+
+Star's wording is set in two columns. Its segment `13#2` reads:
+
+> 13. Treatments received in health hydros, *deliveries and caesarean sections*
+> nature cure clinics, spas or similar establishments...
+
+The italic words belong to the maternity exclusion in the other column. The
+cause is one line in `api/app/pipeline/ingest.py`:
+
+```python
+blocks = [b for b in page.get_text("dict")["blocks"] if b.get("lines")]
+# Sort top-to-bottom, then left-to-right. PyMuPDF usually returns
+# blocks in reading order already, but real policy PDFs with tables
+# and sidebars do not always cooperate.
+blocks.sort(key=lambda b: (round(b["bbox"][1], 1), round(b["bbox"][0], 1)))
+```
+
+Sorting every block on the page by its vertical position puts a line from the
+left column next to the line level with it in the right column. PyMuPDF's own
+order was already correct: extracting the same PDF with a plain `get_text()`
+read cleanly, column by column. The sort was written as a precaution against
+tables and sidebars that no test document contained, and on the first real
+two-column document it destroyed the reading order.
+
+**The offset invariant still held, and that is the lesson.** Every clause is an
+exact slice of `raw_text` — but `raw_text` itself was assembled in the wrong
+order. An invariant proves consistency with its source. It cannot prove the
+source is right. A perfect slice of scrambled text is still scrambled.
+
+### List items cut away from the heading that gives them meaning
+
+Star's specified-disease waiting period is a heading, `24 Months waiting
+period`, followed by a numbered list of twenty conditions. Each list item became
+its own clause: `12. Hernia of all types` is a 24-character segment, and
+`24 Months waiting period` is a separate one — placed after the list, because
+of the sort above. A question about hernia surgery can find the word "hernia"
+and no waiting period attached to it.
+
+### HDFC ERGO: segmented by the size cap
+
+44 of HDFC's 76 segments were cut at the 3,000-character cap. The segmenter's
+own docstring describes the cap as "capping the damage done by a document with
+no detectable structure at all", and that is what happened: most of the
+53-page policy was divided into equal-sized pieces rather than clauses.
+
+---
+
+## Concept 38: the no-retrieval premise, measured
+
+All 283 real segments were then analysed by the model (1,738 seconds; results
+cached) and scored, and the scenario shortlist was applied exactly as a real
+question would apply it. `shortlist()` sorts clauses by impact score and keeps
+them until the token budget is spent:
+
+| | Synthetic | Star | Niva Bupa | HDFC ERGO |
+|---|---:|---:|---:|---:|
+| Clause text, ≈ tokens | 4,128 | 22,757 | 24,306 | 43,273 |
+| Clauses kept (budget 5,692) | 40 of 40 | 27 of 112 | 18 of 95 | **6 of 76** |
+| **Coverage clauses kept** | 6 of 6 | **0 of 17** | **0 of 16** | **0 of 26** |
+
+On every real policy, **every coverage clause was dropped**.
+
+The reason is in what impact measures: how much a clause can cost the reader.
+On these policies no clause that *grants* cover scored high enough to survive
+the cut. Ranking by impact and cutting at a budget is top-k retrieval with a
+ranking that prefers reasons to refuse. The reasoning step would see why a claim might
+be denied and never the clause saying the treatment is covered.
+
+Concept 15 rejected retrieval because "any k below all of them can drop the
+single clause that decides the case". On real documents the system does exactly
+that — silently. The only trace is a log line at `INFO` level:
+
+```python
+if len(kept) < len(clauses):
+    log.info("shortlist dropped %d clause(s) for budget", len(clauses) - len(kept))
+```
+
+The design was right about the danger. It was wrong about the size, because the
+size was measured on a document one-sixth as long as the smallest real one.
+
+---
+
+## The prompt, measured in tokens
+
+Every size above is an estimate. Ollama reports the real one:
+`prompt_eval_count`, the number of prompt tokens it evaluated. Nothing in the
+codebase had read it. `evals/real/measure_prompt.py` sends the same scenario
+prompt for each policy **twice**, because Ollama can reuse the start of a
+prompt it has just processed, and if the count then covered only the new part a
+single reading would understate the prompt. Both readings matched in every
+case, so the count is trustworthy.
+
+| | Prompt tokens | Left for the answer, of a 1,600 ceiling |
+|---|---:|---:|
+| Synthetic | 5,270 | 2,922 |
+| Star Health | 7,326 | **866** |
+| Niva Bupa | 7,105 | **1,087** |
+| HDFC ERGO | 7,344 | **848** |
+
+The reservation of 2,500 tokens has to hold everything that is not clause text
+— the system prompt, the facts, the per-clause headers and computed lines — and
+the answer, whose ceiling is `num_predict = 1,600`.
+
+The synthetic policy's prompt is 22,711 characters and measured 5,270 tokens:
+**4.3 characters per token**, averaged over the whole prompt, not the 3.5 the
+budget assumes. At that rate its clause text (11,711 characters) is about 2,700
+tokens, so everything else in the prompt is about 2,550 tokens — already more
+than the whole 2,500 reservation, before any room for the answer. The system
+prompt alone is 8,054 characters, about 1,900 tokens, and has grown a great
+deal since the reservation was set in M5.
+
+Two things hid this. The 3.5 estimate over-counts clause text, which errs
+safe and quietly absorbed part of the shortfall. And the synthetic clauses
+used only 3,346 of the 5,692-token budget, leaving slack. Real policies fill the
+budget, and the answer's room falls to 848–1,087 tokens.
+
+Nothing was truncated — every prompt is below 8,192 — and M5 estimated the
+largest legitimate answer at about 500 tokens, so these answers still fit. What
+is gone is the margin the ceiling exists to provide. This is Failure 12's
+lesson again: the reservation and the things it must hold are numbers that
+must agree, set independently.
+
+The client now checks the reported count on every call:
+
+```python
+# api/app/llm/client.py, _check_context()
+if prompt_tokens >= options["num_ctx"]:
+    log.warning("prompt filled the %d-token context window - it was probably truncated", ...)
+elif prompt_tokens + options["num_predict"] > options["num_ctx"]:
+    log.warning("prompt used %d of %d context tokens, leaving %d for an answer capped at num_predict=%d", ...)
+```
+
+### Failure 49: a warning that claimed more than it measured
+
+The first version had one branch, and its message said the prompt "may have been
+truncated". On its first real run it fired for a 7,326-token prompt in an
+8,192-token window — which cannot have been truncated. It had merged two
+different conditions into the more alarming one. A warning is a claim; it should
+say what was measured and nothing more, the same point Failure 38 made about
+computed lines.
+
+---
+
+## Failure 50: the eval and the product gave clauses different ids
+
+The scenario step's citations are locked by an `enum` to clause ids, and each
+id is the clause's own number. Seeing "10" shared by four Star segments, the
+first conclusion was that a citation of clause 10 had become ambiguous in the
+product.
+
+That was wrong, and reading the product's code showed it. The scenario endpoint
+(`api/app/routers/scenarios.py`) already made repeated numbers unique — `10`,
+`10#2`, `10#3`. It was the **eval's** copy of that logic
+(`build_clauses()` in `evals/run_scenario_eval.py`) that did not:
+
+```python
+clause_id=seg.number or f"c{seg.order_idx}",     # the eval, before
+```
+
+The eval's own quote re-check then looked clauses up in a dict keyed by id, so a
+repeated number silently kept only the last clause's text. On the synthetic
+policy, which repeats no number, the two constructions could not disagree, so
+nothing had ever shown they were two constructions. The logic now lives once:
+
+```python
+# api/app/pipeline/scenario.py
+def citation_ids(numbered: list[tuple[str, int]]) -> list[str]:
+    seen: dict[str, int] = {}
+    ids = []
+    for number, order_idx in numbered:
+        base = number or f"c{order_idx}"
+        seen[base] = seen.get(base, 0) + 1
+        ids.append(base if seen[base] == 1 else f"{base}#{seen[base]}")
+    return ids
+```
+
+and both the endpoint and the eval call it.
+
+> **The lesson:** an eval that rebuilds part of the product measures its
+> rebuild. Where the two must agree, share the code rather than keep two copies
+> in step.
+
+**A smaller failure while making that change.** The new function was inserted
+after what looked like the last field of the `ShortlistClause` dataclass, having
+read the file only that far. One more field followed. It ended up after the
+function's `return`, where it is still valid Python — unreachable — so nothing
+complained until 24 tests failed with `'ShortlistClause' object has no attribute
+'section_path'`. Read to the end of the structure you are editing.
+
+---
+
+## Two smaller measurements
+
+- **Analysis speed.** 6.0–6.3 seconds per clause on real wordings (112 clauses
+  in 689 s). Older notes in this log and in `app/llm/cache.py` say a 200-clause
+  policy takes 2–5 minutes; with one clause per call and one request at a time
+  (M9), it is about 20 minutes. HDFC's 76 segments would take about 8 minutes in
+  the app.
+- **A truncated analysis.** One real clause's analysis ran past the 1,600-token
+  ceiling mid-JSON. The M5 retry — double the ceiling rather than repeat an
+  identical request — recovered it, as designed.
+
+---
+
+## Ten questions about a real policy, and a score that could not see its reasons
+
+With the damage measured, the question is what it does to answers.
+`evals/real/scenarios-star-arogya-sanjeevani.json` holds ten questions about the
+Star Health policy, written in plain words and with every expected verdict
+fixed from the policy's wording before any run: a hernia fourteen months in, a
+hernia after the wait, an amateur's trekking injury, a caesarean, dengue in the
+first month, a cataract bill over the limit, a room over the rent cap, treatment
+in Dubai, teeth whitening, and gallstones with no timing given.
+
+Two things about this policy shape the answer key. It applies a 5% co-payment to
+**every** claim, so under this project's convention that a claim paid less than
+in full is `conditional`, no payable claim here is ever `covered`. And
+`must_cite` was left empty in every case: citation ids come from the
+segmentation measured above, and a key naming `13#2` would name an artefact.
+
+`run_scenario_eval.py` gained `--policy` and `--cases` for this, and refuses
+`--policy` without `--cases`, because the synthetic cases' clause numbers mean
+nothing in another document.
+
+**Majority of three samples: 9 of 10 verdicts correct**, nine unanimous.
+Detection integrity 1.000 in every sample: 11–14 quotations per sample failed
+verification, and every one was flagged as unverified rather than shown as
+evidence. The guarantee held on real input.
+
+### Failure 51: nine right answers, mostly for wrong reasons
+
+A verdict score is not an explanation, so the first sample's stored answers were
+replayed — zero model calls — and read case by case:
+
+| Case | Verdict | What the answer rested on |
+|---|---|---|
+| hernia at 14 months | ✓ not_covered | the 36-month **pre-existing disease** wait. The deciding clause is the 24-month specified-disease list. |
+| dengue in the first month | ✓ not_covered | the 36-month pre-existing wait again. The deciding clause is the 30-day initial wait. |
+| treatment in Dubai | ✓ not_covered | "pneumonia is a pre-existing condition". The overseas exclusion was not in the shortlist. |
+| teeth whitening | ✓ not_covered | a fragment of a waiting-period definition, not the cosmetic exclusion |
+| trekking, cataract, hernia after the wait | ✓ conditional | the 5% co-payment — true, but the adventure-sports exclusion and the cataract limit were never seen |
+| room over the cap | ✓ conditional | the co-payment and a room cap of 6,000; the policy caps it at 5,000 (Failure 52) |
+| caesarean | ✗ conditional | the maternity exclusion was dropped by the shortlist, and its words "caesarean sections" had been spliced into a different clause (Failure 48) |
+| gallstones, no timing | ✓ insufficient_information (2 of 3) | the replayed sample said conditional, on the co-payment |
+
+Four refusals landed on the right verdict through the wrong clause. Four
+payable claims landed on `conditional` through the one clause — the universal
+co-payment — that happens to make every payable claim on this policy
+conditional. On this document, a system that answered "conditional, because of
+the co-payment" to everything payable and "not covered, because of the
+pre-existing wait" to every refusal would score about the same.
+
+This is the M11 lesson (Failure 31: every check did its job, on a fact that was
+wrong) at the level of the whole answer. A verdict-only score measures whether
+the last word is right. It cannot see whether the reason is, and on a document
+whose structure collapses the verdicts into two likely answers, the last word
+carries very little information. **9 of 10 here is not evidence that the system
+works on real policies.** It is a demonstration of why `must_cite` exists — and
+it cannot be added until the segmentation gives clauses stable, meaningful ids.
+
+The replay also showed where the failed quotations come from. The model quotes
+the policy's real sentences, in their real order; the stored clause text is in
+the interleaved order, so the sentence is not a contiguous substring of it. One
+quotation was of a computed line — "room rent of 8,000 rupees per day EXCEED
+that" — which is the pipeline's words, not the policy's (the same leak as
+Failure 32). And one citation passed verification while being irrelevant: the
+"clause 2255" segment happens to contain the fraud condition, whose text was
+quoted, correctly, as the reason a hernia was refused. A verified quote proves
+the words are in the clause. It never proved the clause is the reason.
+
+### Failure 52: the arithmetic was right about a cap the policy does not have
+
+The room-over-cap answer's "6,000" did not come from the model. It came from the
+pipeline's own computed line, which the model then quoted:
+
+```python
+# api/app/pipeline/reduction.py, _room_cap_check()
+limit = sum_insured * percent // 100
+if charged > limit:
+    return ReductionCheck(..., f"{percent}% of {_human_rupees(sum_insured)} is "
+                               f"{_human_rupees(limit)} per day; {label} of "
+                               f"{_human_rupees(charged)} per day EXCEED that, ...")
+```
+
+The synthetic policy caps room rent at a plain percentage, so a percentage is
+all the analysis schema extracts (`cap_percent_of_sum_insured`). Star's wording
+is "up to 2% of the Sum Insured subject to maximum of Rs.5000/-, per day" — the
+lower of two limits, and the code models one. For a 3-lakh policy it stated a
+6,000-rupee cap as calculated fact. Here the verdict survived, because 8,000
+exceeds both. A 5,500-rupee room would have been declared within the cap — by
+the part of the system that exists precisely so the model is never trusted with
+arithmetic.
+
+Deterministic code is only as correct as its model of the input, and that model
+was built from one document. Moving arithmetic out of the model (M7, M8, M10)
+made it reproducible; it did not make it complete.
+
+---
+
+## What M16 should fix, and in what order
+
+Ordered by what everything downstream depends on:
+
+1. **Reading order** (`ingest.py`, the block sort). Every later stage reads the
+   spliced text.
+2. **Page furniture and number-like prose** — running headers and footers, a
+   phone number, table amounts — must not become clause boundaries.
+3. **List items belong to their heading.**
+4. **The shortlist** must not remove coverage wholesale, and the reservation
+   must be derived from the measured system prompt and `num_predict` rather than
+   set beside them.
+5. **Caps with an absolute maximum** ("2% of sum insured subject to Rs.5,000")
+   in the analysis schema and the room-cap arithmetic.
+
+Only after those: an answer key with `must_cite` for real policies, and the
+hosted-model comparison — which would otherwise be comparing models on
+scrambled input.
+
+Deliberately not done here: any of those fixes. Each is a design decision with
+alternatives, and making them from a milestone whose purpose was measurement
+would have been choosing before seeing.
+
+---
+
+## Where this leaves the numbers
+
+The M14 numbers still describe the synthetic policy accurately; its 40 main
+cases replay byte-identically after this milestone's changes. They say nothing
+about real ones.
+
+On real wordings, what is measured is structural: reading order broken on a
+two-column document, page furniture as clauses, a scenario step that sees 6–27
+clauses and no coverage clause, and an answer margin of 848–1,087 tokens against
+1,600. The ten-question probe scored 9 of 10 verdicts and mostly for the wrong
+reasons. **No accuracy figure for real policies should be quoted from this
+milestone** — only that the system is not yet sound on them, and why.
+
+---
+
+## Check it yourself
+
+```bash
+python evals/real/fetch_policies.py                    # three wordings, fingerprint-checked
+python evals/real/probe_real.py --structure-only       # seconds; the segmentation table
+python evals/real/probe_real.py                        # adds analysis and the shortlist table
+python evals/real/measure_prompt.py                    # real prompt tokens, with the GPU otherwise idle
+python evals/run_scenario_eval.py --policy samples/real/star-arogya-sanjeevani.pdf \
+    --cases evals/real/scenarios-star-arogya-sanjeevani.json --repeats 3 --no-report
+```
+
+**Question to sit with:** the offset invariant — every clause is an exact slice
+of the extracted text — held on all three real policies, while one of them had
+its two columns interleaved line by line. Before opening the answer: what would
+a check need to compare against to catch that, and why can no check that only
+looks at `raw_text` ever do it?
+
+<details>
+<summary>Answer</summary>
+
+It needs a second, independent reading of the same page. The invariant compares
+each clause with `raw_text`, and `raw_text` was built by the same code that
+scrambled it, so the two agree perfectly while both are wrong. Any check whose
+only reference is the pipeline's own output inherits the pipeline's mistakes.
+
+A check that could catch it compares against something produced differently —
+PyMuPDF's native block order, a text layer extracted by another library, or a
+handful of sentences a person copied from the PDF by hand and asserted to appear
+contiguously in `raw_text`. The last is the cheapest and the strongest: a
+sentence that spans two lines of one column cannot appear contiguously if the
+columns were interleaved.
+
+It is the same shape as detection integrity (M6): a guarantee checked only
+against the system's own record is a self-report.
+</details>

@@ -10,7 +10,7 @@ from sqlmodel import Session
 from app.db import get_session
 from app.models import Document, ScenarioRun
 from app.pipeline.run import clause_rows
-from app.pipeline.scenario import ShortlistClause, run_scenario
+from app.pipeline.scenario import ShortlistClause, citation_ids, run_scenario
 from app.schemas import CitationOut, ScenarioRequest, ScenarioResponse
 from app.taxonomy import DocStatus
 
@@ -48,15 +48,12 @@ async def create_scenario(
     # string. `ref` carries the database id so the answer can be mapped back to
     # a real row for the page number and heading.
     #
-    # Numbers are made unique defensively: a malformed document could repeat
-    # one, and a duplicate id would make a citation ambiguous.
-    seen: dict[str, int] = {}
+    # Numbers are made unique: real wordings repeat them, and a duplicate id
+    # would make a citation ambiguous.
+    ids = citation_ids([(clause.number, clause.order_idx) for clause, _ in rows])
     shortlist_clauses: list[ShortlistClause] = []
     meta: dict[str, tuple] = {}
-    for clause, analysis in rows:
-        base = clause.number or f"c{clause.order_idx}"
-        seen[base] = seen.get(base, 0) + 1
-        citation_id = base if seen[base] == 1 else f"{base}#{seen[base]}"
+    for (clause, analysis), citation_id in zip(rows, ids):
         shortlist_clauses.append(
             ShortlistClause(
                 clause_id=citation_id,

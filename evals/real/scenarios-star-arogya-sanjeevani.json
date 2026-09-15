@@ -1,0 +1,93 @@
+{
+  "_why": [
+    "Scenarios for a REAL policy wording: Star Health's Arogya Sanjeevani, IRDAI's standard product.",
+    "Fetch the PDF with evals/real/fetch_policies.py; it is never committed.",
+    "",
+    "Written from the policy's own wording, and every expected verdict fixed BEFORE any",
+    "run of these cases. Same author as the system, so not fully independent.",
+    "",
+    "Two things differ from the synthetic sets:",
+    "",
+    "1. Every payable claim on this policy is `conditional`, never `covered`: a 5%",
+    "   co-payment applies to each and every claim, and this project's convention is",
+    "   that a claim paid less than in full is conditional.",
+    "",
+    "2. must_cite is empty in every case, deliberately. Citation ids come from the",
+    "   segmenter, and on this document the segmenter reads the two text columns",
+    "   interleaved and turns every running page header into a clause. Ids chosen",
+    "   against that segmentation would name artefacts and change the moment it is",
+    "   fixed. These cases score verdicts only until segmentation is sound."
+  ],
+  "cases": [
+    {
+      "id": "star-hernia-too-soon",
+      "scenario": "I need surgery for an inguinal hernia that was found last month. I bought this policy 14 months ago and it is my first health insurance.",
+      "expected_verdict": "not_covered",
+      "must_cite": [],
+      "why": "Hernia of all types is on the 24-month specified disease waiting period list. Fourteen months have not served it, there was no prior cover to port, and nothing suggests an accident."
+    },
+    {
+      "id": "star-hernia-after-wait",
+      "scenario": "I need surgery for a hernia diagnosed this year. I have held this policy for three years without a break and will be in hospital for two days.",
+      "expected_verdict": "conditional",
+      "must_cite": [],
+      "why": "The 24-month specified disease waiting period is served, so hospitalisation is payable - but every claim is subject to the 5% co-payment, so it is paid less than in full."
+    },
+    {
+      "id": "star-weekend-trek",
+      "scenario": "I broke my leg in a fall on a weekend trek in the hills and was admitted for three days. I am a software engineer, not a professional climber. I have held the policy four years.",
+      "expected_verdict": "conditional",
+      "must_cite": [],
+      "why": "The hazardous or adventure sports exclusion applies only to participation as a professional, so an amateur's injury is not excluded. Payable, less the 5% co-payment."
+    },
+    {
+      "id": "star-caesarean",
+      "scenario": "I had a caesarean delivery last week and was in hospital for four days. I have held the policy for five years.",
+      "expected_verdict": "not_covered",
+      "must_cite": [],
+      "why": "The maternity exclusion covers expenses traceable to childbirth, naming caesarean sections. There is no maternity waiting period that could have been served."
+    },
+    {
+      "id": "star-dengue-first-month",
+      "scenario": "I was admitted to hospital with dengue fever 20 days after buying this policy. I had no health insurance before it.",
+      "expected_verdict": "not_covered",
+      "must_cite": [],
+      "why": "Treatment of any illness within 30 days of the first policy commencement is excluded except for accidents, and there was no earlier continuous cover to waive it."
+    },
+    {
+      "id": "star-cataract-cost",
+      "scenario": "I had cataract surgery on one eye and the bill was 70,000 rupees. My sum insured is 5 lakh and I have held the policy for three years.",
+      "expected_verdict": "conditional",
+      "must_cite": [],
+      "why": "The 24-month cataract waiting period is served, but cataract treatment is limited to 25% of sum insured or 40,000 rupees per eye, whichever is lower - 40,000 here - before the 5% co-payment."
+    },
+    {
+      "id": "star-room-over-cap",
+      "scenario": "I was admitted for pneumonia for four nights in a single room costing 8,000 rupees a night. My sum insured is 3 lakh and I have held the policy five years.",
+      "expected_verdict": "conditional",
+      "must_cite": [],
+      "why": "Room rent is covered up to 2% of sum insured subject to 5,000 rupees a day, so 5,000 here. A room above the limit also reduces other hospital expenses proportionately, and the 5% co-payment applies."
+    },
+    {
+      "id": "star-treatment-abroad",
+      "scenario": "I was hospitalised with pneumonia while on holiday in Dubai. I have held the policy for two years.",
+      "expected_verdict": "not_covered",
+      "must_cite": [],
+      "why": "Treatment taken outside the geographical limits of India is excluded, and all treatment must be taken in India."
+    },
+    {
+      "id": "star-teeth-whitening",
+      "scenario": "Will the policy pay for cosmetic teeth whitening? I have held it for six years.",
+      "expected_verdict": "not_covered",
+      "must_cite": [],
+      "why": "Treatment to change appearance is excluded unless it is reconstruction after an accident, burn or cancer, and dental cover is only for treatment necessitated by disease or injury."
+    },
+    {
+      "id": "star-gallstones-no-timing",
+      "scenario": "I need my gallbladder removed because of gallstones. How much of it will the policy pay?",
+      "expected_verdict": "insufficient_information",
+      "must_cite": [],
+      "why": "Calculi of the gall bladder carry a 24-month specified disease waiting period, and the person has not said how long they have held the policy, so whether it is served cannot be decided."
+    }
+  ]
+}

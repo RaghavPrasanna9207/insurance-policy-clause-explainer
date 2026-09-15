@@ -188,6 +188,20 @@ Held-out scenario batches, and what they said: about 0.83-0.85 on unseen questio
 - **Failure 45: blaming the last change for a drop that was sampling** - check a change can reach the cases that moved before attributing the movement to it.
 - **Failure 46: a report that misdescribed its own run** - a commit stamp that could not say the tree was dirty, and a generated sentence describing a cache key M10 had removed. Plus a check of the fix that ran the old code: setting up a clean tree had removed the change under test.
 
+### M15 - First contact with real policies
+Three real insurer wordings, measured before anything was fixed. **If you read one entry about why a system needs real input, read Concept 38.**
+
+- **Getting real documents without committing them** - addresses and SHA-256 fingerprints in the repo, the PDFs fetched by script, a changed wording treated as an error.
+- **Concept 37: a probe is not an eval** - measuring whether the design's assumptions hold, before writing an answer key that would name artefacts.
+- **Failure 47: page furniture became clauses** - running headers, a wrapped toll-free number ranked the riskiest clause in the policy, table amounts as clause numbers.
+- **Failure 48: a defensive sort that interleaved two columns** - and why the offset invariant still held: a perfect slice of scrambled text is still scrambled.
+- **Concept 38: the no-retrieval premise, measured** - real policies are 6-12x the synthetic one; the shortlist kept 6-27 clauses and dropped every coverage clause on all three, becoming top-k retrieval biased toward refusal.
+- **The prompt, measured in tokens** - Ollama's own count, checked twice; 4.3 characters per token, and a reservation already smaller than the prompt it was meant to hold.
+- **Failure 49: a warning that claimed more than it measured.**
+- **Failure 50: the eval and the product gave clauses different ids** - an eval that rebuilds part of the product measures its rebuild.
+- **Failure 51: nine right answers, mostly for wrong reasons** - 9 of 10 verdicts on a real policy, read case by case: refusals through the wrong clause, payable claims through the one co-payment that makes everything conditional. A verdict-only score cannot see reasons.
+- **Failure 52: the arithmetic was right about a cap the policy does not have** - "2% subject to Rs.5,000" modelled as 2%; deterministic code is only as complete as its model of the input.
+
 ---
 
 ## Related documents

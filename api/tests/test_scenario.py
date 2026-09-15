@@ -13,9 +13,22 @@ from app.pipeline.scenario import (
     ShortlistClause,
     _reasoning_schema,
     _sort_key,
+    citation_ids,
     shortlist,
 )
 from app.taxonomy import Verdict
+
+
+def test_repeated_clause_numbers_get_distinct_citation_ids():
+    """Real wordings restart numbering per section; ids must still be unique.
+
+    The id enum and the quote check both look a clause up by id. Two clauses
+    under "10" would let a quote from one be checked against the other.
+    """
+    numbered = [("10", 0), ("11", 1), ("10", 2), ("", 3), ("10", 4)]
+    ids = citation_ids(numbered)
+    assert ids == ["10", "11", "10#2", "c3", "10#3"]
+    assert len(set(ids)) == len(ids)
 
 
 def _clause(number: str, impact: float, text: str = "x" * 200) -> ShortlistClause:
