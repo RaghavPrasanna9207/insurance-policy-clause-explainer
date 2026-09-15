@@ -32,6 +32,8 @@ class FakeClause:
     copay_min_age_at_inception: int | None = None
     cap_percent_of_sum_insured: int | None = None
     icu_cap_percent_of_sum_insured: int | None = None
+    cap_max_inr_per_day: int | None = None
+    icu_cap_max_inr_per_day: int | None = None
 
 
 COPAY = FakeClause("5.3", copay_percent=20, copay_min_age_at_inception=60)
@@ -165,6 +167,36 @@ def test_icu_is_compared_against_the_icu_rate():
     # is still a breach - but by a different margin and a different clause rate.
     facts["room_is_icu"] = False
     assert evaluate([ROOM], facts, 2190)[0].status is ReductionStatus.APPLIES
+
+
+def test_a_rupee_maximum_lowers_the_cap_below_the_percentage():
+    """Regression test for M15's Failure 52: a cap the policy does not have.
+
+    A real wording caps room rent at "2% of the Sum Insured subject to maximum
+    of Rs.5000/- per day". Modelling only the percentage, the arithmetic told a
+    3-lakh policyholder their cap was 6,000 - so a 5,500 room was "within the
+    cap", decided by the part of the system that exists so the model is never
+    trusted with arithmetic. The limit is whichever of the two is lower.
+    """
+    capped = FakeClause("1", cap_percent_of_sum_insured=2, cap_max_inr_per_day=5_000,
+                        icu_cap_percent_of_sum_insured=5, icu_cap_max_inr_per_day=10_000)
+    three_lakh = {"sum_insured_value": 3, "sum_insured_unit": "lakh"}
+
+    check = evaluate([capped], three_lakh | {"room_rent_per_day_inr": 5_500}, 1460)[0]
+    assert check.status is ReductionStatus.APPLIES
+    assert "5,000" in check.detail and "6,000" in check.detail
+
+    # ICU against its own pair: 5% of 3 lakh is 15,000, the maximum 10,000.
+    icu = three_lakh | {"room_rent_per_day_inr": 12_000, "room_is_icu": True}
+    assert evaluate([capped], icu, 1460)[0].status is ReductionStatus.APPLIES
+
+    # Where the percentage is the lower limit, the percentage decides:
+    # 2% of 2 lakh is 4,000, under the 5,000 maximum.
+    two_lakh = {"sum_insured_value": 2, "sum_insured_unit": "lakh"}
+    assert evaluate([capped], two_lakh | {"room_rent_per_day_inr": 4_500}, 1460)[0].status \
+        is ReductionStatus.APPLIES
+    assert evaluate([capped], two_lakh | {"room_rent_per_day_inr": 3_900}, 1460)[0].status \
+        is ReductionStatus.DOES_NOT_APPLY
 
 
 def test_an_unstated_sum_insured_yields_unknown_not_a_pass():

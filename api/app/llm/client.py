@@ -165,8 +165,8 @@ def _decode_options() -> dict[str, Any]:
         # not leave an input unspecified - but see config.seed: this was
         # measured to fix nothing on its own.
         "seed": settings.seed,
-        # Without an explicit window Ollama applies its own 4,096 default, well
-        # under this project's 32k assumption, and truncates silently.
+        # Without an explicit window Ollama applies its own 4,096 default, and
+        # truncates anything longer silently (see _check_context).
         "num_ctx": settings.num_ctx,
         # Bounded output: an uncapped generation ran past three consecutive
         # 420s timeouts when the model began repeating itself.
@@ -198,28 +198,54 @@ async def _post_chat(
         return data["message"]["content"]
 
 
+def truncated_prompt_tokens(num_ctx: int) -> int:
+    """The token count Ollama reports for a prompt it had to truncate.
+
+    Measured in M16 on Ollama 0.34: every prompt longer than the window -
+    policy text, plain prose, a column of numbers, a real system-plus-user
+    scenario prompt, at windows of 8,192, 16,384 and 24,576 - reported exactly
+    half the window plus two. A behaviour of one runtime version, not a law,
+    which is why a test re-measures it against the live server.
+    """
+    return num_ctx // 2 + 2
+
+
 def _check_context(prompt_tokens: int | None, options: dict[str, Any]) -> None:
-    """Warn when a prompt, or a prompt and its longest allowed answer, overflow.
+    """Refuse a truncated prompt; warn when a prompt leaves the answer no margin.
 
-    Two different failures, reported as what they are. A prompt that fills the
-    window was truncated before the model read it. A prompt that fits but
-    leaves less than num_predict has lost the answer's margin: generation past
-    the window makes Ollama discard earlier context mid-answer.
+    Two different failures, reported as what they are.
 
-    The first version reported both as "may have been truncated". Measured on
-    a real policy, a 7,326-token prompt was not truncated at all - it left 866
-    tokens for an answer sized to 1,600. A warning should say what was measured.
+    TRUNCATION. The M15 version of this check assumed a truncated prompt would
+    report a count at the window's size. It does not: stepping one prompt
+    across an 8,192-token window, 33,000 characters reported 8,115 tokens and
+    34,000 reported 4,098. Ollama discards half the context on overflow, so the
+    count FALLS, and the old check read the one case it existed for as a small,
+    healthy prompt.
+
+    A ratio of characters to tokens was tried next and measured wrong both
+    ways: a truncated column of numbers reported 4.9 characters per token,
+    inside the range of intact policy text, and an intact run of long words
+    reported 7.9. The exact count is the signal that held in every case.
+
+    It raises rather than warns. A truncated scenario prompt means an answer
+    reasoned over part of the policy with nothing to say so, and retrying is
+    pointless: the same prompt truncates the same way.
+
+    MARGIN. A prompt that fits but leaves less than num_predict has lost the
+    answer's room: generation past the window makes Ollama discard context
+    mid-answer. That one is a warning - most answers are far shorter than the
+    ceiling.
     """
     global last_prompt_tokens
     last_prompt_tokens = prompt_tokens
     if prompt_tokens is None:
         return
-    if prompt_tokens >= options["num_ctx"]:
-        log.warning(
-            "prompt filled the %d-token context window - it was probably truncated",
-            options["num_ctx"],
+    if prompt_tokens == truncated_prompt_tokens(options["num_ctx"]):
+        raise LlmError(
+            f"Ollama reported {prompt_tokens} prompt tokens, half the {options['num_ctx']}-token "
+            f"context window: the prompt was longer than the window and was truncated"
         )
-    elif prompt_tokens + options["num_predict"] > options["num_ctx"]:
+    if prompt_tokens + options["num_predict"] > options["num_ctx"]:
         log.warning(
             "prompt used %d of %d context tokens, leaving %d for an answer capped at "
             "num_predict=%d",

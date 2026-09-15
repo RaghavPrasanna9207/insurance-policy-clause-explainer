@@ -9,23 +9,23 @@ The obvious architecture for "answer a question about a document" is retrieval:
 embed the clauses, embed the question, fetch the top k. This project does not,
 and the reason is arithmetic rather than taste.
 
-The synthetic golden policy has 39 clauses and is about 3,100 tokens. The
-context window is set to 8,192 (`settings.num_ctx`; qwen2.5 supports 32,768, but
-16,384 was measured to exhaust this machine's memory), leaving
-`settings.scenario_token_budget` for clause text. On that policy every clause
-that could possibly matter fits in a single prompt with room to spare. Whether
-that holds for a real insurer's wording has not yet been measured.
+A policy's clauses are shown to the model whole, and the premise that allows it
+is size. The synthetic golden policy is about 3,100 tokens. Real wordings, first
+measured in M15, are 69,000-129,000 characters - roughly 16,000-30,000 tokens at
+the 4.25 characters per token measured on policy text - and at the 8,192-token
+window of the time the scenario step saw a quarter of the smallest. The window is now 28,672
+(`settings.num_ctx`, measured in M16 as the largest that runs entirely on this
+machine's GPU), which holds IRDAI's standard Arogya Sanjeevani wording whole.
+`clause_token_budget()` derives the room for clause text from it.
 
 Given that, retrieval could only make the answer worse. Top-k means choosing a
 k, and any k below "all of them" can drop the one clause that decides the case -
 which in this domain means confidently telling someone they are covered because
-the exclusion did not make the cut. Retrieval solves a problem this document
-does not have, and introduces a failure mode it did not previously have.
+the exclusion did not make the cut.
 
-So `shortlist()` sorts by impact and takes everything that fits the budget. On the
-golden policy that is all of it. The impact ordering only starts to matter for a
-document large enough to overflow the context, and then it keeps the clauses
-most likely to cost the reader money.
+So `shortlist()` takes everything that fits. For a document too large even for
+the wider window, it gives up definitions and administrative clauses first,
+then the lowest impact, and says so in a warning.
 
 TWO CALLS, NOT ONE
 ------------------
@@ -161,6 +161,8 @@ class ShortlistClause:
     copay_min_age_at_inception: int | None = None
     cap_percent_of_sum_insured: int | None = None
     icu_cap_percent_of_sum_insured: int | None = None
+    cap_max_inr_per_day: int | None = None
+    icu_cap_max_inr_per_day: int | None = None
     # A cover window around one hospital stay, in days, and which side of the
     # stay it counts from. See app/pipeline/window.py.
     cover_window_days: int | None = None
@@ -361,37 +363,81 @@ async def extract_facts(scenario: str, *, use_cache: bool = True) -> dict[str, A
 # --- 5b: shortlist (no LLM) ----------------------------------------------
 
 
+# Prompt tokens that are neither the system prompt nor clause text: the person's
+# words, the facts, and the computed waiting-period, window and reduction lines.
+# Measured in M15: the synthetic policy's pneumonia prompt was 5,270 tokens, of
+# which about 2,700 were clause text and 1,900 system prompt, leaving ~650 with
+# the clause headers included. 1,000 leaves room for a question that produces
+# more computed lines - and an underestimate is refused as truncation, not
+# silently answered.
+QUESTION_TOKENS = 1_000
+
+# The clause types given up first when a policy is too large for the context.
+# M15 ranked by impact alone, and on three real wordings that dropped every
+# coverage clause: impact measures what a clause can cost you, and the clause
+# granting cover costs nothing. No question is answerable without the clause
+# that says what is paid for; definitions and administration rarely decide one.
+DROPPED_FIRST = frozenset({"definition", "procedural"})
+
+
+def clause_token_budget() -> int:
+    """How many tokens of clause text the reasoning prompt can hold.
+
+    Derived from everything else that must fit, not reserved beside it. The
+    reservation this replaces was a fixed 2,500 tokens, set in M5; by M15 the
+    system prompt alone had grown to about 1,900 and the answer ceiling is
+    1,600, so the reservation could no longer hold what it was reserving for.
+    Measuring the system prompt here means growing it shrinks the budget.
+    """
+    system_prompt = int(len(REASON_SYSTEM) / CHARS_PER_TOKEN)
+    return settings.num_ctx - settings.num_predict - system_prompt - QUESTION_TOKENS
+
+
 def shortlist(
     clauses: list[ShortlistClause], token_budget: int | None = None
 ) -> list[ShortlistClause]:
     """Choose which clauses the reasoning step sees.
 
-    Sorted by impact, then truncated to fit the context budget. On the golden
-    policy nothing is dropped at all - the whole document fits. The ordering
-    exists so that if a larger document does overflow, what survives
-    is the clauses most likely to cost the reader money, rather than whichever
-    ones happened to come first.
+    Everything, whenever it fits - which is the design: there is no retrieval,
+    because any selection can drop the clause that decides the case. With the
+    context window measured in M16, IRDAI's standard Arogya Sanjeevani wording
+    fits whole.
 
-    Returned in document order, because a person reading the answer expects
-    clause 3.2 to be discussed before 6.1.
+    When a policy does not fit, clauses are given up in a stated order -
+    definitions and procedural clauses first, then lowest impact - and a clause
+    too large for the remaining room is skipped rather than ending the
+    selection, so one long annexure cannot push out every short exclusion
+    ranked after it. That is logged as a warning: the answer may be missing
+    the clause that decides it.
+
+    `clauses` must arrive in document order, and the selection keeps it. Real
+    wordings restart their numbering in every section, so sorting by clause
+    number - as this once did - interleaves coverage 1, exclusion 1 and
+    condition 1.
     """
-    budget = token_budget or settings.scenario_token_budget
-    ranked = sorted(clauses, key=lambda c: c.impact_score, reverse=True)
+    budget = token_budget or clause_token_budget()
+    ranked = sorted(
+        range(len(clauses)),
+        key=lambda i: (clauses[i].clause_type in DROPPED_FIRST, -clauses[i].impact_score),
+    )
 
-    kept: list[ShortlistClause] = []
+    keep: set[int] = set()
     used = 0
-    for clause in ranked:
-        cost = int(len(clause.text) / CHARS_PER_TOKEN) + 20  # +20 for the header
-        if used + cost > budget and kept:
-            break
-        kept.append(clause)
+    for i in ranked:
+        cost = int(len(clauses[i].text) / CHARS_PER_TOKEN) + 20  # +20 for the header
+        if used + cost > budget and keep:
+            continue
+        keep.add(i)
         used += cost
 
-    if len(kept) < len(clauses):
-        log.info("shortlist dropped %d clause(s) for budget", len(clauses) - len(kept))
-
-    kept.sort(key=lambda c: _sort_key(c.number))
-    return kept
+    if len(keep) < len(clauses):
+        dropped = Counter(c.clause_type for i, c in enumerate(clauses) if i not in keep)
+        log.warning(
+            "policy too large for the context: %d of %d clauses left out (%s)",
+            len(clauses) - len(keep), len(clauses),
+            ", ".join(f"{n} {t}" for t, n in dropped.most_common()),
+        )
+    return [c for i, c in enumerate(clauses) if i in keep]
 
 
 # Standard English function words: long enough to pass the length filter,
@@ -473,14 +519,6 @@ def absent_annexures(clauses: list[ShortlistClause]) -> dict[str, list[str]]:
         if labels:
             absent[clause.clause_id] = [f"Annexure {label}" for label in labels]
     return absent
-
-
-def _sort_key(number: str) -> tuple:
-    """Sort clause numbers numerically: 3.2 before 3.10, and both before 4.1."""
-    try:
-        return (0, tuple(int(part) for part in number.split(".") if part))
-    except ValueError:
-        return (1, (0,))
 
 
 # --- 5c: reason -----------------------------------------------------------

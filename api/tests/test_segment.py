@@ -175,13 +175,103 @@ def test_prose_starting_with_a_number_is_not_a_clause():
     assert _numbering("(a) the Insured Person shall")[1] is True
     assert _numbering("Clause 4.2 shall apply")[1] is True
 
-    # Weak: prose that merely opens with a number.
-    assert _numbering("24 hours of hospitalisation is required")[1] is False
+    # Weak: a dotted quantity, believed only with styling.
     assert _numbering("1.5 lakhs and fifteen in-patient beds")[1] is False
-    assert _numbering("15 days from the date of discharge")[1] is False
 
-    # Not numbering at all.
+    # Not numbering at all. Bare integers were weak evidence until M16, when
+    # bold quantities on real wordings ("24 Months waiting period", "75 Lakhs")
+    # were found passing as clause numbers.
+    assert _numbering("24 hours of hospitalisation is required") is None
+    assert _numbering("15 days from the date of discharge") is None
+    assert _numbering("24 Months waiting period") is None
     assert _numbering("The Company shall indemnify") is None
+
+
+def _document(rows: list[tuple[str, float, float, bool]]) -> "IngestResult":
+    """An ingested page built by hand from (text, x, y, bold) rows, all at body size.
+
+    Lets a rule be tested on exactly the arrangement it exists for, without
+    typesetting a PDF - the arrangements here are copied from real wordings.
+    """
+    from app.pipeline.ingest import IngestResult, Line
+
+    lines, cursor = [], 0
+    for text, x, y, bold in rows:
+        lines.append(Line(text=text, page=0, size=11.0, bold=bold,
+                          bbox=(x, y, x + 200, y + 18),
+                          char_start=cursor, char_end=cursor + len(text)))
+        cursor += len(text) + 1
+    return IngestResult(raw_text="\n".join(r[0] for r in rows), lines=lines,
+                        page_count=1, page_starts=[0])
+
+
+# Star Health's specified-disease exclusion: bold clause numbers, each a tab
+# stop from its words, and a plain numbered list inside the clause.
+_BOLD_NUMBERED_WITH_A_LIST = [
+    ("2.", 43, 147, True),
+    ("Specified disease / procedure waiting period - Code Excl 02", 66, 147, True),
+    ("Expenses related to the following listed conditions are excluded.", 88, 180, False),
+    ("01. Benign ENT disorders", 65, 680, False),
+    ("12. Hernia of all types", 330, 262, False),
+    ("3.", 330, 597, True),
+    ("30-day waiting period - Code Excl 03", 353, 597, True),
+]
+
+
+def test_a_number_alone_on_its_row_is_read_with_the_words_beside_it():
+    """Two of three real wordings set a clause number as a separate text run.
+
+    Extraction returned "2." as its own line, which no numbering pattern
+    matched because each needs text after the number - so exclusions 1 to 9
+    of one policy vanished into a 3,000-character block.
+    """
+    segments = segment(_document(_BOLD_NUMBERED_WITH_A_LIST))
+
+    assert [s.number for s in segments] == ["2", "3"]
+    assert segments[0].heading == "2. Specified disease / procedure waiting period - Code Excl 02"
+
+
+def test_plain_list_items_stay_inside_a_bold_numbered_clause():
+    """In a document that bolds its clause numbers, a plain "12." is a list item.
+
+    Without this, "12. Hernia of all types" became a clause of its own, and a
+    question about hernia surgery could find the word "hernia" with no waiting
+    period attached to it.
+    """
+    segments = segment(_document(_BOLD_NUMBERED_WITH_A_LIST))
+
+    assert "12. Hernia of all types" in segments[0].text
+    assert "Code Excl 02" in segments[0].text
+
+
+def test_plain_numbers_still_start_clauses_when_nothing_is_bold():
+    """The bold rule is decided per document, so an unstyled policy is untouched.
+
+    With no bold anywhere, plain type says nothing, and numbering alone must
+    still find every clause - the regression the hostile PDF exists to catch.
+    """
+    unstyled = [(text, x, y, False) for text, x, y, _ in _BOLD_NUMBERED_WITH_A_LIST]
+    numbers = [s.number for s in segment(_document(unstyled))]
+
+    # "01" and "12" are clauses again: plain type means nothing here. "3" is
+    # missing for an older reason - "3. 30-day" has a digit, not a capital,
+    # after the number, which is weak evidence that only styling can confirm.
+    # A known limit on unstyled documents, not something this rule changed.
+    assert numbers == ["2", "01", "12"]
+
+
+def test_section_words_are_matched_as_whole_words():
+    """"condition" is a section word; "CONDITIONER", in a table row, is not."""
+    from app.pipeline.ingest import Line
+    from app.pipeline.segment import _looks_like_section
+
+    def unstyled(text: str) -> Line:
+        return Line(text=text, page=0, size=11.0, bold=False, bbox=(0, 0, 1, 1),
+                    char_start=0, char_end=len(text))
+
+    assert _looks_like_section(unstyled("GENERAL CONDITIONS"), 11.0)
+    assert not _looks_like_section(unstyled("AIR CONDITIONER CHARGES"), 11.0)
+    assert not _looks_like_section(unstyled("ALLIED INSURANCE COMPANY LIMITED"), 11.0)
 
 
 def test_section_headings_recognised_structurally_not_by_vocabulary():

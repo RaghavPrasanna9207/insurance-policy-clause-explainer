@@ -39,7 +39,13 @@ async def create_scenario(
         # subset of the clauses while appearing to consider all of them.
         raise HTTPException(409, "This policy has not finished being analysed")
 
-    rows = [(c, a) for c, a in clause_rows(session, doc_id) if a is not None]
+    # Sorted here, not trusted from the query, which has no ORDER BY. Two things
+    # depend on document order: which repeat of a number becomes "10#2" - the
+    # eval must assign the same ids - and the order the shortlist keeps.
+    rows = sorted(
+        ((c, a) for c, a in clause_rows(session, doc_id) if a is not None),
+        key=lambda row: row[0].order_idx,
+    )
     if not rows:
         raise HTTPException(409, "This policy has no analysed clauses")
 
@@ -70,6 +76,8 @@ async def create_scenario(
                 icu_cap_percent_of_sum_insured=(
                     analysis.icu_cap_percent_of_sum_insured
                 ),
+                cap_max_inr_per_day=analysis.cap_max_inr_per_day,
+                icu_cap_max_inr_per_day=analysis.icu_cap_max_inr_per_day,
                 cover_window_days=analysis.cover_window_days,
                 cover_window_anchor=analysis.cover_window_anchor,
                 section_path=clause.section_path,

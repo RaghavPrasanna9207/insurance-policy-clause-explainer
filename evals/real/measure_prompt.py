@@ -1,10 +1,9 @@
 """Measure the scenario reasoning prompt in real tokens, not estimated ones.
 
 The context budget is planned in characters: `CHARS_PER_TOKEN = 3.5` turns clause
-text into a token estimate, and `scenario_reserved_tokens` sets aside room for
-the system prompt, the facts and the answer. Both were sized once, in M5, on
-the synthetic policy. Ollama reports how many prompt tokens it actually
-evaluated, and truncates silently when a prompt is too long, so this asks it.
+text into a token estimate, and `clause_token_budget()` subtracts the system
+prompt, an allowance for the question and the answer's ceiling from the window.
+Ollama reports how many prompt tokens it actually evaluated, so this asks it.
 
 Each policy's prompt is sent TWICE, identically. Ollama can reuse the start of
 a prompt it has just processed, and if its reported count then covers only
@@ -34,6 +33,7 @@ from app.llm import client  # noqa: E402
 from app.llm.prompts import REASON_SYSTEM  # noqa: E402
 from app.pipeline.scenario import (  # noqa: E402
     CHARS_PER_TOKEN,
+    clause_token_budget,
     compute,
     extract_facts,
     reason,
@@ -61,7 +61,7 @@ async def measure(name: str, pdf: Path) -> None:
     print(f"\n=== {name}")
     print(f"  clauses in prompt  {len(considered)} of {len(clauses)}")
     print(f"  clause text        {clause_chars:,} chars, estimated {int(clause_chars / CHARS_PER_TOKEN):,} tokens"
-          f" (budget {settings.scenario_token_budget:,})")
+          f" (budget {clause_token_budget():,})")
     print(f"  system prompt      {len(REASON_SYSTEM):,} chars")
     print(f"  Ollama reported    {readings[0]} then {readings[1]} prompt tokens (same prompt twice)")
     if readings[0]:
@@ -73,7 +73,7 @@ async def main() -> None:
     targets = [("synthetic golden policy", GOLDEN_PDF)]
     targets += [(p["id"], pdf_path(p["id"])) for p in policies if pdf_path(p["id"]).exists()]
     print(f"num_ctx {settings.num_ctx}, num_predict {settings.num_predict}, "
-          f"reserved {settings.scenario_reserved_tokens}")
+          f"clause budget {clause_token_budget():,}")
     for name, pdf in targets:
         await measure(name, pdf)
 

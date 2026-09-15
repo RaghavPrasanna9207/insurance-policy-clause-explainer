@@ -12,8 +12,8 @@ from app.pipeline.scenario import (
     MAX_CITATIONS,
     ShortlistClause,
     _reasoning_schema,
-    _sort_key,
     citation_ids,
+    clause_token_budget,
     shortlist,
 )
 from app.taxonomy import Verdict
@@ -31,12 +31,13 @@ def test_repeated_clause_numbers_get_distinct_citation_ids():
     assert len(set(ids)) == len(ids)
 
 
-def _clause(number: str, impact: float, text: str = "x" * 200) -> ShortlistClause:
+def _clause(number: str, impact: float, text: str = "x" * 200,
+            clause_type: str = "exclusion") -> ShortlistClause:
     return ShortlistClause(
         clause_id=number,
         ref=f"doc:{number}",
         number=number,
-        clause_type="exclusion",
+        clause_type=clause_type,
         text=text,
         impact_score=impact,
     )
@@ -66,21 +67,56 @@ def test_budget_keeps_the_highest_impact_clauses():
     assert [c.number for c in kept] == ["1.2"]
 
 
-def test_shortlist_returns_document_order():
-    """Selection is by impact; presentation is by document order, because a
-    reader expects clause 3.2 discussed before 6.1."""
-    clauses = [_clause("6.1", 90.0), _clause("3.2", 50.0), _clause("4.10", 70.0)]
-    assert [c.number for c in shortlist(clauses)] == ["3.2", "4.10", "6.1"]
+def test_shortlist_keeps_document_order_when_numbering_restarts():
+    """Selection is by impact; presentation is in the order the clauses arrived.
+
+    It used to sort by clause number, which is document order only while
+    numbers never repeat. Real wordings restart them per section - coverage 1-9,
+    exclusions 1-23, conditions 1-28 in one of them - so number order put
+    "coverage 1, exclusion 1, condition 1" side by side.
+    """
+    in_document_order = [_clause("1", 20.0, clause_type="coverage"), _clause("2", 30.0),
+                         _clause("1", 90.0), _clause("c7", 10.0), _clause("1", 50.0)]
+    kept = shortlist(in_document_order, token_budget=10_000)
+    assert [c.impact_score for c in kept] == [20.0, 30.0, 90.0, 10.0, 50.0]
 
 
-def test_clause_numbers_sort_numerically_not_alphabetically():
-    """"4.10" must come after "4.2". String ordering would put it before."""
-    assert _sort_key("4.2") < _sort_key("4.10")
-    assert _sort_key("3.9") < _sort_key("4.1")
+def test_an_oversized_policy_gives_up_definitions_before_coverage():
+    """Regression test for M15's measurement: impact order dropped all coverage.
+
+    Impact measures what a clause can cost the reader, so the clause granting
+    cover ranks lowest - and on three real wordings, every coverage clause was
+    the first to go. Definitions and procedural clauses now give way first.
+    """
+    clauses = [
+        _clause("1", 5.0, clause_type="coverage"),
+        _clause("2", 60.0, clause_type="definition"),
+        _clause("3", 70.0, clause_type="procedural"),
+        _clause("4", 80.0, clause_type="exclusion"),
+    ]
+    # Room for two clauses of ~77 tokens each.
+    kept = shortlist(clauses, token_budget=160)
+    assert [c.clause_type for c in kept] == ["coverage", "exclusion"]
 
 
-def test_unnumbered_clauses_sort_last_without_crashing():
-    assert _sort_key("c7") > _sort_key("9.9")
+def test_one_clause_too_large_does_not_end_the_selection():
+    """A long annexure that does not fit must not push out every short clause after it."""
+    clauses = [_clause("1", 90.0), _clause("A", 80.0, text="x" * 3_000), _clause("2", 70.0)]
+    kept = shortlist(clauses, token_budget=160)
+    assert [c.number for c in kept] == ["1", "2"]
+
+
+def test_the_clause_budget_is_what_the_window_has_left():
+    """Derived, not reserved: a longer system prompt must shrink it."""
+    from app.config import settings
+    from app.llm.prompts import REASON_SYSTEM
+    from app.pipeline.scenario import CHARS_PER_TOKEN, QUESTION_TOKENS
+
+    assert clause_token_budget() == (
+        settings.num_ctx - settings.num_predict
+        - int(len(REASON_SYSTEM) / CHARS_PER_TOKEN) - QUESTION_TOKENS
+    )
+    assert clause_token_budget() > 0
 
 
 def test_empty_input_is_handled():

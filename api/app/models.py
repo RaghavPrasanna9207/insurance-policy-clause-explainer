@@ -88,6 +88,8 @@ class ClauseAnalysis(SQLModel, table=True):
     copay_min_age_at_inception: int | None = None
     cap_percent_of_sum_insured: int | None = None
     icu_cap_percent_of_sum_insured: int | None = None
+    cap_max_inr_per_day: int | None = None
+    icu_cap_max_inr_per_day: int | None = None
     # A cover window around one hospital stay, in days, and its side. See
     # app/pipeline/window.py.
     cover_window_days: int | None = None

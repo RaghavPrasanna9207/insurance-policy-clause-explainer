@@ -271,9 +271,48 @@ def test_a_prompt_that_leaves_no_room_for_the_answer_is_reported(caplog):
     assert "leaving 866" in caplog.text
     assert "truncated" not in caplog.text, "7,326 < 8,192: nothing was truncated"
 
-    caplog.clear()
-    client._check_context(8_192, options)
-    assert "probably truncated" in caplog.text
-
     client._check_context(None, options)  # older Ollama builds omit the field
     assert client.last_prompt_tokens is None
+
+
+def test_a_truncated_prompt_is_refused_although_its_token_count_looks_small():
+    """Regression test for M16's finding about what truncation looks like.
+
+    Measured against Ollama, stepping one prompt across an 8,192-token window:
+    33,000 characters reported 8,115 tokens; 34,000 reported 4,098. Overflow
+    discards half the window, so a truncated prompt reports FEWER tokens than
+    one that fit. The M15 check looked for a count at the window's size and
+    could never have fired.
+    """
+    options = {"num_ctx": 8_192, "num_predict": 1_600}
+
+    client._check_context(8_115, options)  # the longest prompt that fit
+    client._check_context(8_192, options)  # a full window is not the signature
+
+    with pytest.raises(client.LlmError, match="truncated"):
+        client._check_context(4_098, options)
+
+
+@pytest.mark.llm
+async def test_ollama_really_halves_an_overflowing_prompt():
+    """The test above encodes a measurement of Ollama; this one re-takes it.
+
+    If a future Ollama truncated differently - to exactly the window, say - the
+    unit test would keep passing against a behaviour that no longer exists.
+    A sentence repeated past the window must be refused, never answered.
+    """
+    from app.config import settings
+
+    sentence = "The Company shall not be liable for expenses of cosmetic surgery. "
+    # Measured at 5.5 characters per token, so 7 characters per token of window
+    # overflows it by about a quarter. Sized from the configured window: a fixed
+    # 60,000 characters overflowed 8,192 and fits in 28,672. (40,000, the first
+    # guess against 8,192, was 7,306 tokens and fit even then.)
+    overflowing = sentence * (settings.num_ctx * 7 // len(sentence))
+
+    with pytest.raises(client.LlmError, match="truncated"):
+        await client.complete_json(
+            [{"role": "user", "content": "Classify this.\n\n" + overflowing}],
+            {"type": "object", "properties": {"word": {"type": "string"}}, "required": ["word"]},
+            use_cache=False,
+        )

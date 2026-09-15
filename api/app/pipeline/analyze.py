@@ -96,6 +96,12 @@ class ClauseAnalysis:
     copay_min_age_at_inception: int | None = None
     cap_percent_of_sum_insured: int | None = None
     icu_cap_percent_of_sum_insured: int | None = None
+    # A rupee ceiling on the percentage cap: "2% of the Sum Insured subject to
+    # maximum of Rs.5000/- per day". The synthetic policy never used one, so
+    # until M16 the arithmetic stated a 6,000-rupee cap for a 3-lakh policy
+    # whose wording caps it at 5,000.
+    cap_max_inr_per_day: int | None = None
+    icu_cap_max_inr_per_day: int | None = None
     # A COVER WINDOW around one hospital stay, exactly as the clause states it:
     # "the ninety days immediately following the date of discharge" is
     # (90, "days", "after_discharge"). Normalised to days by
@@ -235,6 +241,8 @@ def _batch_schema(ids: list[str]) -> dict[str, Any]:
                         "icu_cap_percent_of_sum_insured": {
                             "type": ["integer", "null"]
                         },
+                        "cap_max_inr_per_day": {"type": ["integer", "null"]},
+                        "icu_cap_max_inr_per_day": {"type": ["integer", "null"]},
                         # COVER WINDOW OPERANDS: the third family of the same
                         # fix, after duration and money. "Is a scan 120 days
                         # after discharge inside a 90-day window" was being
@@ -264,6 +272,7 @@ def _batch_schema(ids: list[str]) -> dict[str, Any]:
                         "copay_percent", "copay_min_age_at_inception",
                         "cap_percent_of_sum_insured",
                         "icu_cap_percent_of_sum_insured",
+                        "cap_max_inr_per_day", "icu_cap_max_inr_per_day",
                         "cover_window_value", "cover_window_unit",
                         "cover_window_anchor",
                         "likelihood", "severity",
@@ -293,6 +302,8 @@ def _parse(payload: dict[str, Any]) -> dict[str, ClauseAnalysis]:
             copay_min_age_at_inception=item.get("copay_min_age_at_inception"),
             cap_percent_of_sum_insured=item.get("cap_percent_of_sum_insured"),
             icu_cap_percent_of_sum_insured=item.get("icu_cap_percent_of_sum_insured"),
+            cap_max_inr_per_day=item.get("cap_max_inr_per_day"),
+            icu_cap_max_inr_per_day=item.get("icu_cap_max_inr_per_day"),
             cover_window_value=item.get("cover_window_value"),
             cover_window_unit=item.get("cover_window_unit"),
             cover_window_anchor=item.get("cover_window_anchor"),

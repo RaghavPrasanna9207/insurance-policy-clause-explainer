@@ -37,23 +37,27 @@ class Settings(BaseSettings):
     # the prompt, and the answer would be reasoned over a policy missing its
     # first clauses, with nothing to indicate it.
     #
-    # 8,192, not the full 32,768 and not the 16,384 first tried here.
+    # 28,672: the largest window measured to run entirely on this machine's GPU.
     #
-    # The KV cache lives in VRAM alongside the 4.7GB of weights. At 16,384 the
-    # runtime held 5.46GB and the machine was left with 2GB of 15.7GB free -
-    # the scenario eval was killed by the OS for memory pressure. Over-
-    # provisioning "to be safe" is not free; it was paid for in RAM that the
-    # rest of the system needed.
+    # It was 8,192 from M5, sized to the synthetic policy (~3,100 tokens) after
+    # 16,384 had the OS kill an eval for memory pressure on Ollama 0.33. M15
+    # measured real wordings at 69,000-129,000 characters, and at 8,192 the
+    # scenario step saw a quarter of the smallest - the premise of having no
+    # retrieval, failing silently.
     #
-    # 8,192 is sized from the actual requirement rather than from caution:
-    # a 40-clause policy is ~3,100 tokens, the system prompt ~1,200, the
-    # response ~500. That is ~4,800, so this leaves comfortable headroom while
-    # halving the cache.
-    num_ctx: int = 8_192
-
-    # Tokens reserved inside the context for everything that is NOT clause text:
-    # the system prompt, the extracted facts, and the generated answer.
-    scenario_reserved_tokens: int = 2_500
+    # Re-measured in M16 on Ollama 0.34, with a policy-sized prompt:
+    #
+    #     num_ctx   GPU memory   placement         prompt speed
+    #      8,192     4.9 GB      100% GPU          2,149 tok/s
+    #     24,576     5.8 GB      100% GPU          2,036 tok/s
+    #     28,672     6.2 GB      100% GPU
+    #     32,768     6.8 GB      8% CPU / 92% GPU  generation 20% slower
+    #
+    # The KV cache sits in VRAM, so free system RAM did not change between the
+    # sizes. 32,768 is qwen2.5's maximum, but spilling onto the CPU slows every
+    # call, including the per-clause analyses that need no long context. One
+    # window for every call, because Ollama reloads the model when it changes.
+    num_ctx: int = 28_672
 
     # HARD CAP on generated tokens. Without one, llama.cpp generates until the
     # model emits a stop token or the context fills - and a model that starts
@@ -142,19 +146,9 @@ class Settings(BaseSettings):
     # original measurement, carried one step further than it was taken. The
     # concurrency was buying 19 seconds and costing reproducibility.
     analyze_concurrency: int = 1
-    @property
-    def scenario_token_budget(self) -> int:
-        """How many tokens of clause text the reasoner may be given.
-
-        DERIVED from the context window rather than set independently, because
-        the two were briefly inconsistent: a 12,000-token clause budget against
-        an 8,192-token window would build a prompt larger than the context and
-        Ollama would silently truncate it - dropping exactly the clauses the
-        shortlist had just been careful to include.
-
-        Two numbers that must agree should not be two numbers.
-        """
-        return max(self.num_ctx - self.scenario_reserved_tokens, 1_000)
+    # The clause budget for the scenario step is derived from num_ctx, num_predict
+    # and the measured system prompt: see `clause_token_budget()` in
+    # app/pipeline/scenario.py. It lives there because it needs the prompt.
 
     # --- Storage ---
     db_path: str = "data/app.db"

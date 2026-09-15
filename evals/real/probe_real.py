@@ -38,9 +38,8 @@ sys.path.insert(0, str(REPO_ROOT / "api"))
 sys.path.insert(0, str(REPO_ROOT / "evals"))
 sys.path.insert(0, str(Path(__file__).parent))
 
-from app.config import settings  # noqa: E402
 from app.pipeline.ingest import ingest  # noqa: E402
-from app.pipeline.scenario import CHARS_PER_TOKEN, shortlist  # noqa: E402
+from app.pipeline.scenario import CHARS_PER_TOKEN, clause_token_budget, shortlist  # noqa: E402
 from app.pipeline.segment import segment  # noqa: E402
 from fetch_policies import SOURCES, pdf_path  # noqa: E402
 from run_scenario_eval import GOLDEN_PDF, build_clauses  # noqa: E402
@@ -93,7 +92,7 @@ async def analysis(pdf: Path) -> None:
           f"{sum(1 for n in ids.values() if n > 1)} ids, "
           f"{sum(n for n in ids.values() if n > 1)} clauses")
     print(f"  scenario fit: all clauses ~{total_tokens:,} tokens against a budget of "
-          f"{settings.scenario_token_budget:,}")
+          f"{clause_token_budget():,}")
     print(f"  shortlist keeps {len(kept)} of {len(clauses)}; dropped by type:")
     for t, n in types.most_common():
         print(f"    {t:15} kept {kept_types[t]:3} of {n:3}")

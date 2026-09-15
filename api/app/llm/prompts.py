@@ -39,7 +39,7 @@ coverage, it just happens to be describing its ceiling.
 from app.grounding import normalize
 from app.taxonomy import ClauseType
 
-PROMPT_VERSION = "v38-covered-but-reduced"
+PROMPT_VERSION = "v39-cap-maximum"
 
 CLASSIFY_SYSTEM = """\
 You are an expert on Indian (IRDAI-regulated) health insurance policy wordings.
@@ -132,9 +132,14 @@ person's actual figures is done afterwards, in code.
     "Intensive Care Unit charges ... limited to two percent" -> 2
   A clause that states one rate for a room and a different rate for ICU fills
   in BOTH fields; one that mentions no ICU rate leaves this null.
+- cap_max_inr_per_day / icu_cap_max_inr_per_day: a rupee ceiling on that same
+  percentage cap, where the clause sets one. The limit is whichever is lower.
+    "room rent up to 1% of the Sum Insured subject to a maximum of Rs.4,000 per day"
+       -> cap_percent_of_sum_insured 1, cap_max_inr_per_day 4000
+  A percentage cap with no rupee ceiling leaves these null.
 
-A cap expressed in RUPEES rather than as a percentage of the sum insured
-("twenty five thousand rupees per eye") leaves all four fields null and belongs
+A cap expressed ONLY in rupees, with no percentage of the sum insured
+("twenty five thousand rupees per eye"), leaves all six fields null and belongs
 in monetary_limits, where it already goes.
 
 THE WINDOW AROUND A HOSPITAL STAY. Null on every clause that states none, which
