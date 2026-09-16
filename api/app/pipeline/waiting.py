@@ -31,8 +31,16 @@ reasoning step answer `insufficient_information` honestly - and a fourth failure
 was the model asserting a verdict when the timing had never been stated.
 """
 
+import re
 from dataclasses import dataclass, field
 from enum import StrEnum
+
+# A pre-existing diseases waiting period is recognised by its opening words, the
+# clause's own heading. Not by any mention: the IRDAI specified-disease clause
+# mentions pre-existing diseases in its body, only to say which of two periods
+# wins, and is not about them.
+_PRE_EXISTING = re.compile(r"pre[\s-]?existing", re.IGNORECASE)
+_OPENING_CHARS = 60
 
 
 class WaitingStatus(StrEnum):
@@ -52,14 +60,57 @@ class WaitingCheck:
     # The clause's own carve-outs, already checked against its text at
     # analysis time (app/grounding.py, verify_exception).
     exceptions: list[str] = field(default_factory=list)
+    # Words from the procedure or condition the person named that this clause
+    # also uses - a lookup (scenario.named_in_question), not a judgement.
+    named: list[str] = field(default_factory=list)
+    # A pre-existing diseases waiting period, which bars only an illness the
+    # person already had.
+    pre_existing: bool = False
 
     def describe(self) -> str:
         """A sentence for the reasoning prompt, stating the arithmetic done."""
+        who = f"clause {self.clause_id}"
+        if self.named:
+            words = ", ".join(f'"{w}"' for w in self.named)
+            who += f" (it names {words}, from the question)"
+
+        if self.pre_existing and self.status is not WaitingStatus.SERVED:
+            # Regression: on the Star policy, "this waiting period still
+            # applies and blocks treatment" for the pre-existing diseases bar
+            # was the reason given for a hernia, a dengue fever and a stay in
+            # Dubai, none of them described as an illness from before the
+            # policy. A qualifier appended to that sentence changed nothing:
+            # dengue and Dubai kept citing it, the model's own reasoning
+            # quoting the opening words. So the line now OPENS with whom the
+            # bar concerns - the served-period lesson again, that the first
+            # words of a line are the ones acted on.
+            held = (
+                "how long the policy has been held was NOT STATED"
+                if self.status is WaitingStatus.UNKNOWN
+                else f"policy held {_human(self.held_days)}, so not yet served"
+            )
+            return (
+                f"{who}: concerns ONLY an illness the person already had when the "
+                f"policy began. Unless the description says this one had begun by "
+                f"then, it is not the reason for this claim. (Requires "
+                f"{_human(self.required_days)}; {held}.)"
+            )
         if self.status is WaitingStatus.UNKNOWN:
             return (
-                f"clause {self.clause_id}: requires {_human(self.required_days)}, "
+                f"{who}: requires {_human(self.required_days)}, "
                 f"but how long the policy has been held was NOT STATED, so whether "
                 f"this bar has lifted cannot be determined"
+            )
+        if self.status is WaitingStatus.SERVED and self.named:
+            # The narrow served wording below, on a line of its own. A first
+            # version said this period "no longer stands in the way of this
+            # treatment", and `star-hernia-after-wait` went from conditional to
+            # covered, three samples of three: read as permission, not as one
+            # bar removed.
+            return (
+                f"{who}: requires {_human(self.required_days)}, policy held "
+                f"{_human(self.held_days)} -> this waiting period is served and no "
+                f"longer applies (it says nothing about any other clause)"
             )
         if self.status is WaitingStatus.SERVED:
             # Narrow wording on purpose. An earlier version said this clause
@@ -74,7 +125,7 @@ class WaitingCheck:
                 f"longer applies (it says nothing about any other clause)"
             )
         blocked = (
-            f"clause {self.clause_id}: requires {_human(self.required_days)}, "
+            f"{who}: requires {_human(self.required_days)}, "
             f"policy held {_human(self.held_days)} -> this waiting period still "
             f"applies and blocks treatment covered by THIS clause"
         )
@@ -112,14 +163,18 @@ def _human(days: int | None) -> str:
     return f"{days} day" + ("s" if days != 1 else "")
 
 
-def evaluate(clauses, days_held: int | None) -> list[WaitingCheck]:
+def evaluate(
+    clauses, days_held: int | None, named: dict[str, list[str]] | None = None
+) -> list[WaitingCheck]:
     """Compare every waiting period against how long the policy has been held.
 
     `clauses` is any iterable of objects exposing `clause_id` and
-    `waiting_period_months`; only those with a duration are considered, so
+    `waiting_period_days`; only those with a duration are considered, so
     exclusions and sub-limits are ignored here rather than filtered by the
-    caller.
+    caller. `named` maps a clause id to the words it shares with what the
+    person described.
     """
+    named = named or {}
     checks: list[WaitingCheck] = []
     for clause in clauses:
         required = getattr(clause, "waiting_period_days", None)
@@ -140,6 +195,9 @@ def evaluate(clauses, days_held: int | None) -> list[WaitingCheck]:
                 held_days=days_held,
                 status=status,
                 exceptions=list(getattr(clause, "exceptions", None) or []),
+                named=list(named.get(clause.clause_id, [])),
+                pre_existing=bool(_PRE_EXISTING.search(
+                    getattr(clause, "text", "")[:_OPENING_CHARS])),
             )
         )
     return checks
@@ -165,9 +223,18 @@ def render(checks: list[WaitingCheck]) -> str:
     if not checks:
         return ""
 
-    blocking = [c for c in checks if c.status is WaitingStatus.NOT_SERVED]
-    unknown = [c for c in checks if c.status is WaitingStatus.UNKNOWN]
-    served = [c for c in checks if c.status is WaitingStatus.SERVED]
+    # The model tends to cite the first bar it reads. A period naming what the
+    # person described goes first; a pre-existing diseases period, which may
+    # not concern them at all, goes last. Otherwise the policy's own order.
+    def first(check: WaitingCheck) -> tuple[bool, bool]:
+        return (not check.named, check.pre_existing)
+
+    blocking = sorted((c for c in checks if c.status is WaitingStatus.NOT_SERVED), key=first)
+    unknown = sorted((c for c in checks if c.status is WaitingStatus.UNKNOWN), key=first)
+    # A served period that names the person's treatment is the reason a claim
+    # is not barred, so it keeps a line of its own.
+    served_named = [c for c in checks if c.status is WaitingStatus.SERVED and c.named]
+    served = [c for c in checks if c.status is WaitingStatus.SERVED and not c.named]
 
     lines = [
         "WAITING PERIODS, ALREADY CALCULATED FOR YOU (arithmetic, not opinion).",
@@ -189,9 +256,7 @@ def render(checks: list[WaitingCheck]) -> str:
             f"- Already satisfied, so IRRELEVANT here and not worth citing: {ids}"
         )
 
-    for check in blocking:
-        lines.append(f"- {check.describe()}")
-    for check in unknown:
+    for check in [*served_named, *blocking, *unknown]:
         lines.append(f"- {check.describe()}")
 
     if not blocking and not unknown:

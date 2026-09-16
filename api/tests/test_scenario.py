@@ -781,3 +781,62 @@ def test_the_policy_duration_field_is_not_named_like_an_age():
     durations = [k for k in FACTS_SCHEMA["properties"] if k.endswith(("_value", "_unit"))]
     assert "time_since_policy_start_value" in durations
     assert not [k for k in durations if "age" in k.split("_")]
+
+
+# --- one rare word from the named condition (M16, the Star policy) ----------
+
+HERNIA_LIST = (
+    "2.4 Specified disease waiting period. The following listed conditions are excluded "
+    "for 24 months: hernia of all types, hydrocele, piles and fissures."
+)
+
+
+def test_one_rare_word_from_the_named_condition_is_enough():
+    """Regression test for Star's hernia and caesarean questions.
+
+    Each is decided by the one clause that names the condition - the
+    specified-disease list names "hernia", the maternity exclusion names
+    "caesarean" - and shares no second unusual word with the question, so the
+    two-word rule never named it. The two-word rule exists because single
+    words drawn from the whole question were a coincidence as often as a
+    signal ("years" is in the co-payment clause). A word from the procedure or
+    condition the person named is not a coincidence of that kind: it is what
+    the question is about.
+    """
+    from app.pipeline.scenario import shared_words
+
+    question = "Surgery for an inguinal hernia, bought over a year ago."
+    policy = _policy(HERNIA_LIST, HOSPITAL_TEXT)
+    assert shared_words(question, policy) == {}, "the two-word rule alone names nothing here"
+
+    facts = {"procedure": "surgery", "condition": "inguinal hernia"}
+    assert shared_words(question, policy, facts) == {"2.4": ["hernia"]}
+
+
+def test_a_named_condition_word_must_still_be_rare_and_the_clause_must_decide_claims():
+    """A word most clauses use names nothing, and a definition does not decide
+    a claim: definitions and procedural clauses are the types the shortlist
+    gives up first for the same reason."""
+    from app.pipeline.scenario import ShortlistClause, shared_words
+
+    common = [f"{n} Every clause here mentions surgery." for n in ("1.2", "1.3", "1.4")]
+    assert shared_words("q", _policy(*common), {"procedure": "surgery"}) == {}
+
+    definition = ShortlistClause("1.9", "t:9", "1.9", "definition",
+                                 "1.9 Hernia means a protrusion of an organ.", 1.0)
+    assert shared_words("q", [definition], {"condition": "hernia"}) == {}
+
+
+def test_the_named_condition_reaches_the_prompt_and_the_waiting_block():
+    from app.llm.prompts import render_reasoning_request
+    from app.pipeline.scenario import ShortlistClause, compute
+
+    facts = {"condition": "hernia", "time_since_policy_start_value": 14,
+             "time_since_policy_start_unit": "months"}
+    listed = ShortlistClause("2.4", "t:1", "2.4", "waiting_period", HERNIA_LIST, 1.0,
+                             waiting_period_days=720)
+    clauses = [listed, *_policy(HOSPITAL_TEXT)]
+
+    rendered = render_reasoning_request("A hernia operation.", facts, clauses)
+    assert "clause 2.4 uses these words from the question" in rendered
+    assert compute(facts, clauses).waiting[0].named == ["hernia"]

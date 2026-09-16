@@ -16,6 +16,7 @@ class FakeClause:
     clause_id: str
     waiting_period_days: int | None = None
     exceptions: list[str] = field(default_factory=list)
+    text: str = ""
 
 
 def test_an_elapsed_waiting_period_is_served():
@@ -180,3 +181,70 @@ def test_a_served_or_unknown_period_does_not_repeat_its_exception():
     not deciding the case - the lesson of the served-periods line above."""
     assert "Accident" not in render(evaluate([INITIAL], days_held=400))
     assert "Accident" not in render(evaluate([INITIAL], days_held=None))
+
+
+# --- whom a waiting period concerns (M16, the Star policy) ------------------
+
+# Shaped like the IRDAI standard wording: the pre-existing diseases exclusion,
+# and the specified-disease list, which mentions pre-existing diseases in its
+# body only to say which of two periods wins.
+PED = FakeClause("1#2", 1080, text=(
+    "1. Pre-Existing Diseases - Code Excl 01 A. Expenses related to the treatment of a "
+    "pre-existing disease and its direct complications shall be excluded."))
+LISTED = FakeClause("2#2", 720, text=(
+    "2. Specified disease / procedure waiting period - Code Excl 02 A. Expenses related to "
+    "the treatment of the following listed conditions shall be excluded. C. If any of the "
+    "specified disease/procedure falls under the waiting period specified for pre-existing "
+    "diseases, then the longer of the two waiting periods shall apply. 12. Hernia of all types"))
+
+
+def test_a_pre_existing_disease_period_says_whom_it_concerns():
+    """Regression test for the Star policy's hernia, dengue and Dubai questions.
+
+    Each came back with the right verdict and the pre-existing diseases
+    exclusion as its reason, although nobody had mentioned an illness from
+    before the policy. The block had told the model that this period "still
+    applies and blocks treatment covered by THIS clause", listed first, and
+    the model took the first bar it was given. The arithmetic was right; the
+    line left out that this bar only concerns an illness the person already
+    had. Whether this one is such an illness is language, so the line says
+    whom the bar concerns and leaves that call to the model.
+    """
+    for held in (420, None):
+        block = render(evaluate([PED], days_held=held))
+        assert "concerns ONLY an illness the person already had" in block
+        assert "still applies and blocks" not in block
+
+
+def test_a_clause_that_only_mentions_pre_existing_diseases_is_not_one():
+    """Judged by the clause's opening, not by any mention in its body."""
+    assert "already had when the policy began" not in render(evaluate([LISTED], 420))
+
+
+def test_a_served_pre_existing_period_says_nothing_extra():
+    assert "already had" not in render(evaluate([PED], days_held=1200))
+
+
+def test_a_period_naming_the_questions_condition_comes_first_and_says_so():
+    """The model cites the first bar it reads. The one that names what the
+    person described goes first; the pre-existing one, which may not concern
+    them at all, goes last."""
+    block = render(evaluate([PED, LISTED], 420, named={"2#2": ["hernia"]}))
+    assert block.index("clause 2#2") < block.index("clause 1#2")
+    assert '"hernia"' in block
+
+
+def test_a_served_period_naming_the_condition_is_not_called_irrelevant():
+    """Regression test for `star-hernia-after-wait`. Three years in, the
+    hernia waiting period is over, and that is the reason the claim is
+    payable at all - yet the block filed it under "IRRELEVANT here and not
+    worth citing" with every other served period."""
+    block = render(evaluate([PED, LISTED], 1200, named={"2#2": ["hernia"]}))
+    irrelevant = next(line for line in block.splitlines() if "IRRELEVANT" in line)
+    assert "1#2" in irrelevant and "2#2" not in irrelevant
+    assert "clause 2#2" in block and '"hernia"' in block and "served and no longer applies" in block
+
+
+def test_naming_is_optional():
+    """Callers that know nothing about the question still get the old block."""
+    assert evaluate([LISTED], 420) == evaluate([LISTED], 420, named={})

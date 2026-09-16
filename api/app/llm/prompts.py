@@ -39,7 +39,7 @@ coverage, it just happens to be describing its ceiling.
 from app.grounding import normalize
 from app.taxonomy import ClauseType
 
-PROMPT_VERSION = "v39-cap-maximum"
+PROMPT_VERSION = "v40-waiting-scope-named-words"
 
 CLASSIFY_SYSTEM = """\
 You are an expert on Indian (IRDAI-regulated) health insurance policy wordings.
@@ -527,7 +527,7 @@ def render_reasoning_request(
 
     # Last before the clauses, and silent unless something is shared: most
     # questions share no unusual words with any clause and see nothing here.
-    shared = shared_words(scenario, clauses)
+    shared = shared_words(scenario, clauses, facts)
     if shared:
         lines += ["", "WORDS THIS QUESTION SHARES WITH A CLAUSE (a lookup, not a judgement)."]
         lines += [

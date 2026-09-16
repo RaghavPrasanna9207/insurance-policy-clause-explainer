@@ -466,8 +466,46 @@ def _stems(text: str) -> dict[str, str]:
     return out
 
 
-def shared_words(scenario: str, clauses: list[ShortlistClause]) -> dict[str, list[str]]:
-    """Clauses that share several unusual words with the question.
+def named_in_question(
+    facts: dict[str, Any], clauses: list[ShortlistClause]
+) -> dict[str, list[str]]:
+    """Clauses using an unusual word from the procedure or condition the person named.
+
+    One word is enough here, where the whole-question rule below needs two,
+    because these words are not drawn from anywhere in the question: they are
+    what the question is about. On the Star policy the clause that decides a
+    hernia question is the only one naming "hernia", and the maternity
+    exclusion the only one naming "caesarean"; neither shares a second unusual
+    word with its question, so the two-word rule never named them.
+
+    The word must still be rare (used by at most two clauses), and definitions
+    and procedural clauses are never named - the same types the shortlist gives
+    up first, because they rarely decide a claim. Measured on the 69 synthetic
+    questions and 10 Star questions, from their stored facts: it names a clause
+    for 18 of them, and for 13 of those the named clauses include one the
+    answer must cite. Of the 21 clauses named, 13 must be cited, 4 are about the
+    same treatment without deciding the case (a cataract waiting period on a
+    cataract cost question), and 4 are noise ("admitted", "removal",
+    "existing", "anaesthesia") - which is why this, too, only names clauses.
+    """
+    wanted = _stems(" ".join(str(facts.get(k) or "") for k in ("procedure", "condition")))
+    per_clause = {c.clause_id: _stems(c.text) for c in clauses}
+    used_by = Counter(s for stems in per_clause.values() for s in stems)
+    rare = {s for s in wanted if 0 < used_by[s] <= _RARE_IN_POLICY}
+
+    named: dict[str, list[str]] = {}
+    for clause in clauses:
+        common = rare & per_clause[clause.clause_id].keys()
+        if common and clause.clause_type not in DROPPED_FIRST:
+            named[clause.clause_id] = sorted(wanted[s] for s in common)
+    return named
+
+
+def shared_words(
+    scenario: str, clauses: list[ShortlistClause], facts: dict[str, Any] | None = None
+) -> dict[str, list[str]]:
+    """Clauses that share several unusual words with the question, or one with
+    the procedure or condition it names (named_in_question).
 
     Measured case: Ayurvedic treatment at an unaccredited private clinic. The
     verdict was right and the citation was the definition of a hospital, in
@@ -498,7 +536,11 @@ def shared_words(scenario: str, clauses: list[ShortlistClause]) -> dict[str, lis
         common = rare_mine & stems.keys()
         if len(common) >= _MIN_SHARED:
             shared[clause_id] = sorted(mine[s] for s in common)
-    return shared
+    for clause_id, words in named_in_question(facts or {}, clauses).items():
+        shared[clause_id] = sorted(set(shared.get(clause_id, [])) | set(words))
+    # In policy order, as the clauses are shown.
+    order = {c.clause_id: i for i, c in enumerate(clauses)}
+    return dict(sorted(shared.items(), key=lambda item: order[item[0]]))
 
 
 _ANNEXURE = re.compile(r"\bannexure\s+([ivxl]+|\d+)\b", re.IGNORECASE)
@@ -590,7 +632,7 @@ def compute(facts: dict[str, Any], clauses: list[ShortlistClause]) -> Computed:
         # Python, before the model sees anything. Nothing is guessed: if the
         # person said nothing, every waiting period comes back UNKNOWN rather
         # than being compared against an invented figure.
-        waiting=waiting.evaluate(clauses, held),
+        waiting=waiting.evaluate(clauses, held, named_in_question(facts, clauses)),
         # And the second family of comparisons, added after the first was
         # fixed: a waiting period decides whether the claim is PAID, a
         # reduction decides whether it is paid IN FULL. Only the first question
