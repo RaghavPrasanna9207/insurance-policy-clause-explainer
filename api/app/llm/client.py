@@ -86,7 +86,7 @@ async def complete_json(
     model = model or settings.model
     options = _decode_options()
 
-    key = cache.make_key(model, messages, schema, options)
+    key = cache.make_key(model, messages, schema, options, settings.kv_cache_type)
     if use_cache:
         if (hit := cache.get(key)) is not None:
             log.debug("llm cache hit %s", key[:12])
@@ -104,7 +104,7 @@ async def complete_json(
                 # Keyed on the options that actually produced this answer, which
                 # may not be the ones we started with (see the escalation below).
                 cache.put(
-                    cache.make_key(model, messages, schema, options),
+                    cache.make_key(model, messages, schema, options, settings.kv_cache_type),
                     model,
                     parsed,
                 )

@@ -210,6 +210,7 @@ async def run(
         "prompt_version": PROMPT_VERSION,
         "num_ctx": settings.num_ctx,
         "num_predict": settings.num_predict,
+        "kv_cache_type": settings.kv_cache_type,
         "seconds": round(elapsed, 1),
         "rows": rows,
         # Another case file is never the report's 40 cases, so it is recorded
@@ -502,7 +503,8 @@ def report(res: dict) -> str:
         "",
         f"- **Model**: `{res['model']}`",
         f"- **Prompt version**: `{res['prompt_version']}`",
-        f"- **Decoding**: num_ctx {res['num_ctx']}, num_predict {res['num_predict']}",
+        f"- **Decoding**: num_ctx {res['num_ctx']}, num_predict {res['num_predict']}, "
+        f"KV cache {res['kv_cache_type']}",
         f"- **Cases**: {res['total']}",
         f"- **Wall time**: {res['seconds']}s",
         "",

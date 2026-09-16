@@ -172,6 +172,64 @@ def test_decode_options_change_the_cache_key():
     assert key == cache.make_key("m", msgs, CLASSIFY_SCHEMA, dict(base)), "key unstable"
 
 
+def test_the_servers_kv_cache_precision_changes_the_cache_key():
+    """A setting that changes the answer without being part of the request.
+
+    Ollama reads OLLAMA_KV_CACHE_TYPE once, at start-up, and no request carries
+    it, so `options` cannot hold it. At q8_0 the stored keys and values are
+    rounded to 8 bits, which moves the logits slightly - enough to break a
+    near-tie the other way - so an answer generated at f16 must not be replayed
+    for a q8_0 run.
+
+    f16 is Ollama's default, and every entry stored before this parameter
+    existed was generated at f16. At f16 the key must therefore be exactly the
+    key those entries were stored under, or all of them would silently miss.
+    """
+    import hashlib
+    import json
+
+    msgs = _messages(PRE_EXISTING_CLAUSE)
+    options = {"temperature": 0.0, "num_ctx": 8192}
+
+    f16 = cache.make_key("m", msgs, CLASSIFY_SCHEMA, options, kv_cache_type="f16")
+    q8 = cache.make_key("m", msgs, CLASSIFY_SCHEMA, options, kv_cache_type="q8_0")
+    stored_before = hashlib.sha256(json.dumps(
+        {"model": "m", "messages": msgs, "schema": CLASSIFY_SCHEMA, "options": options},
+        sort_keys=True,
+    ).encode("utf-8")).hexdigest()
+
+    assert q8 != f16, "the KV cache precision is not in the key"
+    assert f16 == stored_before, "entries stored at f16 before this setting existed would all miss"
+
+
+async def test_the_client_hashes_the_configured_kv_cache_precision(monkeypatch):
+    """The key parameter above protects nothing unless the client passes it.
+
+    q4_0 is neither the project's default (q8_0) nor make_key's (f16), so the
+    test fails whichever default the client might fall back to.
+    """
+    from app.config import settings
+    from app.llm import client as llm_client
+
+    stored: dict[str, dict] = {}
+    monkeypatch.setattr(cache, "get", lambda key: None)
+    monkeypatch.setattr(cache, "put", lambda key, model, response: stored.update({key: response}))
+
+    async def fake_post(messages, schema, model, options):
+        return '{"clause_type": "exclusion", "plain_language": "ok", "waiting_months": 0}'
+
+    monkeypatch.setattr(llm_client, "_post_chat", fake_post)
+    monkeypatch.setattr(settings, "kv_cache_type", "q4_0")
+
+    msgs = _messages(PRE_EXISTING_CLAUSE)
+    await llm_client.complete_json(msgs, CLASSIFY_SCHEMA)
+
+    expected = cache.make_key(
+        settings.model, msgs, CLASSIFY_SCHEMA, llm_client._decode_options(), kv_cache_type="q4_0"
+    )
+    assert list(stored) == [expected]
+
+
 def test_the_options_sent_are_the_options_hashed():
     """Guards against the two drifting apart.
 

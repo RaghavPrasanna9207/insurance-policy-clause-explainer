@@ -214,6 +214,7 @@ async def run(use_cache: bool, batch_size: int | None = None) -> dict:
         "prompt_version": PROMPT_VERSION,
         "num_ctx": settings.num_ctx,
         "num_predict": settings.num_predict,
+        "kv_cache_type": settings.kv_cache_type,
         "batch_size": settings.analyze_batch_size,
         "clauses_expected": len(expected_by_number),
         "clauses_analysed": len(expected_by_number) - len(unanalysed),
@@ -237,7 +238,7 @@ def report(res: dict) -> str:
         f"- **Model**: `{res['model']}`",
         f"- **Prompt version**: `{res['prompt_version']}`",
         f"- **Decoding**: num_ctx {res['num_ctx']}, num_predict "
-        f"{res['num_predict']}, batch size {res['batch_size']}",
+        f"{res['num_predict']}, KV cache {res['kv_cache_type']}, batch size {res['batch_size']}",
         f"- **Clauses**: {res['clauses_analysed']}/{res['clauses_expected']} analysed",
         f"- **Wall time**: {res['seconds']}s",
         "",

@@ -84,6 +84,12 @@ Underpinning both: every clause stores character offsets into the document's ext
 ```bash
 ollama pull qwen2.5:7b-instruct-q4_K_M
 
+# Ollama server settings: set these where Ollama will see them (on Windows, as
+# user environment variables), then restart Ollama.
+#   OLLAMA_FLASH_ATTENTION=1
+#   OLLAMA_KV_CACHE_TYPE=q8_0    # halves the context's memory; the app assumes it
+#   LLAMA_ARG_CACHE_RAM=1024     # caps the server's saved-prompt store at 1 GB
+
 cd api
 python -m venv .venv
 .venv/Scripts/python.exe -m pip install -r requirements.txt   # Windows

@@ -5,6 +5,9 @@ harness can swap models or budgets without editing logic. Values can be
 overridden by environment variables or a .env file (see .env.example).
 """
 
+from typing import Literal
+
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -16,7 +19,8 @@ class Settings(BaseSettings):
     # The model verified on this machine: fits fully in the RTX 4060's 8GB VRAM
     # and enforces JSON-schema enums, which the grounding design depends on.
     model: str = "qwen2.5:7b-instruct-q4_K_M"
-    # The scenario reasoner sends the whole policy (~4k tokens) and generates a
+    # The scenario reasoner sends the whole policy (~4k tokens for the synthetic
+    # one; ~22,600 for a real wording, about 11s to read) and generates a
     # few hundred more, on top of a possible ~27s cold model load. 180s was not
     # enough and produced httpx.ReadTimeout under real load; 420s has margin
     # without hanging a request forever.
@@ -57,7 +61,33 @@ class Settings(BaseSettings):
     # sizes. 32,768 is qwen2.5's maximum, but spilling onto the CPU slows every
     # call, including the per-clause analyses that need no long context. One
     # window for every call, because Ollama reloads the model when it changes.
+    #
+    # Those figures are for a 16-bit KV cache. With the q8_0 cache below, 28,672
+    # takes 5.0 GB and even 32,768 fits entirely on the GPU (5.2 GB).
     num_ctx: int = 28_672
+
+    # PRECISION OF THE KV CACHE: a setting of the Ollama server, mirrored here.
+    #
+    # For every token of the window, each layer stores a key and a value, 56 KB
+    # per token for this model in 16-bit floats (`f16`, Ollama's default). The
+    # store is allocated for the whole window when the model loads: 1,568 MiB at
+    # 28,672. Starting the server with OLLAMA_KV_CACHE_TYPE=q8_0 rounds those
+    # numbers to 8 bits and roughly halves that. Rounding moves the logits a
+    # little, so it can change an answer.
+    #
+    # No request carries it, so the cache cannot learn it from the decoding
+    # options; it is hashed in separately (see cache.make_key). It is read from
+    # the same environment variable the server reads, so the two agree when both
+    # start from the same environment. Ollama only reads it at start-up: after a
+    # change, restart Ollama and check the `llama_kv_cache` line in its log.
+    #
+    # q8_0 is the project's setting from M16 (see the README's Ollama setup), so
+    # it is also the default here. A default of f16 would be wrong exactly when
+    # it matters: a process started before the variable was set would store
+    # q8_0 answers under f16 keys.
+    kv_cache_type: Literal["f16", "q8_0", "q4_0"] = Field(
+        "q8_0", validation_alias="OLLAMA_KV_CACHE_TYPE"
+    )
 
     # HARD CAP on generated tokens. Without one, llama.cpp generates until the
     # model emits a stop token or the context fills - and a model that starts
