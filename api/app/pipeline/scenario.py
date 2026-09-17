@@ -69,6 +69,16 @@ CITATION_EFFECTS = ["denies", "delays", "reduces", "requires", "permits"]
 # enough to stay clear of the generation cap.
 MAX_CITATIONS = 4
 
+# Length caps on the two free-text fields, enforced by the grammar like the
+# enums: a string that has reached its cap can only close. M16: a Star answer
+# ran on inside "reasoning" past 1,600, 3,200 and 6,400 tokens, and the eval
+# died with it. Retrying with a higher ceiling cannot fix a loop; making it
+# unrepresentable does. Sized from the 229 answers stored at the time: the
+# longest reasoning was 974 characters and the longest quote 832 (a whole
+# clause, which the prompt already discourages).
+MAX_REASONING_CHARS = 1_500
+MAX_QUOTE_CHARS = 1_200
+
 # Rough characters-per-token for budgeting. Deliberately conservative: an
 # underestimate would silently truncate the clause list and drop the exclusion
 # that decides the case.
@@ -153,7 +163,9 @@ class ShortlistClause:
     impact_score: float
     # Structured facts extracted at analysis time, so stage 5 can reason over
     # them arithmetically instead of asking the model to re-read the prose.
-    waiting_period_days: int | None = None
+    # Every waiting period the clause sets, in days - usually one. See
+    # ClauseAnalysis.waiting_periods_days.
+    waiting_periods_days: list[int] = field(default_factory=list)
     exceptions: list[str] = field(default_factory=list)
     # The operands a reduction is computed from, carried through from analysis.
     # See app/pipeline/reduction.py for what is done with them.
@@ -585,7 +597,7 @@ def _reasoning_schema(clause_ids: list[str]) -> dict[str, Any]:
         "type": "object",
         "properties": {
             "verdict": {"type": "string", "enum": Verdict.values()},
-            "reasoning": {"type": "string"},
+            "reasoning": {"type": "string", "maxLength": MAX_REASONING_CHARS},
             "deciding_clauses": {
                 "type": "array",
                 # No minItems: insufficient_information legitimately cites
@@ -597,7 +609,7 @@ def _reasoning_schema(clause_ids: list[str]) -> dict[str, Any]:
                     "type": "object",
                     "properties": {
                         "clause_id": {"type": "string", "enum": clause_ids},
-                        "quote": {"type": "string"},
+                        "quote": {"type": "string", "maxLength": MAX_QUOTE_CHARS},
                         "effect": {"type": "string", "enum": CITATION_EFFECTS},
                     },
                     "required": ["clause_id", "quote", "effect"],

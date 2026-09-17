@@ -167,6 +167,21 @@ def test_citations_are_capped_but_not_floored():
     assert "minItems" not in array
 
 
+def test_the_free_text_fields_have_a_length_the_grammar_enforces():
+    """Regression test for a Star answer that ran on inside "reasoning" past
+    three rising output ceilings (M16). A longer ceiling cannot end a loop; a
+    string at its maximum length can only close. Measured before relying on
+    it: a field capped at 60 characters came back at exactly 60, and valid."""
+    from app.pipeline.scenario import MAX_QUOTE_CHARS, MAX_REASONING_CHARS
+
+    schema = _reasoning_schema(["3.2"])["properties"]
+    assert schema["reasoning"]["maxLength"] == MAX_REASONING_CHARS
+    quote = schema["deciding_clauses"]["items"]["properties"]["quote"]
+    assert quote["maxLength"] == MAX_QUOTE_CHARS
+    # Room for every answer stored when the caps were set (974 and 832).
+    assert MAX_REASONING_CHARS > 974 and MAX_QUOTE_CHARS > 832
+
+
 def test_every_schema_string_field_that_is_categorical_has_an_enum():
     """The project-wide rule: an unconstrained categorical field invites the
     model to invent a value that then flows downstream as an unknown key."""
@@ -285,7 +300,7 @@ def _clauses():
     return [
         ShortlistClause("2.1", "t:1", "2.1", "coverage", INPATIENT_TEXT, 1.0),
         ShortlistClause("3.2", "t:2", "3.2", "waiting_period", PED_TEXT, 1.0,
-                        waiting_period_days=1080),
+                        waiting_periods_days=[1080]),
     ]
 
 
@@ -834,7 +849,7 @@ def test_the_named_condition_reaches_the_prompt_and_the_waiting_block():
     facts = {"condition": "hernia", "time_since_policy_start_value": 14,
              "time_since_policy_start_unit": "months"}
     listed = ShortlistClause("2.4", "t:1", "2.4", "waiting_period", HERNIA_LIST, 1.0,
-                             waiting_period_days=720)
+                             waiting_periods_days=[720])
     clauses = [listed, *_policy(HOSPITAL_TEXT)]
 
     rendered = render_reasoning_request("A hernia operation.", facts, clauses)

@@ -97,7 +97,7 @@ async def build_clauses(pdf: Path = GOLDEN_PDF) -> list[ShortlistClause]:
                 clause_type=analysis.clause_type,
                 text=seg.text,
                 impact_score=sc.impact_score,
-                waiting_period_days=analysis.waiting_period_days,
+                waiting_periods_days=analysis.waiting_periods_days,
                 exceptions=analysis.exceptions,
                 copay_percent=analysis.copay_percent,
                 copay_min_age_at_inception=analysis.copay_min_age_at_inception,
@@ -111,6 +111,22 @@ async def build_clauses(pdf: Path = GOLDEN_PDF) -> list[ShortlistClause]:
             )
         )
     return clauses
+
+
+NO_ANSWER = "no_answer"
+
+
+def _unanswered(case: dict, error: str) -> dict:
+    """The row for a case the model could not answer: wrong, and citing nothing."""
+    required = sorted(case["must_cite"])
+    return {
+        "id": case["id"], "expected": case["expected_verdict"], "got": NO_ANSWER,
+        "verdict_ok": False, "required": required,
+        "forbidden": sorted(case.get("must_not_cite", [])), "wrongly_cited": [],
+        "cited": [], "citation_ok": not required, "grounded": True, "unverified": [],
+        "reasoning": error, "why": case["why"], "truly_bad": 0, "flagged_bad": 0,
+        "fresh": True,
+    }
 
 
 async def run(
@@ -149,7 +165,15 @@ async def run(
         # run_scenario's own call to extract_facts is then a cache hit.
         await extract_facts(case["scenario"])
         calls_before = client.model_calls
-        result = await run_scenario(case["scenario"], clauses, resample=resample)
+        try:
+            result = await run_scenario(case["scenario"], clauses, resample=resample)
+        except client.LlmError as exc:
+            # M16: one answer that never finished ended the whole run, and every
+            # answer already given was lost with it. It is a wrong answer for
+            # this case, and is recorded as one.
+            print(f"      no answer: {exc}", flush=True)
+            rows.append(_unanswered(case, str(exc)))
+            continue
         # True if the reasoning reached the model. False means the verdict is
         # the stored bytes of an earlier run and cannot have moved. See
         # compare_with_previous for why that distinction carries the eval.

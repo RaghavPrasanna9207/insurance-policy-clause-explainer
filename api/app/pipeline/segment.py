@@ -90,8 +90,13 @@ _RE_SINGLE_LEVEL = re.compile(r"^(?:\d+\.?|\(.+\))$")
 # that merely start with a number ("24 hours", table rows) dilute the share.
 # 0.10 sits in the gap between the two groups, not inside either.
 BOLD_NUMBERING_SHARE = 0.10
-# "Clause 4.2", "Section 3", "Article II"
-_RE_LABELLED = re.compile(r"^(?:Clause|Section|Article|Part)\s+[\dIVXLivxl]+", re.I)
+# "Clause 4.2", "Section 3", "Article II", "LIST I - Items for which coverage is
+# not available". The List form is IRDAI's standard annexure of non-payable
+# items, used by two of three real wordings measured; without it Star's four
+# lists ran together under the benefits table and were cut every 3,000
+# characters, and the piece holding the never-paid items was read as a payout
+# cap. The closing \b is what keeps "List Items" from reading as "List I".
+_RE_LABELLED = re.compile(r"^(?:Clause|Section|Article|Part|List)\s+[\dIVXLivxl]+\b", re.I)
 
 # A structural heading: "SECTION 7", "PART II", "CHAPTER 3", in caps.
 # This is the PRIMARY unstyled-section signal, and it is deliberately structural
@@ -167,7 +172,9 @@ def _numbering(text: str) -> tuple[str, bool] | None:
     if m := _RE_PAREN.match(text):
         return m.group(0).strip(), True
     if m := _RE_LABELLED.match(text):
-        return m.group(0).strip(), True
+        # Whitespace collapsed: Niva sets "List  I" with two spaces, and this
+        # string becomes the id the model cites.
+        return " ".join(m.group(0).split()), True
     if _RE_BARE_INT.match(text):
         return None
     if m := _RE_DECIMAL.match(text):

@@ -177,3 +177,19 @@ def test_citation_problems_name_the_case_and_how_often():
         "a": ["cited forbidden 5.3 in 1/2"],
         "b": ["missing 6.6 in 2/2"],
     }
+
+
+def test_an_unanswered_case_is_wrong_and_cites_nothing():
+    """M16: one answer that never finished used to end the whole eval. It is now
+    a row like any other - wrong, missing its citation, counted by majority."""
+    from run_scenario_eval import NO_ANSWER, _unanswered
+
+    case = {"id": "a", "scenario": "", "expected_verdict": "not_covered",
+            "must_cite": ["2#2"], "why": ""}
+    unanswered = _unanswered(case, "LlmError: truncated")
+
+    assert unanswered["got"] == NO_ANSWER and not unanswered["verdict_ok"]
+    assert not unanswered["citation_ok"]
+    assert citation_problems([{"rows": [unanswered]}]) == {"a": ["missing 2#2 in 1/1"]}
+    right = {"rows": [row("a", "not_covered", "not_covered", True)]}
+    assert majority([{"rows": [unanswered]}, right, right])[0]["ok"]

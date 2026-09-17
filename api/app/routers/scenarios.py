@@ -68,7 +68,7 @@ async def create_scenario(
                 clause_type=analysis.clause_type,
                 text=clause.text,
                 impact_score=analysis.impact_score,
-                waiting_period_days=analysis.waiting_period_days,
+                waiting_periods_days=json.loads(analysis.waiting_periods_json or "[]"),
                 exceptions=json.loads(analysis.exceptions_json or "[]"),
                 copay_percent=analysis.copay_percent,
                 copay_min_age_at_inception=analysis.copay_min_age_at_inception,

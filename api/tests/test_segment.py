@@ -260,6 +260,47 @@ def test_plain_numbers_still_start_clauses_when_nothing_is_bold():
     assert numbers == ["2", "01", "12"]
 
 
+# IRDAI's standard annexure of non-payable items, as Star sets it: bold list
+# headings, plain numbered rows, the list number a separate word.
+_ANNEXURE_LISTS = [
+    ("Co Pay 5% co pay on all claims", 40, 100, False),
+    ("LIST I - Items for which coverage is not available in the policy", 40, 140, True),
+    ("35", 40, 160, False),
+    ("OXYGEN CYLINDER (FOR USAGE OUTSIDE THE HOSPITAL)", 80, 160, False),
+    ("LIST II - Items that are to be subsumed into", 40, 200, True),
+    ("Room Charges", 40, 220, False),
+    ("1", 40, 240, False),
+    ("BABY CHARGES (UNLESS SPECIFIED/INDICATED)", 80, 240, False),
+    ("List Items continue on the next page", 40, 260, False),
+]
+
+
+def test_each_annexure_list_is_a_clause_of_its_own():
+    """Regression test for Star's annexure (M16).
+
+    With no rule for "LIST I", the four lists ran on under the benefits table
+    and were cut every 3,000 characters. The piece holding the end of the
+    never-paid list was read as a payout cap, and a caesarean question was
+    told it "names this treatment" because the list includes a delivery kit.
+    Each list starting with its own heading lets it be read for what it is.
+    """
+    segments = segment(_document(_ANNEXURE_LISTS))
+
+    assert [s.number for s in segments] == ["", "LIST I", "LIST II"]
+    assert segments[1].text.startswith("LIST I - Items for which coverage is not available")
+    assert "OXYGEN CYLINDER" in segments[1].text
+    assert "BABY CHARGES" in segments[2].text
+    # "List Items" is prose, not "List I": the pattern needs a whole numeral.
+    assert "List Items continue" in segments[2].text
+
+
+def test_a_labelled_number_is_one_id_however_it_is_spaced():
+    """Niva sets "List  I" with two spaces; the model cites this string."""
+    from app.pipeline.segment import _numbering
+
+    assert _numbering("List  I – Expenses not covered") == ("List I", True)
+
+
 def test_section_words_are_matched_as_whole_words():
     """"condition" is a section word; "CONDITIONER", in a table row, is not."""
     from app.pipeline.ingest import Line

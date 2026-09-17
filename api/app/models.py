@@ -80,7 +80,9 @@ class ClauseAnalysis(SQLModel, table=True):
     limits_json: str = "{}"
     time_windows_json: str = "{}"
     # Structured, so the scenario simulator can compare rather than re-read.
-    waiting_period_days: int | None = None
+    # A list, in days: a clause can set a different period for each of its
+    # lists (see ClauseAnalysis.waiting_periods_days).
+    waiting_periods_json: str = "[]"
     exceptions_json: str = "[]"
     # The operands of a reduction, likewise structured so stage 5 can compare
     # rather than re-read. See app/pipeline/reduction.py.

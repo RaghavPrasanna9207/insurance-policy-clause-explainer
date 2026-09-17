@@ -49,12 +49,18 @@ class WaitingStatus(StrEnum):
     # The person did not say how long they have held the policy, so no
     # comparison is possible. Not a failure - the honest answer.
     UNKNOWN = "unknown"
+    # The clause sets more than one period and only the shorter ones have
+    # passed. Which one covers this treatment is a question about the clause's
+    # lists - language - so the arithmetic stops here and says so.
+    PARTLY_SERVED = "partly_served"
 
 
 @dataclass
 class WaitingCheck:
     clause_id: str
-    required_days: int
+    # Every period the clause sets, shortest first. Usually one; IRDAI's
+    # specified-disease clause sets 24 months for one list and 36 for another.
+    required_days: list[int]
     held_days: int | None
     status: WaitingStatus
     # The clause's own carve-outs, already checked against its text at
@@ -73,6 +79,22 @@ class WaitingCheck:
         if self.named:
             words = ", ".join(f'"{w}"' for w in self.named)
             who += f" (it names {words}, from the question)"
+        requires = _either(self.required_days)
+        if len(self.required_days) > 1:
+            requires += " (different periods for different treatments)"
+
+        if self.status is WaitingStatus.PARTLY_SERVED:
+            # M16, Star's specified-disease clause: 24 months for hernia, 36 for
+            # joint replacement. Stored as one number, 36, a hernia 30 months in
+            # would have been told a lifted bar still stood.
+            served = [d for d in self.required_days if d <= self.held_days]
+            waiting = [d for d in self.required_days if d > self.held_days]
+            return (
+                f"{who}: requires {requires}. Policy held {_human(self.held_days)}, "
+                f"so the {_either(served)} period is served and the {_either(waiting)} "
+                f"period is NOT. Which period this clause sets for this treatment "
+                f"decides whether it still blocks the claim: read the clause"
+            )
 
         if self.pre_existing and self.status is not WaitingStatus.SERVED:
             # Regression: on the Star policy, "this waiting period still
@@ -93,11 +115,11 @@ class WaitingCheck:
                 f"{who}: concerns ONLY an illness the person already had when the "
                 f"policy began. Unless the description says this one had begun by "
                 f"then, it is not the reason for this claim. (Requires "
-                f"{_human(self.required_days)}; {held}.)"
+                f"{requires}; {held}.)"
             )
         if self.status is WaitingStatus.UNKNOWN:
             return (
-                f"{who}: requires {_human(self.required_days)}, "
+                f"{who}: requires {requires}, "
                 f"but how long the policy has been held was NOT STATED, so whether "
                 f"this bar has lifted cannot be determined"
             )
@@ -108,7 +130,7 @@ class WaitingCheck:
             # covered, three samples of three: read as permission, not as one
             # bar removed.
             return (
-                f"{who}: requires {_human(self.required_days)}, policy held "
+                f"{who}: requires {requires}, policy held "
                 f"{_human(self.held_days)} -> this waiting period is served and no "
                 f"longer applies (it says nothing about any other clause)"
             )
@@ -120,12 +142,12 @@ class WaitingCheck:
             # claim and answered "covered" to questions about co-payments and
             # room-rent caps. Correct facts, overreaching phrasing.
             return (
-                f"clause {self.clause_id}: requires {_human(self.required_days)}, "
+                f"clause {self.clause_id}: requires {requires}, "
                 f"policy held {_human(self.held_days)} -> this waiting period no "
                 f"longer applies (it says nothing about any other clause)"
             )
         blocked = (
-            f"{who}: requires {_human(self.required_days)}, "
+            f"{who}: requires {requires}, "
             f"policy held {_human(self.held_days)} -> this waiting period still "
             f"applies and blocks treatment covered by THIS clause"
         )
@@ -163,13 +185,18 @@ def _human(days: int | None) -> str:
     return f"{days} day" + ("s" if days != 1 else "")
 
 
+def _either(days: list[int]) -> str:
+    """"36 months", or "24 months or 36 months" for a clause that sets two."""
+    return " or ".join(_human(d) for d in days)
+
+
 def evaluate(
     clauses, days_held: int | None, named: dict[str, list[str]] | None = None
 ) -> list[WaitingCheck]:
     """Compare every waiting period against how long the policy has been held.
 
     `clauses` is any iterable of objects exposing `clause_id` and
-    `waiting_period_days`; only those with a duration are considered, so
+    `waiting_periods_days`; only those with a duration are considered, so
     exclusions and sub-limits are ignored here rather than filtered by the
     caller. `named` maps a clause id to the words it shares with what the
     person described.
@@ -177,16 +204,21 @@ def evaluate(
     named = named or {}
     checks: list[WaitingCheck] = []
     for clause in clauses:
-        required = getattr(clause, "waiting_period_days", None)
-        if not required or required <= 0:
+        required = sorted({d for d in getattr(clause, "waiting_periods_days", None) or [] if d > 0})
+        if not required:
             continue
 
+        # Served only when the LONGEST period has passed, and not served only
+        # when even the shortest has not: in between, the answer depends on
+        # which period covers this treatment.
         if days_held is None:
             status = WaitingStatus.UNKNOWN
-        elif days_held >= required:
+        elif days_held >= required[-1]:
             status = WaitingStatus.SERVED
-        else:
+        elif days_held < required[0]:
             status = WaitingStatus.NOT_SERVED
+        else:
+            status = WaitingStatus.PARTLY_SERVED
 
         checks.append(
             WaitingCheck(
@@ -229,7 +261,13 @@ def render(checks: list[WaitingCheck]) -> str:
     def first(check: WaitingCheck) -> tuple[bool, bool]:
         return (not check.named, check.pre_existing)
 
-    blocking = sorted((c for c in checks if c.status is WaitingStatus.NOT_SERVED), key=first)
+    # A partly served period may still block, so it is listed with the ones
+    # that do - and "no waiting period blocks this claim" is not said beside it.
+    blocking = sorted(
+        (c for c in checks
+         if c.status in (WaitingStatus.NOT_SERVED, WaitingStatus.PARTLY_SERVED)),
+        key=first,
+    )
     unknown = sorted((c for c in checks if c.status is WaitingStatus.UNKNOWN), key=first)
     # A served period that names the person's treatment is the reason a claim
     # is not barred, so it keeps a line of its own.

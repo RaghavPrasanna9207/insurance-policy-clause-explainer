@@ -56,6 +56,7 @@ citations impossible, applied here to keep analyses correctly attributed.
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -67,6 +68,10 @@ from app.pipeline.segment import Segment
 from app.taxonomy import ClauseType
 
 log = logging.getLogger(__name__)
+
+# "24 months", "1 year": a time_windows entry that is a duration and nothing else.
+_BARE_DURATION = re.compile(r"(\d+)\s*(day|month|year)s?", re.IGNORECASE)
+_DAYS_PER = {"day": 1, "month": 30, "year": 365}
 
 
 @dataclass
@@ -132,6 +137,32 @@ class ClauseAnalysis:
             return None
         per = {"days": 1, "months": 30, "years": 365}.get(self.waiting_period_unit or "")
         return self.waiting_period_value * per if per else None
+
+    @property
+    def waiting_periods_days(self) -> list[int]:
+        """Every waiting period this clause sets, in days, shortest first.
+
+        Usually one. IRDAI's specified-disease clause sets two: "24 Months
+        waiting period" over one list of illnesses and "36 Months" over another.
+        The schema holds a single value, and Star's clause was stored as 36 -
+        so a hernia claim 30 months in would have been told a bar still stood
+        that had lifted six months earlier.
+
+        The other periods come from the model's own `time_windows` for the same
+        clause ("24 months", "36 months"), and only on a clause that has a
+        waiting period at all. Only an entry that is nothing but a duration
+        counts: "within 30 days of discharge" is not one of this clause's
+        waiting periods, and guessing that it might be is how a cover window
+        was once read as a bar.
+        """
+        first = self.waiting_period_days
+        if first is None:
+            return []
+        periods = {first}
+        for window in self.time_windows:
+            if m := _BARE_DURATION.fullmatch(window.strip()):
+                periods.add(int(m[1]) * _DAYS_PER[m[2].lower()])
+        return sorted(p for p in periods if p > 0)
 
     @property
     def cover_window_days(self) -> int | None:
@@ -313,6 +344,98 @@ def _parse(payload: dict[str, Any]) -> dict[str, ClauseAnalysis]:
     return out
 
 
+# --- readings checked against the clause's own words -----------------------
+#
+# The same arrangement as verify_exception: the model reads, and a reading that
+# the clause's text contradicts is corrected before anything stores or computes
+# with it. Both checks below were measured wrong on the Star policy, and both
+# point the reasoning step at the wrong clause when left alone.
+
+# A waiting period counts from the policy's start, and says so. Every waiting
+# period in the four wordings measured (three real, one synthetic) names it in
+# one of these ways.
+_POLICY_START = re.compile(
+    r"waiting[\s-]+period|inception|commencement|continuous(?:ly)?\s+cover",
+    re.IGNORECASE,
+)
+# A cover window counts from one hospital stay. "prior to the date of
+# admissible hospitalization", "immediately preceding the date of admission".
+_BEFORE_STAY = re.compile(
+    r"\b(?:prior\s+to|preceding|before)\s+(?:the\s+)?(?:date\s+of\s+)?(?:\w+\s+)?"
+    r"(?:admission|hospitali[sz]ation)\b",
+    re.IGNORECASE,
+)
+_AFTER_STAY = re.compile(
+    r"\b(?:after|following|from)\s+(?:the\s+)?(?:date\s+of\s+)?discharge\b",
+    re.IGNORECASE,
+)
+
+
+def correct_stay_period(analysis: ClauseAnalysis, text: str) -> None:
+    """Move a period counted from a hospital stay out of the waiting period.
+
+    Measured on the Star policy: pre-hospitalisation, "for a fixed period of 30
+    days prior to the date of admissible hospitalization", was stored as a
+    30-day waiting period and typed waiting_period. The waiting-period block
+    then told a dengue question, 20 days into the policy, that clause 4 "still
+    applies and blocks" the claim - listed above the real 30-day exclusion.
+    The prompt already separates the two; the synthetic wording, "immediately
+    preceding", was read correctly, and this phrasing was not.
+
+    Corrected only on positive evidence: the clause counts from a stay and
+    never mentions the policy's start. Dropping a real waiting period would
+    tell someone nothing bars a claim that is barred, so a clause that says
+    both is left exactly as read.
+    """
+    if analysis.waiting_period_days is None or _POLICY_START.search(text):
+        return
+    before, after = _BEFORE_STAY.search(text), _AFTER_STAY.search(text)
+    if not (before or after):
+        return
+
+    log.info("clause %s: a period counted from a hospital stay is not a waiting period",
+             analysis.clause_key)
+    # The side is known only when the clause names one. A clause naming both
+    # loses the misread period and gains no window, rather than a guessed side.
+    if analysis.cover_window_value is None and bool(before) != bool(after):
+        analysis.cover_window_value = analysis.waiting_period_value
+        analysis.cover_window_unit = analysis.waiting_period_unit
+        analysis.cover_window_anchor = "before_admission" if before else "after_discharge"
+    analysis.waiting_period_value = None
+    analysis.waiting_period_unit = None
+    # The type was read from the same mistake. A clause granting expenses within
+    # a window is coverage, as the synthetic policy's own pre-hospitalisation
+    # clause is labelled.
+    if analysis.clause_type == ClauseType.WAITING_PERIOD:
+        analysis.clause_type = ClauseType.COVERAGE.value
+
+
+_PER_DAY = re.compile(r"per\s+day|per\s+diem|/\s*day\b|\bdaily\b", re.IGNORECASE)
+_DAILY_CAPS = (
+    "cap_percent_of_sum_insured", "icu_cap_percent_of_sum_insured",
+    "cap_max_inr_per_day", "icu_cap_max_inr_per_day",
+)
+
+
+def correct_daily_cap(analysis: ClauseAnalysis, text: str) -> None:
+    """Drop a per-day accommodation cap from a clause that sets no daily rate.
+
+    Measured: Star's cataract limit, "25% of Sum Insured or Rs.40,000/-,
+    whichever is lower, per each eye", was stored as a room-rent cap of 25% a
+    day, and a cataract question was told "room rent are capped at 25% of the
+    sum insured per day". The synthetic policy's modern-treatment limit, "fifty
+    percent of the Sum Insured per Policy Year", carried the same misreading
+    unnoticed. A cap that is not per day is still a cap: with the numbers gone,
+    stage 5 lists the clause for the model to read against the treatment
+    (reduction.py, JUDGEMENT), which is what a cataract limit needs.
+    """
+    if _PER_DAY.search(text) or all(getattr(analysis, f) is None for f in _DAILY_CAPS):
+        return
+    log.info("clause %s: dropped a per-day cap the clause does not state", analysis.clause_key)
+    for name in _DAILY_CAPS:
+        setattr(analysis, name, None)
+
+
 async def _analyze_batch(
     batch: list[Segment], use_cache: bool = True
 ) -> dict[str, ClauseAnalysis]:
@@ -339,6 +462,8 @@ async def _analyze_batch(
                 key, [e for e in analysis.exceptions if e not in kept],
             )
         analysis.exceptions = kept
+        correct_stay_period(analysis, text_by_id[key])
+        correct_daily_cap(analysis, text_by_id[key])
     return analyses
 
 

@@ -14,19 +14,19 @@ from app.pipeline.waiting import WaitingStatus, evaluate, render
 @dataclass
 class FakeClause:
     clause_id: str
-    waiting_period_days: int | None = None
+    waiting_periods_days: list[int] = field(default_factory=list)
     exceptions: list[str] = field(default_factory=list)
     text: str = ""
 
 
 def test_an_elapsed_waiting_period_is_served():
     """The exact case the model got wrong: 5 years against a 36-month bar."""
-    checks = evaluate([FakeClause("3.2", 1080)], days_held=1800)
+    checks = evaluate([FakeClause("3.2", [1080])], days_held=1800)
     assert checks[0].status is WaitingStatus.SERVED
 
 
 def test_an_unelapsed_waiting_period_is_not_served():
-    checks = evaluate([FakeClause("3.2", 1080)], days_held=240)
+    checks = evaluate([FakeClause("3.2", [1080])], days_held=240)
     assert checks[0].status is WaitingStatus.NOT_SERVED
 
 
@@ -34,15 +34,15 @@ def test_the_boundary_is_inclusive():
     """Exactly 36 months of continuous coverage satisfies "until the expiry of
     thirty six months". A model asked this would be guessing; here it is a
     decision made once, in one place, and documented."""
-    assert evaluate([FakeClause("3.2", 1080)], 1080)[0].status is WaitingStatus.SERVED
-    assert evaluate([FakeClause("3.2", 1080)], 1079)[0].status is WaitingStatus.NOT_SERVED
+    assert evaluate([FakeClause("3.2", [1080])], 1080)[0].status is WaitingStatus.SERVED
+    assert evaluate([FakeClause("3.2", [1080])], 1079)[0].status is WaitingStatus.NOT_SERVED
 
 
 def test_unstated_policy_age_yields_unknown_not_a_guess():
     """If the person never said how long they have held the policy, no
     comparison is possible. UNKNOWN is what lets the reasoning step answer
     insufficient_information honestly instead of asserting a verdict."""
-    checks = evaluate([FakeClause("3.2", 1080)], days_held=None)
+    checks = evaluate([FakeClause("3.2", [1080])], days_held=None)
     assert checks[0].status is WaitingStatus.UNKNOWN
     assert "NOT STATED" in checks[0].describe()
 
@@ -50,20 +50,20 @@ def test_unstated_policy_age_yields_unknown_not_a_guess():
 def test_clauses_without_a_waiting_period_are_ignored():
     """Exclusions and sub-limits carry no duration and must not appear as
     waiting periods that were somehow satisfied."""
-    clauses = [FakeClause("4.1"), FakeClause("5.1", None), FakeClause("3.2", 720)]
+    clauses = [FakeClause("4.1"), FakeClause("5.1", []), FakeClause("3.2", [720])]
     assert [c.clause_id for c in evaluate(clauses, 900)] == ["3.2"]
 
 
 def test_zero_or_negative_durations_are_ignored():
     """Guards against a model emitting 0 for "no waiting period", which would
     otherwise render as a bar that is always trivially served."""
-    assert evaluate([FakeClause("3.2", 0)], 900) == []
-    assert evaluate([FakeClause("3.2", -6)], 900) == []
+    assert evaluate([FakeClause("3.2", [0])], 900) == []
+    assert evaluate([FakeClause("3.2", [-6])], 900) == []
 
 
 def test_render_states_the_conclusion_not_the_puzzle():
     """The block hands over an answer, not an exercise."""
-    block = render(evaluate([FakeClause("3.2", 1080)], 1800))
+    block = render(evaluate([FakeClause("3.2", [1080])], 1800))
     assert "IRRELEVANT" in block
     assert "ALREADY CALCULATED" in block
 
@@ -80,7 +80,7 @@ def test_render_states_what_it_does_NOT_decide():
     Correct facts can mislead when their scope is implied rather than stated.
     The block must therefore say out loud which clause types it does not settle.
     """
-    block = render(evaluate([FakeClause("3.2", 1080)], 1800))
+    block = render(evaluate([FakeClause("3.2", [1080])], 1800))
 
     assert "SCOPE" in block
     for other in ("exclusion", "cap", "co-payment", "notice condition"):
@@ -109,8 +109,8 @@ def test_days_and_months_are_not_confused():
     The model now reports the value and its unit separately and Python
     converts, so a 30-day bar and a 30-month bar can never collapse together.
     """
-    thirty_days = FakeClause("3.1", 30)
-    thirty_months = FakeClause("3.2", 900)
+    thirty_days = FakeClause("3.1", [30])
+    thirty_months = FakeClause("3.2", [900])
 
     # Held 60 days: past a 30-day bar, nowhere near a 30-month one.
     checks = {c.clause_id: c.status for c in evaluate([thirty_days, thirty_months], 60)}
@@ -138,7 +138,7 @@ def test_served_periods_collapse_to_one_line():
     missing the clause that actually answered them. Four non-events were
     outweighing the one clause that mattered.
     """
-    served = [FakeClause("3.1", 30), FakeClause("3.2", 1080), FakeClause("3.3", 720)]
+    served = [FakeClause("3.1", [30]), FakeClause("3.2", [1080]), FakeClause("3.3", [720])]
     block = render(evaluate(served, 1800))
 
     # One combined line, not three.
@@ -148,7 +148,7 @@ def test_served_periods_collapse_to_one_line():
 
 def test_blocking_periods_still_get_their_own_line():
     """The half that does decide something keeps full treatment."""
-    clauses = [FakeClause("3.1", 30), FakeClause("3.2", 1080)]
+    clauses = [FakeClause("3.1", [30]), FakeClause("3.2", [1080])]
     block = render(evaluate(clauses, 60))  # past 30 days, short of 36 months
 
     assert "IRRELEVANT here" in block          # 3.1 satisfied
@@ -156,7 +156,7 @@ def test_blocking_periods_still_get_their_own_line():
     assert "3.2" in block
 
 
-INITIAL = FakeClause("3.1", 30, ["claims arising out of an Accident"])
+INITIAL = FakeClause("3.1", [30], ["claims arising out of an Accident"])
 
 
 def test_a_blocking_period_names_its_own_exception():
@@ -188,10 +188,10 @@ def test_a_served_or_unknown_period_does_not_repeat_its_exception():
 # Shaped like the IRDAI standard wording: the pre-existing diseases exclusion,
 # and the specified-disease list, which mentions pre-existing diseases in its
 # body only to say which of two periods wins.
-PED = FakeClause("1#2", 1080, text=(
+PED = FakeClause("1#2", [1080], text=(
     "1. Pre-Existing Diseases - Code Excl 01 A. Expenses related to the treatment of a "
     "pre-existing disease and its direct complications shall be excluded."))
-LISTED = FakeClause("2#2", 720, text=(
+LISTED = FakeClause("2#2", [720], text=(
     "2. Specified disease / procedure waiting period - Code Excl 02 A. Expenses related to "
     "the treatment of the following listed conditions shall be excluded. C. If any of the "
     "specified disease/procedure falls under the waiting period specified for pre-existing "
@@ -248,3 +248,42 @@ def test_a_served_period_naming_the_condition_is_not_called_irrelevant():
 def test_naming_is_optional():
     """Callers that know nothing about the question still get the old block."""
     assert evaluate([LISTED], 420) == evaluate([LISTED], 420, named={})
+
+
+# --- a clause that sets two periods (M16, the Star policy) ------------------
+
+# Star's specified-disease clause: 24 months for one list (hernia), 36 for
+# another (joint replacement). It was stored as 36 alone.
+TWO_LISTS = FakeClause("2#2", [720, 1080])
+
+
+def test_a_clause_with_two_periods_is_partly_served_between_them():
+    """Regression test for the 24/36-month clause stored as 36.
+
+    Thirty months in, a hernia claim is payable and a joint replacement is
+    not. With one number the block said the bar "still applies" to both.
+    Which list a treatment is on is language, so the block gives both results
+    and leaves that reading to the model.
+    """
+    check = evaluate([TWO_LISTS], days_held=900)[0]
+    assert check.status is WaitingStatus.PARTLY_SERVED
+
+    line = check.describe()
+    assert "the 24 months period is served" in line
+    assert "the 36 months period is NOT" in line
+    assert "still applies" not in line
+
+
+def test_a_clause_with_two_periods_is_decided_when_both_agree():
+    """Short of both, or past both, the answer does not depend on the list."""
+    assert evaluate([TWO_LISTS], days_held=420)[0].status is WaitingStatus.NOT_SERVED
+    assert evaluate([TWO_LISTS], days_held=1080)[0].status is WaitingStatus.SERVED
+    assert "24 months or 36 months" in evaluate([TWO_LISTS], days_held=420)[0].describe()
+
+
+def test_a_partly_served_period_is_listed_with_the_ones_that_block():
+    """It may still block, so the block must not also say that nothing does."""
+    block = render(evaluate([TWO_LISTS], days_held=900))
+    assert "clause 2#2" in block
+    assert "No waiting period blocks this claim" not in block
+    assert "IRRELEVANT" not in block
