@@ -213,9 +213,22 @@ def _copay_check(clause, facts, policy_age_days) -> ReductionCheck | None:
     if threshold is None:
         # The clause imposes a co-payment but states no age condition, so it
         # applies to everyone and there is nothing to compare.
+        #
+        # M16, Star: "a 5% co-payment applies" was the only APPLIES line on
+        # the page, right after "Some other clause decides it", and the same
+        # on every question. A caesarean, a stay in Dubai and a gallbladder
+        # with no dates were all answered "conditional because a 5%
+        # co-payment applies", none mentioning the exclusion or waiting period
+        # that decides them. The age-based line above was given "IF this
+        # claim is payable at all" for the same reason (a nose job at 70);
+        # this branch never was, because the synthetic policy has no
+        # co-payment without a condition.
         return ReductionCheck(
             clause.clause_id, ReductionKind.COPAY, ReductionStatus.APPLIES,
-            f"a {percent}% co-payment applies to the admissible claim amount",
+            f"a {percent}% co-payment is taken from EVERY claim this policy pays, "
+            f"so it says nothing about whether THIS claim is paid - settle that "
+            f"from the exclusions and waiting periods first. IF this claim is "
+            f"payable at all, it is paid at {100 - percent}% of the admissible amount",
         )
 
     if inception_age is None:

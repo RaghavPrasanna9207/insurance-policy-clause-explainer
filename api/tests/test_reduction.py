@@ -66,6 +66,21 @@ def test_an_applicable_copay_does_not_claim_the_claim_is_paid():
     assert "IF this claim is payable at all" in detail
 
 
+def test_a_copay_on_every_claim_does_not_decide_whether_this_one_is_paid():
+    """Regression test for the Star policy (M16): 5% of each and every claim.
+
+    Its line was the only APPLIES on the page, identical for every question,
+    and a caesarean, a stay abroad and an undated gallbladder removal were all
+    answered "conditional because a 5% co-payment applies". The line now says
+    what the age-based one says, and why it cannot be the reason."""
+    universal = FakeClause("9", copay_percent=5)
+    check = evaluate([universal], {}, policy_age_days=None)[0]
+
+    assert check.status is ReductionStatus.APPLIES
+    assert "EVERY claim this policy pays" in check.detail
+    assert "IF this claim is payable at all, it is paid at 95%" in check.detail
+
+
 def test_under_the_age_threshold_does_not_apply():
     """The false-positive direction, which matters just as much. A system
     pushed to hunt for co-payments will start finding them for people who do
