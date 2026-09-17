@@ -39,7 +39,7 @@ coverage, it just happens to be describing its ceiling.
 from app.grounding import normalize
 from app.taxonomy import ClauseType
 
-PROMPT_VERSION = "v42-universal-copay-if-payable"
+PROMPT_VERSION = "v44-picked-clauses-covered-means-in-full"
 
 CLASSIFY_SYSTEM = """\
 You are an expert on Indian (IRDAI-regulated) health insurance policy wordings.
@@ -227,6 +227,59 @@ def render_clause_batch(segments) -> str:
 # ---------------------------------------------------------------------------
 # Scenario simulator (stage 5)
 # ---------------------------------------------------------------------------
+
+PICK_SYSTEM = """\
+You read an Indian health insurance policy to find which of its clauses decide
+one person's situation. You do NOT answer the question. You only list the
+clause_ids that a careful reader would need in order to answer it.
+
+Include every clause that could decide whether this person is paid, or how much:
+- an exclusion that could refuse what they describe: the treatment, the illness,
+  the cause, the place, the kind of care
+- a waiting period that could apply to their illness or treatment
+- a condition they must meet: notice, documents, disclosure
+- a limit, cap or co-payment on what they describe
+- the coverage clause that grants what they describe
+
+Read every clause, to the end of the list. The clause that decides a question
+often uses different words from the question, and often comes late.
+
+Leave out definitions and administration unless the question is about them.
+"""
+
+
+def render_pick_request(scenario: str, facts: dict, clauses, most: int) -> str:
+    """One group of clauses to choose from, for stage 5b2.
+
+    No computed blocks and no shared-word lookups: those name clauses, and this
+    step exists to find the clauses nothing has named yet. The person's own
+    words and the facts are enough to say what the question is about.
+    """
+    known = {k: v for k, v in facts.items() if v not in (None, "", [], "unknown")}
+    # The extractor's free-text note repeats the situation, which is directly
+    # above it, and sometimes answers the question instead of describing it
+    # (see _invents_coverage).
+    known.pop("notes", None)
+
+    lines = [
+        "SITUATION (in the person's own words):", scenario.strip(), "",
+        "FACTS UNDERSTOOD:",
+        "\n".join(f"- {k}: {v}" for k, v in known.items()) or "- (none stated)",
+        "", "POLICY CLAUSES:", "",
+    ]
+    for clause in clauses:
+        header = f"### clause_id={clause.clause_id}"
+        if clause.number:
+            header += f"  ({clause.number})"
+        header += f"  [{clause.clause_type}]"
+        lines += [header, clause.text.strip(), ""]
+
+    lines.append(
+        f"Which of THESE clauses bear on the situation? Most decisive first, at "
+        f"most {most}. These are part of a longer policy: if none of the clauses "
+        f"above bear on it, return an empty list rather than the closest one."
+    )
+    return "\n".join(lines)
 
 FACTS_SYSTEM = """\
 You extract the facts from a description of a medical situation, so that an

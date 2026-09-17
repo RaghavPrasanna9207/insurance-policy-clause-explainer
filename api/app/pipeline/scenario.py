@@ -47,7 +47,9 @@ from app.grounding import QuoteCheck, verified_prefix, verify_citations
 from app.llm import client
 from app.llm.prompts import (
     FACTS_SYSTEM,
+    PICK_SYSTEM,
     REASON_SYSTEM,
+    render_pick_request,
     render_reasoning_request,
     render_scenario,
 )
@@ -555,6 +557,153 @@ def shared_words(
     return dict(sorted(shared.items(), key=lambda item: order[item[0]]))
 
 
+# --- 5b2: picking, for a policy too long to read in one pass ---------------
+#
+# WHY THIS EXISTS, AND WHY IT IS NOT RETRIEVAL
+# -------------------------------------------
+# The premise of having no retrieval (M15) is that every clause fits in the
+# window, so nothing can be dropped before the model sees it. On the standard
+# IRDAI wording that holds: 80 clauses, about 19,500 tokens, all of it in the
+# prompt. What M16 measured is that fitting is not the same as reading. With
+# the whole policy in front of it, this 7B model attached one clause's text to
+# another's id, contradicted its own reasoning, and cited the deciding clause
+# in 2 questions of 10.
+#
+# Asked ONLY to pick the clauses that bear on a question, measured against the
+# answer key:
+#
+#     synthetic policy,  3,300 tokens of clauses   28 of 32 questions
+#     Star policy,      19,500 tokens of clauses    1-2 of 10
+#     Star, in groups of 3,000 tokens               7 of 10 (9 with the
+#                                                   clauses code already names)
+#
+# So the model reads a short list well and a long one badly, and the fix is to
+# give it short lists: the clauses in document order, in groups, each group
+# answered on its own. Every clause is still read by the model, and nothing is
+# ranked, embedded or searched - the difference from retrieval is that the
+# model sees each clause in full and decides, rather than a score deciding for
+# it.
+PICK_GROUP_TOKENS = 3_000
+# Per group, not per policy: a group is a slice of a document, and the question
+# it decides may have three of its clauses in one slice and none in the next.
+MAX_PICKS_PER_GROUP = 3
+# Below this, the policy is read in one pass. The synthetic policy (3,346
+# tokens) is read well whole and picked at 28 of 32, so picking it could only
+# lose clauses; Star at 19,500 is not. The threshold sits between the two
+# measured points, nearer the one that reads well.
+PICK_ABOVE_TOKENS = 6_000
+
+
+def clause_tokens(clauses: list[ShortlistClause]) -> int:
+    return int(sum(len(c.text) for c in clauses) / CHARS_PER_TOKEN)
+
+
+def clause_groups(clauses: list[ShortlistClause]) -> list[list[ShortlistClause]]:
+    """Clauses in document order, in groups of about PICK_GROUP_TOKENS.
+
+    Document order, not relevance order: a clause is easier to judge beside the
+    ones the insurer wrote around it, and the groups then line up with the
+    policy's own sections.
+    """
+    groups: list[list[ShortlistClause]] = []
+    current: list[ShortlistClause] = []
+    used = 0
+    for clause in clauses:
+        cost = int(len(clause.text) / CHARS_PER_TOKEN) + 20  # +20 for the header
+        if current and used + cost > PICK_GROUP_TOKENS:
+            groups.append(current)
+            current, used = [], 0
+        current.append(clause)
+        used += cost
+    if current:
+        groups.append(current)
+    return groups
+
+
+def _pick_schema(ids: list[str]) -> dict[str, Any]:
+    """Ids the model may pick from this group, and how many.
+
+    `minItems` is 0 on purpose: most groups of a policy have nothing to do with
+    any one question, and a schema that demands a pick turns every group into a
+    false positive. The enum is this group's ids only, which also keeps "8" and
+    "8#2" from being offered together.
+    """
+    return {
+        "type": "object",
+        "properties": {
+            "clause_ids": {
+                "type": "array",
+                "minItems": 0,
+                "maxItems": MAX_PICKS_PER_GROUP,
+                "items": {"type": "string", "enum": ids},
+            },
+        },
+        "required": ["clause_ids"],
+    }
+
+
+async def pick_clauses(
+    scenario: str, facts: dict[str, Any], clauses: list[ShortlistClause],
+    *, use_cache: bool = True,
+) -> list[str]:
+    """Clause ids the model picks as bearing on this situation, group by group."""
+    picked: list[str] = []
+    for group in clause_groups(clauses):
+        payload = await client.complete_json(
+            [
+                {"role": "system", "content": PICK_SYSTEM},
+                {"role": "user", "content": render_pick_request(
+                    scenario, facts, group, MAX_PICKS_PER_GROUP)},
+            ],
+            _pick_schema([c.clause_id for c in group]),
+            use_cache=use_cache,
+        )
+        picked += [i for i in payload["clause_ids"] if i not in picked]
+    return picked
+
+
+def named_by_code(
+    computed: "Computed", scenario: str, clauses: list[ShortlistClause],
+    facts: dict[str, Any],
+) -> set[str]:
+    """Clauses the computed blocks and the word lookups put in the prompt.
+
+    These must be shown whatever the model picks, for two reasons. The blocks
+    name them ("clause 2#2: requires 24 months or 36 months ..."), and a line
+    about a clause that is not in the prompt is a dangling reference the model
+    cannot check or cite. And they are named because code found something in
+    them - a bar not yet served, a cap that bites, a word from the question -
+    which is exactly what a pick can miss.
+    """
+    named = {c.clause_id for c in computed.waiting}
+    named |= {c.clause_id for c in computed.reductions
+              if c.status is not reduction.ReductionStatus.NOT_RAISED}
+    named |= {c.clause_id for c in computed.windows
+              if c.status is not window.WindowStatus.NOT_RAISED}
+    named |= set(shared_words(scenario, clauses, facts))
+    named |= set(computed.absent)
+    return named
+
+
+async def narrow(
+    scenario: str, facts: dict[str, Any], clauses: list[ShortlistClause],
+    computed: "Computed", *, use_cache: bool = True,
+) -> list[ShortlistClause]:
+    """The clauses the reasoning step sees, for a policy too long to read whole.
+
+    The model's picks plus everything code already names, in document order. A
+    pick is never allowed to remove a clause the blocks talk about.
+    """
+    keep = set(await pick_clauses(scenario, facts, clauses, use_cache=use_cache))
+    keep |= named_by_code(computed, scenario, clauses, facts)
+    chosen = [c for c in clauses if c.clause_id in keep]
+    log.info(
+        "picked %d of %d clauses (%d of %d tokens of clause text)",
+        len(chosen), len(clauses), clause_tokens(chosen), clause_tokens(clauses),
+    )
+    return chosen
+
+
 _ANNEXURE = re.compile(r"\bannexure\s+([ivxl]+|\d+)\b", re.IGNORECASE)
 
 
@@ -767,13 +916,29 @@ def find_contradictions(
             c.clause_id: c for c in computed.reductions
             if c.status is reduction.ReductionStatus.APPLIES
         }
+        flagged = set()
         for citation in citations:
             check = applies.get(citation.clause_id)
             if citation.effect == "reduces" and check is not None:
+                flagged.add(citation.clause_id)
                 problems.append(
                     f"- You cited clause {citation.clause_id} as reducing this claim, "
                     f"and it was calculated that it does: {check.describe()}. A claim "
                     f"paid less than in full is conditional, not covered."
+                )
+        # The same contradiction where the answer never mentioned the clause.
+        # M16, Star: a policy that takes 5% from every claim it pays cannot pay
+        # one in full, whatever the answer cites. Covered was still the verdict
+        # on a hernia three years in, and on a caesarean the maternity
+        # exclusion refuses outright.
+        for clause_id, check in applies.items():
+            if clause_id not in flagged:
+                problems.append(
+                    f"- You answered covered, which means paid in full, but it was "
+                    f"calculated that {check.describe()}. If this claim is payable, "
+                    f"it is paid at less than the full amount, which is conditional; "
+                    f"if some clause refuses it outright, it is not_covered. It "
+                    f"cannot be covered."
                 )
 
     denying = [c.clause_id for c in citations if c.effect == "denies"]
@@ -930,6 +1095,16 @@ async def run_scenario(
         )
 
     computed = compute(facts, considered)
+    # Computed on every clause, before any picking: a waiting period or a cap
+    # must be checked whether or not the model picks its clause. The picking
+    # below only decides what the reasoning step READS, and it can never drop a
+    # clause these results name.
+    if clause_tokens(considered) > PICK_ABOVE_TOKENS:
+        # The pick is cached even when the answer is resampled, for the reason
+        # the facts are: what a repeat sample measures is whether the ANSWER is
+        # stable, and re-picking would change the question it answers.
+        considered = await narrow(scenario, facts, considered, computed)
+
     payload = await reason(
         scenario, facts, considered, computed, use_cache=not resample
     )
@@ -1025,6 +1200,21 @@ async def run_scenario(
             # window cites the window clause as "permits".
             log.warning("refusal after the missing-list retry names no refusing clause; downgrading")
             verdict = Verdict.INSUFFICIENT_INFORMATION
+
+    # Covered means paid in full, and the arithmetic says something cuts this
+    # claim: a co-payment on every claim, a room rate over its cap. The retry
+    # above puts that in front of the model, and M16 measured it answering
+    # covered anyway - "the claim is covered, but the payment will be
+    # conditional on the actual amount being 95%", its own sentence saying
+    # both. Correcting the label is the safe direction, the same as the
+    # downgrade for an answer with no citations: it takes away a promise of
+    # payment in full that no calculation supports, and leaves the citations,
+    # which are the model's to make.
+    if verdict == Verdict.COVERED and any(
+        c.status is reduction.ReductionStatus.APPLIES for c in computed.reductions
+    ):
+        log.warning("covered, though a reduction applies; correcting to conditional")
+        verdict = Verdict.CONDITIONAL
 
     # Only when something else still stands: a verdict is never left with nothing
     # behind it by this filter, so it can never trigger a downgrade.

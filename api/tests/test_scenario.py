@@ -304,6 +304,17 @@ def _clauses():
     ]
 
 
+def _copay_clause():
+    """Star's co-payment: 5% of every claim, no condition to compare."""
+    from app.pipeline.scenario import ShortlistClause
+
+    return ShortlistClause(
+        "9", "t:9", "9", "sub_limit",
+        "9. Co-payment: Each and every claim shall be subject to a co-payment of 5%.",
+        1.0, copay_percent=5,
+    )
+
+
 def _citation(clause_id, effect):
     from app.pipeline.scenario import Citation
 
@@ -590,6 +601,64 @@ def test_a_treatment_the_policy_names_elsewhere_is_not_questioned():
     assert find_contradictions(cited, "conditional", computed) == ([], [])
 
 
+# --- 5b2: picking the clauses a long policy is answered from ----------------
+
+
+def _long_policy(count: int = 30):
+    """A policy far past the length one pass reads reliably.
+
+    Each clause is padded to about 250 tokens, the size of a real one, so the
+    groups below come out at roughly the number a real wording produces.
+    """
+    from app.pipeline.scenario import ShortlistClause
+
+    padding = " Words of the policy, repeated to the length of a real clause." * 13
+    return [
+        ShortlistClause(f"{i}", f"t:{i}", f"{i}", "exclusion", f"Clause {i}.{padding}", 1.0)
+        for i in range(count)
+    ]
+
+
+def test_clauses_are_grouped_in_document_order_at_the_length_that_reads_well():
+    """Measured in M16: asked to pick the clauses bearing on a question, the
+    model was right for 28 of 32 questions at 3,300 tokens of clause text and
+    for 1-2 of 10 at 19,500. So it is given the shorter length, and the policy's
+    own order, never a ranking."""
+    from app.pipeline.scenario import PICK_GROUP_TOKENS, clause_groups, clause_tokens
+
+    clauses = _long_policy()
+    groups = clause_groups(clauses)
+
+    assert [c.clause_id for g in groups for c in g] == [c.clause_id for c in clauses]
+    assert all(clause_tokens(g) <= PICK_GROUP_TOKENS for g in groups)
+    assert len(groups) > 1
+
+
+def test_a_group_may_pick_nothing():
+    """Most groups of a policy have nothing to do with any one question. A
+    schema demanding at least one pick would turn every group into a false
+    positive - and the enum is the group's own ids, which is also what keeps
+    "8" and "8#2" from being offered in the same list."""
+    from app.pipeline.scenario import _pick_schema
+
+    array = _pick_schema(["8#2", "9#2"])["properties"]["clause_ids"]
+
+    assert array["minItems"] == 0
+    assert array["items"]["enum"] == ["8#2", "9#2"]
+
+
+def test_what_code_names_is_shown_whatever_the_model_picks():
+    """The computed blocks say "clause 3.2: requires 36 months ...". If a pick
+    could drop 3.2, that line would point at a clause the model cannot read or
+    cite, and the bar it describes would go unanswered."""
+    from app.pipeline.scenario import compute, named_by_code
+
+    clauses = _clauses()
+    facts = {"time_since_policy_start_value": 1, "time_since_policy_start_unit": "years"}
+
+    assert "3.2" in named_by_code(compute(facts, clauses), "hernia surgery", clauses, facts)
+
+
 def _fake_model(monkeypatch, answers):
     """Replace the model: facts first, then the given reasoning answers in order."""
     from app.pipeline import scenario
@@ -605,6 +674,105 @@ def _fake_model(monkeypatch, answers):
 
     monkeypatch.setattr(scenario.client, "complete_json", fake_complete_json)
     return sent
+
+
+def test_covered_contradicts_an_applying_reduction_the_answer_never_cited():
+    """M16, Star: the policy takes 5% from every claim it pays, so no claim on
+    it is paid in full. The check only fired when the answer happened to cite
+    the co-payment as reducing; the contradiction is with the calculation, not
+    with the citation."""
+    from app.pipeline.scenario import Verdict, compute, find_contradictions
+
+    facts = {"time_since_policy_start_value": 5, "time_since_policy_start_unit": "years"}
+    clauses = _clauses() + [_copay_clause()]
+    problems, _ = find_contradictions(
+        [_citation("2.1", "permits")], Verdict.COVERED, compute(facts, clauses))
+
+    assert any("cannot be covered" in p for p in problems)
+
+
+def test_covered_is_corrected_when_the_retry_still_claims_payment_in_full(monkeypatch):
+    """Measured on the Star policy: told the co-payment applies, the retry
+    answered covered again, in a sentence that said both ("covered, but the
+    payment will be conditional"). A promise of payment in full that no
+    calculation supports is not published."""
+    import asyncio
+
+    from app.pipeline.scenario import Verdict, run_scenario
+
+    covered = _answer("covered", "2.1", INPATIENT_QUOTE, "permits")
+    _fake_model(monkeypatch, [covered, covered])
+
+    result = asyncio.run(run_scenario("hernia surgery", _clauses() + [_copay_clause()]))
+
+    assert result.verdict == Verdict.CONDITIONAL
+    assert [c.clause_id for c in result.citations] == ["2.1"]
+
+
+def _fake_picker(monkeypatch, answer):
+    """A model that picks the first clause of each group, then gives `answer`.
+
+    Returns (picked, prompts): the ids it picked, and the reasoning prompt.
+    """
+    from app.pipeline import scenario
+
+    picked: list[str] = []
+    prompts: list[str] = []
+
+    async def fake_complete_json(messages, schema, **kwargs):
+        if schema is scenario.FACTS_SCHEMA:
+            return {"time_since_policy_start_value": 1, "time_since_policy_start_unit": "years"}
+        ids = schema["properties"].get("clause_ids")
+        if ids is not None:  # a pick, for one group
+            first = ids["items"]["enum"][0]
+            picked.append(first)
+            return {"clause_ids": [first]}
+        prompts.append(messages[-1]["content"])
+        return answer
+
+    monkeypatch.setattr(scenario.client, "complete_json", fake_complete_json)
+    return picked, prompts
+
+
+def test_a_long_policy_is_answered_from_the_picked_clauses(monkeypatch):
+    """The reasoning step reads what the model picked plus what code names -
+    not the whole policy, which M16 measured this model reading badly."""
+    import asyncio
+
+    from app.pipeline.scenario import ShortlistClause, run_scenario
+
+    clauses = _long_policy()
+    # A bar nobody picks: it must still be read, because its result is computed.
+    clauses.insert(15, ShortlistClause("3.2", "t:w", "3.2", "waiting_period",
+                                       PED_TEXT, 1.0, waiting_periods_days=[1080]))
+    picked, prompts = _fake_picker(
+        monkeypatch, _answer("not_covered", "0", "Clause 0.", "denies"))
+
+    asyncio.run(run_scenario("hernia surgery", clauses))
+
+    shown = [line.split("=")[1].split()[0]
+             for line in prompts[0].splitlines() if line.startswith("### clause_id=")]
+    assert len(picked) > 1                       # one pick per group
+    assert set(picked) <= set(shown)             # every pick is shown
+    assert "3.2" in shown                        # and the computed bar, unpicked
+    assert len(shown) < len(clauses)             # but not the whole policy
+
+
+def test_a_short_policy_is_read_whole(monkeypatch):
+    """Picking is for a policy too long to read in one pass. The synthetic
+    policy is read well whole, and picked at 28 of 32, so picking it could only
+    lose clauses."""
+    import asyncio
+
+    from app.pipeline.scenario import run_scenario
+
+    picked, prompts = _fake_picker(
+        monkeypatch, _answer("not_covered", "3.2", PED_QUOTE, "denies"))
+
+    asyncio.run(run_scenario("hernia surgery", _clauses()))
+
+    assert picked == []
+    assert "### clause_id=2.1" in prompts[0] and "### clause_id=3.2" in prompts[0]
 
 
 def _answer(verdict, clause_id, quote, effect):
