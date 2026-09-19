@@ -202,6 +202,34 @@ Three real insurer wordings, measured before anything was fixed. **If you read o
 - **Failure 51: nine right answers, mostly for wrong reasons** - 9 of 10 verdicts on a real policy, read case by case: refusals through the wrong clause, payable claims through the one co-payment that makes everything conditional. A verdict-only score cannot see reasons.
 - **Failure 52: the arithmetic was right about a cap the policy does not have** - "2% subject to Rs.5,000" modelled as 2%; deterministic code is only as complete as its model of the input.
 
+### M16 - Reading a real policy correctly
+M15's findings fixed in pipeline order, on the standard IRDAI product (Star Health's Arogya Sanjeevani). The deciding clause went from cited in 1 Star question of 10 to 5-7; right verdicts stayed at 7-8. **If you read one entry about long prompts, read Concept 44.**
+
+- **Steps 1-3: reading the page** - PyMuPDF's own block order instead of a sort that spliced two columns; page furniture recognised by repetition in the margin; a clause number alone on its row read with the words beside it.
+- **Concept 39: evidence relative to the document** - bold means "clause number" only in a document that bolds its clause numbers, the same way font size is judged against the document's own body text.
+- **Failure 53: a threshold written down before it was measured** - "62% bold" was an estimate; measured, it was 25%, and the guessed threshold split three similar documents by rounding.
+- **Concept 40: a limit is a measurement, with a version** - the 8,192-token window from M5 re-measured on a newer runtime: 28,672 runs fully on the GPU.
+- **Failure 54: a truncation check that could never fire** - Ollama discards half the window on overflow and reports a smaller count, which the check read as healthy.
+- **Failure 55: the second detector, disproven in both directions** - a characters-per-token rule failed on long words and on numbers; the exact count `num_ctx // 2 + 2` held everywhere.
+- **Failure 56: document order was clause-number order, until numbers repeated.**
+- **Step 5: a cap with a maximum** - "2% subject to Rs.5,000 per day" computed as the lower of the two, with its working shown.
+- **Step 6: what the long window cost the machine** - the KV cache explained from the model's shape (56 KB per token), read from the runtime's own log.
+- **Failure 57: measuring memory while an eval was running** - two clients asking for different windows forced 18 model reloads in nine minutes.
+- **Concept 41: rounding the KV cache** - `q8_0` halves its memory, and moves near-tie answers; and a server setting the response cache key could not see.
+- **Failure 58: a memory measurement that could not see the workload** - a two-token prompt measured 6 GB; the server's saved-prompt store grew to 14 GB on real prompts.
+- **Failure 59: restarting Ollama left the old runner alive** - on Windows, killing a parent does not kill its child.
+- **Failure 60: a plausible cause, checked before it was built** - a replay showed the planned id change would have fixed nothing; the pipeline's own computed lines were misdirecting the model.
+- **Concept 42: a correction needs positive evidence** - a check that overrides a model acts only on evidence for the other reading, because its two kinds of mistake do not cost the same.
+- **Failures 61-64: four clauses the analysis misread** - a hospital window read as a waiting period, a per-eye cap read as a per-day room cap (on the synthetic policy too), two waiting periods stored as one number, and annexure lists run together.
+- **Failure 65: an answer that never ended took the eval with it** - fixed with a length the grammar enforces.
+- **Concept 43: the same prompt, computed two ways** - the server restores part of a prompt instead of recomputing it, so a fresh answer depends on what was asked before.
+- **Step 10: the co-payment line** - a 5% co-payment on every claim was the reason the model reached for; rewording it exposed worse reading underneath.
+- **Failure 66: a pick that did not read** - asked only to pick the relevant clauses, the model found them for 28 of 32 synthetic questions and 1-2 of 10 on Star.
+- **Concept 44: fitting in the window is not being read** - a context window has a second limit, measured on your own prompts; picking in groups of 3,000 tokens is reading, not retrieval.
+- **Failure 67: a contradiction the check could not see** - "covered" means paid in full, which a co-payment on every claim rules out whatever the answer cites.
+- **Failure 68: three samples, two of them the same one** - samples asked in the same order draw on the same server history and agree on every verdict; the honest unit was the day.
+- **Failure 69: a drop noticed and never explained** - the synthetic main set fell from 38/40 to 33/40 in a run that changed three things at once.
+
 ---
 
 ## Related documents

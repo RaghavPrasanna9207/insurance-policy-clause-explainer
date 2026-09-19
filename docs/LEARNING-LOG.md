@@ -5580,3 +5580,2142 @@ columns were interleaved.
 It is the same shape as detection integrity (M6): a guarantee checked only
 against the system's own record is a self-report.
 </details>
+
+---
+
+# M16 — Reading a real policy correctly
+
+## The starting position
+
+This system reads an Indian health insurance policy PDF in five stages: extract
+the text with character offsets (ingest), cut it into clauses by rules
+(segment), classify each clause with a local 7B model (analyze), score its risk
+by arithmetic (score), and answer what-if questions with cited clauses
+(scenario).
+
+Until M15 it had only ever read one document, a synthetic 39-clause policy
+written for this repository. M15 ran it on three real insurer wordings and
+measured, without fixing anything, what went wrong:
+
+1. **Reading order.** Ingest sorted every text block on a page by its vertical
+   position, which read a two-column page straight across and spliced the
+   columns together (Failure 48).
+2. **Page furniture.** Running headers, page numbers, a wrapped phone number
+   (`2255. Senior Citizens may call…`) and table amounts became clauses
+   (Failure 47). The phone number ranked first by risk on the whole policy.
+3. **List items** were cut away from the heading that gives them meaning:
+   `12. Hernia of all types` was a clause of its own, with no waiting period.
+4. **The scenario step saw a fraction of the policy.** The context window was
+   8,192 tokens, real wordings are several times that, and the shortlist that
+   decides what fits ranked by impact — which dropped every coverage clause on
+   all three policies.
+5. **A room-rent cap with a rupee maximum** ("2% of the Sum Insured subject to
+   maximum of Rs.5000/- per day") was computed from the percentage alone
+   (Failure 52).
+
+And ten questions about one real policy scored 9 of 10 verdicts, mostly for the
+wrong reasons (Failure 51), because the answer key held verdicts only.
+
+M16 fixes them in that order, because each stage reads what the one before it
+produced. It is scoped to one policy, **Arogya Sanjeevani**: IRDAI requires every
+health insurer in India to sell it with the same wording, so "the system reads
+the standard IRDAI product correctly" is a claim that can be checked. Star
+Health's copy is the one measured; the other two wordings are watched for
+regressions, not tuned for.
+
+---
+
+## Step 1: reading order
+
+### What was measured first
+
+M15's diagnosis was that PyMuPDF's own block order was already correct and the
+sort destroyed it. Before deleting the sort, that was checked on all three real
+documents, not only the one that showed the bug. Printing each block of a
+two-column Star Health page in the order PyMuPDF returns it:
+
+```
+    0 x  147- 552 y  813- 827   '9  /   25'                         <- footer
+    2 x  100- 496 y   38-  55   'STAR HEALTH AND ALLIED INSURANCE…' <- header
+    3 x   88- 291 y   96- 175   'basis, provided no claim has been' <- left column
+   …
+   10 x   88- 291 y  718- 782   'has been increased at the time of'
+   11 x  330- 556 y   96- 114   'viii. If a claim is made in the…'  <- right column
+```
+
+Left column top to bottom, then right column top to bottom. Sorting by `y` puts
+block 11 (y=96) straight after block 3 (y=96).
+
+A crude check for disorder was then run over all three: count the places where
+reading order jumps back *up* the page within one column. It found 99 on HDFC
+ERGO's wording, 29 on Niva Bupa's, 24 on Star's — which looked like evidence
+that native order was *also* broken. Printing every one of them showed none
+were: they were table cells read row by row (`'75 Lakhs' -> '100 & 200'`, the
+second cell's text sitting two points higher), and list numbers vertically
+centred beside taller text. The metric flagged the right shape for the wrong
+reason. A count that looks like evidence is only a list of places to look.
+
+### The fix
+
+```python
+# api/app/pipeline/ingest.py, _page_lines()
+# PyMuPDF's own block order, deliberately unsorted. It follows the order
+# the typesetter wrote the text, which on all three real policies measured
+# in M15 was reading order: a column at a time, tables row by row. Sorting
+# by position, as this once did, read a two-column page straight across and
+# spliced the columns together.
+blocks = [b for b in page.get_text("dict")["blocks"] if b.get("lines")]
+```
+
+What was rejected: detecting columns by clustering blocks on their `x`
+position. It is more code, it would have to guess where a full-width table
+ends, and native order was measured correct on every page that exists. The
+risk kept: a PDF whose content stream is written out of visual order. None has
+been seen; if one is, this is where it will show.
+
+### The test, and where its reference comes from
+
+M15 closed on a question: the offset invariant (`raw_text[start:end] ==
+clause.text`) held on all three policies while one had its columns interleaved,
+so what could catch that? Answer: only a reference the pipeline did not
+produce. A check against `raw_text` inherits every mistake in `raw_text`.
+
+Real PDFs cannot be committed, so the test builds its own two-column page with
+paragraphs of staggered height — the arrangement that interleaved on the real
+document — and compares with the order the paragraphs were *written*:
+
+```python
+# api/tests/test_ingest.py
+left = [(90, 150, "LEFT-ONE …"), (160, 260, "LEFT-TWO …")]
+right = [(90, 120, "RIGHT-ONE …"), (130, 230, "RIGHT-TWO …")]
+…
+positions = [raw.index(label) for label in ("LEFT-ONE", "LEFT-TWO", "RIGHT-ONE", "RIGHT-TWO")]
+assert positions == sorted(positions), f"reading order scrambled: {raw!r}"
+```
+
+It was run against the old code first and failed exactly as the real document
+did — `RIGHT-ONE` between the two left paragraphs. A test never seen failing
+has not been shown to test anything.
+
+The synthetic policies extract byte-identically before and after, so none of
+M14's numbers moved.
+
+---
+
+## Step 2: page furniture
+
+### Measured before a rule was written
+
+For every line in the top or bottom tenth of a page, how many pages carry the
+same text, with digits masked so `7 / 25` matches `8 / 25`:
+
+| | Repeated in the margin on | Most repeated real content |
+|---|---|---|
+| Star Health | 4 lines on **100%** of 26 pages | list markers (`#.`, `i.`) on ≤ 50%, all over the page |
+| Niva Bupa | 1 line on **100%** of 24 | `#.#.#.` on 33% |
+| HDFC ERGO | 6 lines on **100%** of 53 | `c.`, `i.` on 43% |
+| Synthetic ×2 | nothing | — |
+
+Two groups with a gap between them: furniture is on every page at the same
+height, content repeats on at most half the pages and anywhere on them.
+
+### The rule
+
+```python
+# api/app/pipeline/ingest.py
+MARGIN_BAND = 0.12            # headers and footers sat within 10% of an edge
+FURNITURE_PAGE_SHARE = 0.5    # furniture on 100% of pages; content at most 50%
+```
+
+A line in the top or bottom 12% of the page, whose digit-masked text is in that
+same margin on at least half the pages (and at least 3), is not policy text.
+Removing it from `raw_text` rather than skipping it later matters: a clause that
+runs across a page break is otherwise sliced *with* the header inside it, and a
+quotation of the sentence that crosses the break can never be found in it.
+
+**Recognised by repetition, not by wording.** A list of header phrases can only
+know the insurers someone remembered. Every insurer's header repeats.
+
+Ingest became two passes, because a line can only be recognised as furniture by
+comparing pages. Offsets are assigned in the second pass, after removal, so the
+invariant holds by the same construction as before.
+
+Three tests: headers and page numbers removed while a sentence broken across a
+page reads unbroken; a body line repeated on every page but *not in a margin*
+kept; and a two-page document keeping its header, because two pages are too few
+to tell a running header from a title. The last one passes on the old code too,
+by design — it guards the new rule against over-reaching, not the old bug.
+
+### A character nobody could see
+
+Star's clause numbers arrived as `13.\t \x07Treatments`: a tab and a bell
+character (`\x07`) between the number and the word. The segmenter's evidence
+that `13.` is a clause number rather than a quantity is that a capital letter
+follows it, and the first character after the whitespace was `\x07`. Control
+characters are now replaced with spaces at extraction. The test builds a PDF
+containing `\x07` and was checked to fail on the old code — worth checking,
+because had PyMuPDF stripped the character when writing the test PDF, the test
+would have passed without testing anything.
+
+---
+
+## Step 3: what is a clause number
+
+With order and furniture fixed, listing Star's segments one per line showed
+exclusions 1–9 and conditions 2–9 were still missing — buried inside
+3,000-character pieces cut by the size cap.
+
+### Numbers on a line of their own
+
+Printing the raw lines explained it:
+
+```
+p11 x  43- 54 y 147-165  bold  '2.'
+p11 x  66-290 y 147-165  bold  'Speciﬁed disease / procedure waiting'
+```
+
+The number is a separate text run, a tab stop away from its words, and
+extraction returns it as its own line. Every numbering pattern requires text
+after the number, so `2.` alone matched none. HDFC ERGO does the same for every
+clause (`1.2.` | `Home Health Care`), which is most of why 39 of its 70 segments
+had been cut by the size cap.
+
+A line holding only a marker is now read together with the next line, if that
+line sits on the same row and to its right — the way a reader sees it:
+
+```python
+# api/app/pipeline/segment.py
+def _as_read(lines: list[Line], i: int) -> str:
+    line = lines[i]
+    if i + 1 < len(lines) and _RE_MARKER_ONLY.match(line.text):
+        mate = lines[i + 1]
+        half_height = (line.bbox[3] - line.bbox[1]) / 2
+        if (mate.page == line.page
+                and abs(mate.bbox[1] - line.bbox[1]) < half_height
+                and mate.bbox[0] > line.bbox[0]):
+            return f"{line.text} {mate.text}"
+    return line.text
+```
+
+### The same shape, two meanings
+
+That fix alone would have made things worse, and the same page shows why:
+
+```
+p11 x 330  bold  '3.' | '30-day waiting period - Code Excl 03'     <- exclusion 3
+p11 x 330  plain '2.' | 'Age-related Osteoarthritis & Osteoporosis' <- item 2 of a list
+```
+
+Same position, same form, both "a number, then a capital". Indentation cannot
+separate them (both at x=330), and neither can sequence (3 follows 2 in both
+the list and the exclusions). Listing every numbered line on Star found one
+signal that did: **every real clause number was bold, and every list item was
+plain** — exclusions 1–23, conditions 1–28, coverage 1–9 bold; `i.`–`xvi.`,
+`A.`–`L.`, `01.`–`20.`, and `2255.` plain.
+
+## Concept 39: evidence relative to the document
+
+This project already refuses to use absolute font sizes: `body_size()` measures
+each document's own body text, so "larger than body" means the same thing in a
+policy set at 8pt and one set at 11pt. Bold is the same kind of signal. In a
+policy that sets its clause numbers in bold, a number in plain type is telling
+you something; in a policy with no bold anywhere, plain type says nothing.
+
+So it is decided per document:
+
+```python
+# api/app/pipeline/segment.py, segment()
+if (is_clause_start and bold_numbers and not line.bold
+        and _RE_SINGLE_LEVEL.match(numbering[0])):
+    is_clause_start = False
+```
+
+where `bold_numbers` is true when at least 10% of the document's numbered lines
+are bold. Two restrictions make it safe:
+
+- **Only single-level numbers** (`7.`, `01.`, `(a)`). A list inside a clause is
+  numbered 1, 2, 3; no list is numbered 5.1.3. Niva Bupa sets some real
+  sub-clauses (`4.15.1.`) in plain type, and the rule leaves them alone.
+- **Only when the document has a bold convention at all.** The unstyled test
+  policy, built to catch exactly the mistake of requiring styling, has no bold,
+  and a test asserts plain list numbers still start clauses there.
+
+The transferable idea: a styling signal is only evidence against the document's
+own baseline. The same bold line means "clause" in one policy and nothing in the
+next.
+
+### Failure 53: a threshold written down before it was measured
+
+The first version of that rule had this comment and constant:
+
+```python
+# Measured in M16 on Star Health's wording: every clause number bold, every
+# list item plain, 62% of numbered lines bold overall.
+BOLD_NUMBERING_SHARE = 0.25
+```
+
+"62%" was not measured. It came from glancing at a list and estimating. When it
+was measured, over every numbered line:
+
+| Document | Numbered lines | Bold | Share |
+|---|---:|---:|---:|
+| Synthetic, styled | 39 | 39 | 1.00 |
+| Synthetic, unstyled | 39 | 0 | 0.00 |
+| HDFC ERGO | 259 | 82 | 0.32 |
+| Star Health | 260 | 65 | **0.25** |
+| Niva Bupa | 354 | 84 | **0.24** |
+
+The share is far lower than guessed, because many plain lines merely begin with
+a number ("24 hours", table rows). And the threshold picked before measuring,
+0.25, landed exactly on Star and one hundredth above Niva Bupa. Three similar
+documents would have been split by rounding.
+
+The fixed threshold sits in the widest gap in the data — between 0.00 and 0.24
+— at 0.10, and its comment now quotes the table rather than an impression. The
+lesson is Failure 11's again: "to be safe" is not a number, and neither is "about
+62%". A number in a comment is a claim, and it was checked only because
+the code was about to depend on it.
+
+### Bare integers are never clause numbers
+
+Two policies still produced clauses like `24 Months waiting period`, `1 year
+Tenure` and, from a table header, `75 Lakhs`. The rule allowed a bare integer
+(no dot) as weak evidence, confirmed by bold — and on real wordings sub-headings
+and table headers are bold. Across all six documents measured, no clause is
+numbered with a bare integer: real ones use `3.`, `1.2.` or `4.15`, the
+synthetic one `1.1`. So a bare integer is no longer numbering at all. An existing
+test asserted the old behaviour (`_numbering("24 hours …")[1] is False`) and was
+changed deliberately to `is None`, with the reason recorded in it.
+
+One cost, measured rather than assumed: Star's `1 - PREAMBLE` and
+`2 - OPERATIVE CLAUSE` were clauses numbered 1 and 2; they are now part of the
+front-matter segment. The operative clause grants cover, so it is still shown to
+the scenario step — under the id `c0` instead of `2`.
+
+### Section words, matched as whole words
+
+Star's definitions were filed under the section `STAR HEALTH AND ALLIED
+INSURANCE COMPANY LIMITED`, and a table of non-payable items under `AIR
+CONDITIONER CHARGES`. The fallback for unstyled section headings looks for words
+like "limit" and "condition" in an all-capitals line, and matched them as
+substrings — `LIMIT` in `LIMITED`, `CONDITION` in `CONDITIONER`. They now match
+whole words, optionally plural.
+
+### A test expectation that was wrong
+
+The test that the bold rule leaves unstyled documents alone first expected four
+clauses, `["2", "01", "12", "3"]`, and got three. The missing `3` was not this
+milestone's doing: `3. 30-day waiting period` has a digit, not a capital, after
+the number, which the older rule treats as weak evidence, and with no styling
+nothing confirms it. The expectation was corrected, and the limit it exposed is
+written into the test: in an unstyled document, a clause whose title begins with
+a digit is missed.
+
+### What the segmenter now produces
+
+| | Synthetic | Star Health | Niva Bupa | HDFC ERGO |
+|---|---:|---:|---:|---:|
+| Segments, M15 → M16 | 40 → 40 | 112 → 78 | 95 → 141 | 76 → 101 |
+| Cut at the size cap | 0 → 0 | 5 → 10 | 7 → 3 | 44 → 20 |
+| Median length (chars) | 286 → 286 | 178 → 408 | 503 → 312 | 2,930 → 861 |
+| Page headers as clauses | 0 → 0 | 26 → 0 | | |
+
+On Star: coverage 1–9, exclusions 1–23 and conditions 1–28 are one clause each
+under their own numbers; `2255` is gone; exclusion 2 holds its whole
+24-month and 36-month lists. Star's count of repeated numbers went *up*, and
+correctly: coverage, exclusions and conditions each restart at 1, and
+`citation_ids()` gives the repeats distinct ids (`2`, `2#2`, `2#3`).
+
+The synthetic policies' segments are identical to M15's, field for field.
+
+**Still wrong on Star, and left:** the definitions (about 16,000 characters)
+have no numbers, only a bold `Term:` at the start of each, and are still cut at
+the size cap into six pieces — and filed under the company letterhead, a
+one-off 15-point line that the PDF's content stream places after page 2's
+columns. The claim-settlement condition runs past the cap. The annexure tables
+are cut at the cap. None of these decides a claim question on its own, and a
+3,000-character piece can still be cited and have its quotations verified.
+
+---
+
+## Step 4: the context window
+
+### Concept 40: a limit is a measurement, with a version
+
+The window was 8,192 tokens because of Failure 11: at 16,384, on Ollama 0.33,
+the runtime held 5.46GB and the operating system killed an eval for memory
+pressure. That was a measurement — of one runtime version, on one day, with
+whatever else the machine was running. By M16 the runtime was Ollama 0.34, and
+the requirement had changed: the smallest real wording is about four times
+what 8,192 can hold.
+
+When the reason for a limit changes, the limit is a hypothesis again.
+Re-measured, loading the model with a policy-sized prompt at each window and
+reading Ollama's own placement report:
+
+| num_ctx | GPU memory | Placement | Prompt speed |
+|---:|---:|---|---:|
+| 8,192 | 4.9 GB | 100% GPU | 2,149 tok/s |
+| 16,384 | 5.3 GB | 100% GPU | 2,137 tok/s |
+| 24,576 | 5.8 GB | 100% GPU | 2,036 tok/s |
+| 28,672 | 6.2 GB | 100% GPU | |
+| 32,768 | 6.8 GB | **8% CPU / 92% GPU** | generation 38.5 vs 48.3 tok/s |
+
+Free system RAM did not change between sizes: the KV cache lives on the GPU.
+32,768 is qwen2.5's maximum, but it no longer fits in 8GB of VRAM, spills onto
+the CPU, and slows *every* call by a fifth — including the per-clause analyses
+that need no long context. **28,672 is the largest window measured to run
+entirely on the GPU**, and it is the new setting.
+
+### Failure 54: a truncation check that could never fire
+
+The measurement above produced something else first. The script sized its
+prompts at 4.3 characters per token (M15's figure for the whole scenario prompt)
+and Ollama reported:
+
+```
+num_ctx 16384: prompt tokens 8194
+num_ctx 24576: prompt tokens 12290
+```
+
+Half the window plus two, both times. Plain policy text tokenises more densely
+than 4.3, so both prompts had overflowed — and what Ollama did with the overflow
+was not what M15's check assumed. Stepping one prompt across an 8,192-token
+window:
+
+```
+33,000 chars -> prompt_eval_count 8115
+34,000 chars -> prompt_eval_count 4098
+40,000 chars -> prompt_eval_count 4098
+60,000 chars -> prompt_eval_count 4098
+```
+
+**On overflow Ollama discards half the context**, and the reported count *falls*.
+M15 had added this to the client:
+
+```python
+if prompt_tokens >= options["num_ctx"]:
+    log.warning("prompt filled the %d-token context window - it was probably truncated", ...)
+```
+
+A truncated prompt reports about half the window, which that check reads as a
+small, healthy prompt. The one case the warning existed for was the one it could
+not see. It was written from a belief about what truncation looks like, and it
+was tested against that belief (a unit test fed it 8,192) rather than against
+Ollama.
+
+### Failure 55: the second detector, disproven in both directions
+
+The count alone cannot tell "short" from "cut in half". The first replacement
+used characters per token: policy prompts measured 4.06–4.3, a prompt cut to half
+reports about twice that, so anything over 6.0 was called truncated. Its own
+live test then failed — a repeated English sentence measured 5.47 characters
+per token, uncomfortably close to 6.0 — and measuring more kinds of text
+disproved the rule outright:
+
+| Text | Characters | Reported tokens | Chars/token | Actually |
+|---|---:|---:|---:|---|
+| policy | 20,000 | 4,710 | 4.25 | intact |
+| prose | 20,000 | 3,666 | 5.46 | intact |
+| long words | 20,000 | 2,529 | **7.91** | intact — the ratio rule refuses it |
+| numbers | 20,000 | **4,098** | 4.88 | truncated — the ratio rule passes it |
+
+A column of numbers tokenises at about two characters per token, so 20,000 of
+them overflow, and halved they report a ratio inside the range of intact policy
+text. The ratio's "gap" existed for one kind of text.
+
+What held in every case — policy text, prose, numbers, a real system-plus-user
+scenario prompt, windows of 8,192, 16,384 and 24,576 — was the exact count:
+
+```python
+# api/app/llm/client.py
+def truncated_prompt_tokens(num_ctx: int) -> int:
+    return num_ctx // 2 + 2
+
+def _check_context(prompt_tokens, options):
+    …
+    if prompt_tokens == truncated_prompt_tokens(options["num_ctx"]):
+        raise LlmError(f"Ollama reported {prompt_tokens} prompt tokens, half the …")
+```
+
+Three decisions in that:
+
+- **An exact signature, not a statistic.** An intact prompt could by
+  coincidence have exactly that many tokens; the cost is a loud error on that
+  one prompt, never a silent wrong answer.
+- **It raises.** A truncated scenario prompt means an answer reasoned over part
+  of the policy with nothing to say so. Retrying cannot help — the same prompt
+  truncates the same way — and because the error is raised before the cache is
+  written, a truncated answer is never stored.
+- **A test re-measures it against the live server.** The signature is a
+  behaviour of Ollama 0.34, not a law. The unit test encodes the measurement; a
+  model-backed test sends a prompt sized at seven characters per token of window
+  and asserts it is refused, so a future Ollama that truncates differently fails
+  a test instead of silently disabling the check. (Its first version used a
+  fixed 60,000 characters, which overflowed 8,192 and fits in 28,672.)
+
+### Why a wider window, and not retrieval
+
+With the window measured, the options for "the policy does not fit":
+
+| Option | Rejected because |
+|---|---|
+| **A window of 28,672** | — chosen |
+| 32,768 | spills 8% onto the CPU; every call a fifth slower |
+| A first pass where the model picks relevant clauses from a summary list | an extra model step whose misses are silent, solving a problem the window removes for this policy |
+| Keyword search (BM25) | "gallstones" does not match "Calculi in … Gall Bladder"; the design rules it out |
+| Embeddings and a vector store | the same top-k failure Concept 15 exists to avoid |
+
+Star's clauses are 68,598 characters. At 4.25 characters per token that is
+about 16,000 tokens; with per-clause headers, the system prompt, the question
+and the answer ceiling, about 22,000. It fits. HDFC ERGO's 129,000 characters
+do not, so the shortlist remains — as a fallback that has to fail better.
+
+### The shortlist, rebuilt
+
+Four changes, each tied to a measurement:
+
+```python
+# api/app/pipeline/scenario.py
+DROPPED_FIRST = frozenset({"definition", "procedural"})
+
+def clause_token_budget() -> int:
+    system_prompt = int(len(REASON_SYSTEM) / CHARS_PER_TOKEN)
+    return settings.num_ctx - settings.num_predict - system_prompt - QUESTION_TOKENS
+```
+
+1. **The budget is derived, not reserved.** The fixed 2,500-token reservation
+   was set in M5; by M15 the system prompt alone was about 1,900 tokens and the
+   answer ceiling is 1,600. Now the room for clauses is what the window has left
+   after the system prompt (measured from its length), an allowance for the
+   question and computed lines (`QUESTION_TOKENS = 1_000`, from M15's measured
+   ~650), and the answer. A longer system prompt shrinks the budget by itself.
+2. **Definitions and procedural clauses give way first.** Impact measures what a
+   clause can cost you, so the clause *granting* cover ranks lowest, and M15's
+   impact-only ranking dropped every coverage clause on every real policy.
+3. **A clause that does not fit is skipped, not the end of the selection.** One
+   3,000-character annexure no longer pushes out every short exclusion ranked
+   after it.
+4. **Dropping anything is a warning**, naming how many clauses of each type.
+
+### Failure 56: document order was clause-number order, until numbers repeated
+
+The shortlist returned its selection sorted by clause number, documented as
+"document order, because a person reading the answer expects clause 3.2
+discussed before 6.1". On the synthetic policy the two are the same. On Star,
+whose numbering restarts in every section, sorting by number would present
+coverage 1, exclusion 1 and condition 1 side by side — and put every unnumbered
+clause at the end. This was found by reading the code while changing it, before
+any run could show it.
+
+The selection now keeps the order the clauses arrive in. That moved the
+question to the caller, and the scenario endpoint turned out to have none: it
+read clauses from a query with no `ORDER BY` (under a docstring saying "ordered
+by impact"). Order there decides two things — the order the shortlist keeps,
+and which repeat of a number becomes `10#2`, which the eval must assign
+identically (Failure 50). The endpoint now sorts by `order_idx` explicitly.
+
+---
+
+## Step 5: a cap with a maximum
+
+Failure 52: Star caps room rent at "up to 2% of the Sum Insured subject to
+maximum of Rs.5000/-, per day", and ICU at 5% up to Rs.10,000. The analysis
+schema had a field for the percentage only, so the arithmetic told a 3-lakh
+policyholder their cap was 6,000 rupees.
+
+Two schema fields, `cap_max_inr_per_day` and `icu_cap_max_inr_per_day`, and the
+limit becomes the lower of the two:
+
+```python
+# api/app/pipeline/reduction.py, _room_cap_check()
+limit = sum_insured * percent // 100
+rule = f"{percent}% of {_human_rupees(sum_insured)} is {_human_rupees(limit)} per day"
+if maximum and maximum < limit:
+    rule += f", above the {_human_rupees(maximum)} maximum, so the limit is {_human_rupees(maximum)}"
+    limit = maximum
+```
+
+The computed line shows its working — "2% of 3 lakh is 6,000 rupees per day,
+above the 5,000 rupees maximum, so the limit is 5,000 rupees" — rather than a
+figure the clause never prints, which the model might otherwise quote as policy
+text (Failure 38). With no maximum the line is word for word what it was.
+
+The test is Failure 52's exact case: a 5,500-rupee room on a 3-lakh policy,
+within 2% and over the maximum. It failed on the old code with
+`DOES_NOT_APPLY`.
+
+The prompt's example uses different figures (1%, Rs.4,000) from the policy under
+test. Failure 41 recorded what a test case inside a prompt does to a score: it
+measures recall of the example, not reading.
+
+---
+
+## The answer key gains reasons
+
+M15's ten Star questions had verdicts and no `must_cite`, because the clause ids
+were then segmentation artefacts. They are now the policy's own numbers, so each
+case's `must_cite` was filled in — mechanically, from the reason already written
+in the case before any run: the hernia cases name exclusion 2 (`2#2`), the
+caesarean the maternity exclusion (`18`), Dubai the overseas exclusion (`22`),
+and so on.
+
+One deliberate omission: **no case requires the 5% co-payment**, though every
+payable claim on this policy is conditional because of it. M15 found that clause
+carrying several right verdicts for wrong reasons; requiring it would reward the
+shortcut the key exists to catch. And one known strictness: the room-rent case
+requires coverage 1, while the table of benefits repeats the same limit — an
+answer citing only the table has a right reason this key does not accept.
+
+---
+
+## Step 6: what the long window cost the machine
+
+### Where the memory goes, read from the runtime's own log
+
+Ollama writes a server log (on Windows, `%LOCALAPPDATA%\Ollama\server.log`;
+older sessions are rotated to `server-1.log`, `server-2.log`, ...). Each time it
+loads a model, the llama.cpp runner prints what it allocated. At a window of
+28,672 tokens:
+
+```
+load_tensors:        CUDA0 model buffer size =  4168.09 MiB
+load_tensors:    CUDA_Host model buffer size =   292.36 MiB
+llama_kv_cache: size = 1568.00 MiB ( 28672 cells,  28 layers,  1/1 seqs), K (f16):  784.00 MiB, V (f16):  784.00 MiB
+sched_reserve:      CUDA0 compute buffer size =   160.01 MiB
+llama_context: flash_attn            = auto
+resolve_fused_ops: Flash Attention enabled
+```
+
+Four allocations: the weights (4.2 GB on the GPU, a little on the CPU), the
+KV cache, and a scratch area for the arithmetic.
+
+**The KV cache is the part the window controls.** When a transformer reads a
+token, every layer computes a *key* (what this token offers to later tokens) and
+a *value* (what it passes on when a later token attends to it). Generating the
+next token means comparing against every earlier key, so rather than recompute
+them the runtime stores them. For qwen2.5-7B: 28 layers, each storing 4 key
+heads and 4 value heads of 128 numbers — 1,024 numbers per layer, 28,672 per
+token, at 2 bytes each in 16-bit floating point (`f16`): **56 KB per token**.
+Times 28,672 slots is 1,568 MiB, exactly the logged figure.
+
+The store is allocated for the whole window when the model loads, not for the
+prompt that arrives. A 2,000-token clause-analysis call made at this setting
+holds the same 1,568 MiB as a 20,000-token scenario call.
+
+**Flash attention was already on.** Ollama's own setting read
+`OLLAMA_FLASH_ATTENTION:false`, yet the runner was started with
+`--flash-attn auto` and enabled it. Flash attention computes attention in blocks
+small enough for the GPU's fast memory, instead of materialising the full table
+of every token against every other token; that is why the scratch area is only
+160 MiB at a 28,672-token window.
+
+**One figure is not explained.** The runner process was measured once holding
+about 14 GB of committed system memory — far more than the ~6 GB these lines add
+up to. The log also records `disabling mmap for llama-server load by default ...
+reason=windows_cuda`: on this platform the weights are read into memory rather
+than mapped from the file. Whether that accounts for the gap was not measured.
+
+### Failure 57: measuring memory while an eval was running
+
+**Setup.** A script loaded the model at each of four windows (8,192 to 28,672)
+with a two-token prompt, read the runner's committed memory, and unloaded the
+model between sizes. It was started while the synthetic eval, three samples per
+case, was still running against the same Ollama server.
+
+**What happened.** Ollama keeps one loaded copy of the model, and a request
+asking for a different `num_ctx` forces it to unload and reload. With two
+clients asking for different windows, the log shows **18 runner starts in nine
+minutes**, each re-reading the 4.7 GB model. The measurement came out
+inconsistent: its "wait until unloaded" step kept timing out, because the eval
+kept loading the model back. The eval spent its time waiting on reloads.
+
+Soon after, three requests failed with HTTP 500 part-way through an answer. The
+runner had been generating at 44 tokens per second, and then the process was
+gone, with no error line. At the reloads around those failures, the log's
+system-memory line shows Windows growing its page file: free swap 13.0 GiB, then
+16.8, then 20.4. Pressure on committed memory is the likely cause; nothing in
+the log proves it. The third failure ended the run.
+
+**Why.** Evals already run one request at a time (M9), because concurrent
+requests change what is measured. A measurement script that talks to the model
+is one more client, and the same rule applies to it.
+
+**What it does and does not affect.** The list of runner starts shows none
+between 22:12 and 22:58. The full synthetic eval ran from 22:35 to 22:56, inside
+that gap, so its drop in accuracy was not caused by this interference. The
+repeated-sample runs that overlapped the interference are not used as evidence.
+The only fix is procedural: a measurement that loads the model runs only when
+nothing else is using the server.
+
+What held the other 8 GB is the subject of Failure 58, below. A first guess,
+that the 14 GB was two runners briefly alive at once during the reloads, was
+written down and then disproven by the next run.
+
+### Concept 41: rounding the KV cache
+
+The KV cache (above) stores its numbers as 16-bit floats. Ollama can store them
+at lower precision instead, a server setting read once at start-up:
+
+```
+OLLAMA_FLASH_ATTENTION=1
+OLLAMA_KV_CACHE_TYPE=q8_0
+```
+
+`q8_0` is one of llama.cpp's formats for storing model weights, applied here to
+the cache (this model's weights use a 4-bit format, `q4_K_M`). The numbers
+are split into blocks of 32. Each block stores one 16-bit scale, and each number
+becomes a whole number from -127 to 127 that is multiplied by that scale when
+read. That is 32 bytes plus 2 for the scale, 34 bytes where f16 needs 64: 53%
+of the memory. The values that come back are close to the originals, not equal
+to them. Ollama accepts a quantised cache only with flash attention on, which is
+why both variables are set.
+
+Measured on this machine with nothing else using the server, loading the model
+at each window (Ollama's `/api/ps` for placement, the runner's private bytes for
+system memory, the server log for the cache):
+
+| num_ctx | KV cache | On GPU | Runner private memory |
+|---:|---:|---|---:|
+| 8,192 | — | 4.4 GB, 100% | 5,531 MB |
+| 28,672 | **833 MiB** (f16: 1,568) | 5.0 GB, 100% | 6,176 MB |
+| 32,768 | 952 MiB (f16: 1,792) | 5.2 GB, **100%** | 6,302 MB |
+
+The 28,672 figure is the arithmetic above exactly: 1,568 × 34/64 = 833. And the
+window that did not fit on the GPU at f16, qwen2.5's full 32,768, now does.
+
+**What it costs: the answers can move.** Rounded keys and values produce
+slightly different attention scores, and with them slightly different logits. A
+near-tie between two tokens can break the other way. So every eval figure
+measured at f16 has to be measured again at q8_0 before it is compared with
+anything, and the synthetic suite is re-run first because it is the one with a
+long f16 history.
+
+### A setting the cache key could not see
+
+The response cache (`api/app/llm/cache.py`) keys each stored answer by a hash of
+everything that shapes it: model, messages, schema and the decoding options sent
+with the request. That rule exists so that a stale answer cannot be replayed
+without anyone remembering to clear anything.
+
+The KV cache precision breaks it. It shapes the answer, but it is set on the
+server and never sent with a request, so it is not in `options`. Switched to
+q8_0 without a change to the key, every eval would have replayed the answers
+stored at f16 and reported them as q8_0 results — a comparison of two identical
+sets of bytes.
+
+The setting is now mirrored in `api/app/config.py`, read from the same
+environment variable the server reads:
+
+```python
+kv_cache_type: Literal["f16", "q8_0", "q4_0"] = Field(
+    "f16", validation_alias="OLLAMA_KV_CACHE_TYPE"
+)
+```
+
+and hashed into the key, but only when it is not the default:
+
+```python
+fields: dict[str, Any] = {
+    "model": model,
+    "messages": messages,
+    "schema": schema,
+    "options": options or {},
+}
+if kv_cache_type != "f16":
+    fields["kv_cache_type"] = kv_cache_type
+payload = json.dumps(fields, sort_keys=True)
+```
+
+The condition is there for the answers already stored. All of them were
+generated at f16, before the field existed; adding `"kv_cache_type": "f16"` to
+every key would have made every one of them unreachable. A test pins that
+property by hashing the old payload by hand and requiring the f16 key to match
+it. A second test makes sure the client actually passes the setting.
+
+`Literal` refuses a typo such as `q8`. The mirror has one weakness it cannot
+check: it agrees with the server only if both were started from the same
+environment. That is why its default is `q8_0`, the project's setting (the
+README lists the three Ollama variables), and not Ollama's own `f16`. A
+program started before the variable was set, such as an editor or terminal
+opened earlier, sees no variable at all. With an `f16` default it would store
+q8_0 answers under f16 keys, which is the mistake the field exists to prevent. Ollama's server log states what it is really using, in its
+`server config` line and in the `llama_kv_cache` line printed at every load.
+Every eval report now records the precision beside `num_ctx`.
+
+### Failure 58: a memory measurement that could not see the workload
+
+**Setup.** The table above was measured by loading the model with a two-token
+prompt at each window and reading the runner's private memory: about 6.2 GB at
+28,672. On that evidence, the 14 GB from Failure 57 was put down to the
+interference, and the full M16 run was started with the smaller cache. A
+PowerShell script sampled the runner's private memory and the system's
+committed memory every 30 seconds for the whole run, reading only operating
+system counters so that it could not disturb the model.
+
+**What happened.** Through the synthetic suite (prompts of 2,000–5,500 tokens)
+the runner stayed between 6.2 and 6.5 GB, and it stayed there while the Star
+policy's 78 clauses were analysed one at a time. When the Star questions began,
+nine minutes into that step, it started to grow by about 650 MB every 30
+seconds:
+
+```
+21:19:49  runner 6,312 MB   system commit 32,679 of 39,644 MB
+21:20:49  runner 7,629 MB
+21:22:20  runner 9,613 MB
+21:24:21  runner 12,265 MB
+21:26:22  runner 12,933 MB  system commit 38,584 of 39,644 MB
+```
+
+The tool supervising the run stopped it for low system memory, as it had in
+Failure 57's run. The 14 GB was real, and a two-token prompt could never have shown
+it.
+
+**Why.** Ollama 0.34 serves the model with llama.cpp's `llama-server`, and that
+server keeps a *prompt cache in system memory*. When a new request arrives,
+the saved state of the previous prompt (its KV cache, the notes described in
+Concept 41) is copied out of the GPU into RAM. A later prompt that begins with
+the same text can then restore that state instead of recomputing it. The server
+log shows the store and its limit:
+
+```
+srv    load_model: prompt cache is enabled, size limit: 8192 MiB
+srv        update:    - prompt 000001FEE8CCC5F0:   22592 tokens, checkpoints:  0,   656.619 MiB
+srv        update:  - cache state: 11 prompts, 6048.786 MiB (limits: 8192.000 MiB, 28672 tokens, 281858 est)
+```
+
+A Star question is about 22,600 tokens, so each saved state is 657 MiB even at
+q8_0 (at f16 it would be about 1.2 GB). Eleven of them made 6 GB, on top of the
+6.2 GB the runner needs anyway, and the limit would have allowed 8 GB. The
+synthetic policy never showed this: its prompts are a quarter of the size, so
+the same number of saved prompts fits in about 1.5 GB.
+
+**The fix.** The server's option `--cache-ram N` sets the limit in MiB (0
+disables the store). Ollama starts the server itself, but the server also reads
+the option from an environment variable, `LLAMA_ARG_CACHE_RAM`, which it
+inherits from Ollama. It is now 1024: enough for the one long prompt the next
+question is likely to share, not enough to pile up eleven. Confirmed at the next
+model load:
+
+```
+srv    load_model: prompt cache is enabled, size limit: 1024 MiB
+```
+
+Disabling the store outright was the simpler choice, and was rejected. In
+`run_scenario` (`api/app/pipeline/scenario.py`), each question makes a short
+`extract_facts` call and then the long `reason` call. The short call replaces
+the long prompt in the GPU's working state, and the store is what brings it
+back: the log of that run records 168 restores
+(`found better prompt with f_keep = 0.825, f_sim = 0.980`). Without the store,
+every reasoning call would recompute all 22,600 tokens.
+
+**The lesson.** A measurement has to use the workload's own shape. A two-token
+prompt measures the memory the runner reserves, not the memory it accumulates
+while working.
+
+### Failure 59: restarting Ollama left the old runner alive
+
+**Setup.** To apply the new limit, Ollama was stopped (`Stop-Process` on
+`ollama` and `ollama app`) and started again, and a two-token request confirmed
+the limit in the log.
+
+**What happened.** The process list afterwards showed two `llama-server`
+processes: the new one (6.2 GB) and the one from the previous run, still alive
+and still holding 13.4 GB. System commit stood at 45.5 of 46.0 GB. Stopping the
+old runner brought it back to 32.1 GB.
+
+**Why.** On Windows, ending a process does not end the processes it started.
+`ollama.exe` launches `llama-server.exe` as a child. Forcibly terminating the
+parent gives it no chance to stop the child, so the runner was orphaned: nothing
+would ever send it another request, and nothing would stop it. The same was
+true of the eval: when its supervising shell was stopped, the Python process it
+had started kept running.
+
+**The fix.** A restart now also stops any `llama-server` process and checks the
+process list before continuing. After the restart, `ollama ps` and
+`nvidia-smi` confirmed the new runner was entirely on the GPU. It had been
+loaded while the orphan still held graphics memory, and could have been placed
+partly on the CPU.
+
+---
+
+## Step 7: right answers for the wrong reasons
+
+On the Star policy the scenario step gave 8 of 10 right verdicts, and in 9 of
+the 10 it did not cite the clause that decides the question. The app's promise
+is to show a person *which clause* decides their claim, so a right verdict
+resting on the wrong clause is a failure the verdict score cannot see.
+
+### Failure 60: a plausible cause, checked before it was built
+
+**The hypothesis.** Star restarts its numbering in every section, so the model
+is shown several different clauses numbered "8", told apart only by a suffix:
+
+```
+### clause_id=8  (8)  [coverage]
+### clause_id=8#2  (8)  [exclusion]
+```
+
+The section name is not in that header. The plan was to add it, and to give
+repeated numbers ids that say where they live (`Excl-8` rather than `8#2`).
+
+**The check.** The answers were already in the response cache, so replaying
+them cost no model calls. A replay script printed, for each question, the
+clause the answer key requires and the clauses actually cited. The id scheme
+was not the problem: the teeth-whitening answer wrote `8#2` correctly in every
+sample, and the wrong citations were deliberate, not slips between two "8"s.
+Two patterns remained:
+
+| Question | Needed | Cited | What the reasoning said |
+|---|---|---|---|
+| Hernia, 14 months | specified-disease list | pre-existing diseases | "a 36-month waiting period as per clause 1#2" |
+| Dengue, 20 days | 30-day waiting period | pre-existing diseases | "dengue fever, which is a pre-existing condition" |
+| Treatment in Dubai | outside-India exclusion | pre-existing diseases | "a 36-month waiting period for pre-existing diseases" |
+| Caesarean | maternity exclusion | co-payment | "a 5% co-payment applies" |
+| Gallstones, no dates | specified-disease list | co-payment | "subject to a 5% co-payment" |
+
+The label change would have been built, measured, and found to do nothing.
+
+### Where the wrong reasons came from
+
+The replay also printed the computed blocks each prompt carried (the waiting
+periods, reductions and shared words described in earlier milestones). Most of
+the misdirection was written by the pipeline itself, in code that was tuned on
+the synthetic policy:
+
+1. **The waiting-period block.** For the hernia question it said that both the
+   pre-existing diseases period and the specified-disease period "still apply
+   and block treatment covered by THIS clause", pre-existing first. Nothing in
+   the question mentioned an illness from before the policy. The model took the
+   first bar it was given.
+2. **Clauses misread at analysis time.** Pre-hospitalisation ("30 days prior to
+   admission") was stored as a 30-day waiting period. The cataract limit (25%
+   of sum insured or Rs.40,000 per eye) became a per-day room-rent cap. The
+   specified-disease list, whose hernia entry is under 24 months, was stored
+   as 36. The list of items the policy never pays for was typed as a sub-limit,
+   so the reductions block told the caesarean question that it "names this
+   treatment", because the list contains "DELIVERY KIT".
+3. **The co-payment line.** Star's 5% co-payment applies to every claim, so
+   every question was told "APPLIES: clause 9". The model answered
+   "conditional" before looking for an exclusion.
+4. **The shared-words hint never fired.** It names a clause only when the
+   question shares two unusual words with it. The Star clause that decides a
+   question usually shares one: "hernia", "caesarean". Those thresholds were
+   chosen on the 40 synthetic questions, and their docstring says so.
+
+The answer key's pre-existing field did not help either: the fact extractor
+returned `pre_existing_condition: unknown` for all 79 stored questions,
+including one where the person says their diabetes was diagnosed before they
+bought the policy.
+
+### What was changed
+
+Two of the four were fixed first, because both are plain code and could be
+checked against the stored facts without a model:
+
+- **A one-word rule, limited to what the question is about.**
+  `named_in_question` (`api/app/pipeline/scenario.py`) names a clause that uses
+  one unusual word (used by at most two clauses) from the procedure or
+  condition the person named, skipping definitions and procedural clauses.
+  Measured on the stored facts of all 79 questions before any model run, it
+  names a clause for 18. For 13 of those, a clause the answer must cite is
+  among the named. Of the 21 clauses named, 13 must be cited, 4 concern the same
+  treatment without deciding it, and 4 are noise ("admitted", "removal",
+  "existing", "anaesthesia").
+- **The waiting-period block says whom a period concerns.** In
+  `api/app/pipeline/waiting.py`, a period whose opening words mention
+  pre-existing diseases gets its own sentence. A period naming the person's
+  condition is listed first, the pre-existing one last. A served period that
+  names the condition gets its own line instead of being filed as irrelevant.
+
+### What the model did with it
+
+Three samples per Star question (every question unanimous) and one sample
+per synthetic question:
+
+| | Before | First wording | Second wording |
+|---|---|---|---|
+| Star right verdicts | 8/10 | 7/10 | 7/10 |
+| Star citing the deciding clause | 1/10 | 2/10 | 2/10 |
+| Synthetic, main 40 | 34/40 | — | 34/40 |
+| Synthetic held-out 1 / 2 | 11/16, 11/13 | — | 10/16, 12/13 |
+
+The first wording appended a qualifier to the pre-existing line: "...still
+applies and blocks treatment covered by THIS clause. It concerns only an illness
+the person already had". Hernia at 14 months moved to the right clause. Dengue
+and Dubai did not: the dengue answer quoted the opening words back. And the
+served hernia line, "no longer stands in the way of this treatment", turned a
+right "conditional" into "covered", read as permission.
+
+The second wording opened the pre-existing line with whom it concerns, and
+put the served line back to the narrow wording from M5. Dengue moved to the
+right clause; hernia at 14 months moved back to the wrong one. On the synthetic
+policy, the question that broke (`ho-short-procedure`) is one the new rule had
+named a noise clause for, through "anaesthesia".
+
+**Reading.** Each wording moved one question in and another out, and the
+totals did not move. With ten questions, that is the pattern Concept 36
+describes: tuning against a small set mostly redistributes its errors. The
+changes are kept because each states something true that the block had been
+leaving out, not because the numbers improved; they did not.
+
+### A replay that disagreed with its own run
+
+A replay of the second run's answers made two model calls when it should have
+made none, and got a different verdict for `star-hernia-after-wait`. The run's
+log explains the first half: that answer ran past the 1,600-token output limit,
+was retried with 3,200, and was stored under a key built from the retry's
+options (the client's own comments describe this). The replay looked it up
+under the 1,600 key, missed, and asked again. The second half is not
+explained: the same prompt, at temperature 0 with a fixed seed, ran away the
+first time and answered normally the second. The server's prompt store
+(Failure 58) restores a saved prompt state instead of recomputing it, which
+could change the arithmetic slightly. That was not tested. (It was tested in
+Step 9, Failure 65.)
+
+---
+
+## Step 8: four clauses the analysis misread
+
+### The problem, restated
+
+Step 7 found that most of the wrong reasons on the Star policy were written by
+the pipeline itself: the computed blocks placed above the clauses in the
+reasoning prompt (waiting periods, payout reductions, cover windows) repeated
+four misreadings made at analysis time, when the model read each clause once
+and filled in structured fields. The model reads a clause's
+`waiting_period_value`, `cap_percent_of_sum_insured` and so on; Python then does
+the arithmetic with them (the split described in the M5 and M7 entries). If the
+reading is wrong, the arithmetic is right about the wrong thing, and the block
+states it as settled fact.
+
+The four, as the analysis stored them:
+
+| Clause | What it says | What was stored |
+|---|---|---|
+| 4, Pre Hospitalization | "for a fixed period of 30 days prior to the date of admissible hospitalization" | a 30-day waiting period, type `waiting_period` |
+| 3, Cataract Treatment | "25% of Sum Insured or Rs.40,000/-, whichever is lower, per each eye in one Policy Year" | a room-rent cap of 25% of the sum insured **per day** |
+| Exclusion 2, specified diseases | a 24-month list (hernia, cataract, gallstones…) and a 36-month list (joint replacement, osteoarthritis) | one number: 36 months |
+| c74, a 3,000-character piece of the annexure | the end of the list of items never paid, then the lists of items folded into room and procedure charges | type `sub_limit` |
+
+These were found by replaying, not by running the model. The response cache
+(Concept 29) holds every analysis, so a script that runs `analyze()` with the
+model call replaced by an error prints exactly what was stored, and makes zero
+model calls.
+
+### The approach: correct the reading after the model, not the prompt
+
+Two ways to fix a misreading were available. Change the analysis prompt, so the
+model reads better; or check the model's reading against the clause's own
+words, in code, before anything uses it.
+
+The prompt route was rejected here for three reasons. The prompt already
+separates a waiting period from a cover window, with an example, and the
+synthetic policy's pre-hospitalisation clause ("immediately preceding the date
+of admission") was read correctly; Star's phrasing ("prior to the date of
+admissible hospitalization") was not, and adding phrasings one at a time does
+not end. Any prompt change also changes the cache key of every clause on every
+policy, so all of them are re-read, and the clause-type score on the synthetic
+policy (macro-F1 0.973; 1.000 at the end of M14, see Failure 69) would have to be re-earned. And a reworded prompt moves
+readings that were right as well as the ones that were wrong, which is the
+opposite of a controlled change.
+
+The code route is the pattern this project already uses twice: an extracted
+exception is kept only if the clause states it with an exception word before it
+(Concept 32, `verify_exception`), and an age filed as "at policy start" is moved
+when the question never mentions the policy starting (`correct_misfiled_age`).
+The corrections run in `_analyze_batch`, after the cache:
+
+```python
+# api/app/pipeline/analyze.py, _analyze_batch()
+    text_by_id = {str(seg.order_idx): seg.text for seg in batch}
+    for key, analysis in analyses.items():
+        kept = [e for e in analysis.exceptions if verify_exception(e, text_by_id[key])]
+        ...
+        analysis.exceptions = kept
+        correct_stay_period(analysis, text_by_id[key])
+        correct_daily_cap(analysis, text_by_id[key])
+    return analyses
+```
+
+Because the model call and its stored answer are untouched, every cached answer
+stays valid, and each correction could be checked on all four policies with no
+model at all.
+
+## Concept 42: a correction needs positive evidence
+
+A check that rewrites what a model extracted can itself be wrong, and the two
+ways it can be wrong do not cost the same.
+
+Take the waiting-period check. If it wrongly *keeps* a period that is really a
+hospital window, a question is told a bar exists that does not: the answer
+leans towards "not covered". If it wrongly *drops* a real waiting period, a
+question is told nothing bars a claim that is barred: someone is told "covered"
+and is refused later. This project treats the second as the worse error, the
+same judgement that makes `insufficient_information` a first-class verdict.
+
+So a correction is written to act only on **positive evidence for the other
+reading**, never on the mere absence of evidence for this one. "The clause does
+not mention the policy's start" is absence. "The clause counts its period from a
+hospital stay, and does not mention the policy's start" is presence plus
+absence. Only the second moves anything. A clause that mentions both is left
+exactly as the model read it.
+
+The general rule: before writing a check that overrides a model, ask which
+direction its mistakes fall in, and make it silent whenever the evidence is
+mixed.
+
+### Failure 61: a hospital window read as a waiting period
+
+**Setup.** Clause 4 of the Star policy pays pre-hospitalisation expenses "for a
+fixed period of 30 days prior to the date of admissible hospitalization". A
+waiting period counts from the day the policy began; this window counts back
+from one hospital stay. The analysis schema has separate fields for the two
+(`waiting_period_value` and `cover_window_value`, added in an earlier milestone
+for exactly this confusion on the synthetic policy).
+
+**What happened.** The model put 30 days in the waiting-period field and typed
+the clause `waiting_period`. For a dengue fever 20 days into the policy, the
+waiting-period block then led with:
+
+```
+- clause 4: requires 1 month, policy held 20 days -> this waiting period still
+  applies and blocks treatment covered by THIS clause
+```
+
+above the real 30-day exclusion (exclusion 3, `3#2`). The model cites the first
+bar it reads (Step 7).
+
+**Why.** The prompt's example of a before-admission window uses the word
+"preceding"; Star says "prior to". The model generalised the example's meaning
+for one phrasing and not the other.
+
+**The fix.** Measured first: every real waiting period on all four policies
+(Star's three exclusions, HDFC's and Niva's, the synthetic 3.1–3.4) names the
+policy's start in one of four ways. Clause 4 names none of them and names a
+hospital stay instead.
+
+```python
+# api/app/pipeline/analyze.py
+_POLICY_START = re.compile(
+    r"waiting[\s-]+period|inception|commencement|continuous(?:ly)?\s+cover",
+    re.IGNORECASE,
+)
+_BEFORE_STAY = re.compile(
+    r"\b(?:prior\s+to|preceding|before)\s+(?:the\s+)?(?:date\s+of\s+)?(?:\w+\s+)?"
+    r"(?:admission|hospitali[sz]ation)\b",
+    re.IGNORECASE,
+)
+_AFTER_STAY = re.compile(
+    r"\b(?:after|following|from)\s+(?:the\s+)?(?:date\s+of\s+)?discharge\b",
+    re.IGNORECASE,
+)
+
+def correct_stay_period(analysis, text):
+    if analysis.waiting_period_days is None or _POLICY_START.search(text):
+        return
+    before, after = _BEFORE_STAY.search(text), _AFTER_STAY.search(text)
+    if not (before or after):
+        return
+    if analysis.cover_window_value is None and bool(before) != bool(after):
+        analysis.cover_window_value = analysis.waiting_period_value
+        analysis.cover_window_unit = analysis.waiting_period_unit
+        analysis.cover_window_anchor = "before_admission" if before else "after_discharge"
+    analysis.waiting_period_value = None
+    analysis.waiting_period_unit = None
+    if analysis.clause_type == ClauseType.WAITING_PERIOD:
+        analysis.clause_type = ClauseType.COVERAGE.value
+```
+
+Three details. "waiting period" itself counts as naming the policy's start:
+HDFC's benefit table says "post waiting period of 2 years" with no other
+anchor, and dropping that would be the expensive error from Concept 42. A
+clause naming both sides of a stay loses the misread period but gains no
+window, because the side would be a guess. And the type is corrected too: the
+reasoning prompt prints each clause's type in its header (`[waiting_period]`),
+and a clause granting expenses within a window is coverage, as the synthetic
+policy's own pre-hospitalisation clause is labelled.
+
+Replayed from the cache: clause 4 is now `coverage` with a 30-day
+before-admission window, and no waiting period.
+
+### Failure 62: a per-eye cap read as a per-day room cap, on two policies
+
+**Setup.** The field `cap_percent_of_sum_insured` means one thing: a per-day
+accommodation cap as a percentage of the sum insured ("room rent … limited to
+one percent of the Sum Insured per day"). The reductions module
+(`app/pipeline/reduction.py`) multiplies it by the sum insured and compares the
+result with the person's nightly room rate.
+
+**What happened.** Star's cataract clause, "25% of Sum Insured or Rs.40,000/-,
+whichever is lower, per each eye", was stored with
+`cap_percent_of_sum_insured = 25`. Every question that gave a room rate was told:
+
+```
+- WITHIN THE LIMIT: clause 3: 25% of 3 lakh is 75,000 rupees per day; room rent
+  of 8,000 rupees per day does NOT exceed that limit, so this cap costs nothing here
+```
+
+and the cataract question was told that "room rent are capped at 25% of the sum
+insured per day". The same replay showed **the synthetic policy had the same
+fault, unnoticed**: its modern-treatment limit, "fifty percent of the Sum
+Insured per Policy Year", was stored as a 50% daily room cap. No synthetic
+question had exposed it, because the line it produced was always "within the
+limit".
+
+**Why.** A number that is "a percentage of the sum insured" fits the field's
+name; "per day" is in the field's description, not its name, and the model
+matched on the name.
+
+**The fix.** A daily cap is kept only where the clause says the rate is daily:
+
+```python
+# api/app/pipeline/analyze.py
+_PER_DAY = re.compile(r"per\s+day|per\s+diem|/\s*day\b|\bdaily\b", re.IGNORECASE)
+
+def correct_daily_cap(analysis, text):
+    if _PER_DAY.search(text) or all(getattr(analysis, f) is None for f in _DAILY_CAPS):
+        return
+    for name in _DAILY_CAPS:
+        setattr(analysis, name, None)
+```
+
+A cap that is not per day is still a cap, and the reductions module already
+has a place for one: a `sub_limit` clause with no numbers is listed for the
+model to read against the treatment (status JUDGEMENT), and named when its text
+uses a word of the treatment. After the fix, the cataract question's block
+says `NAMES THIS TREATMENT: clause 3 mentions "cataract"`, which is the clause
+its answer key requires. Star's clause 1 and its benefits table, and the
+synthetic 5.1, all say "per day" and keep their caps.
+
+The lesson is the one M15 opened with, from the other side: a second document
+does not only expose new faults, it exposes old ones the first document was
+too kind to show.
+
+### Failure 63: two waiting periods, one number
+
+**Setup.** IRDAI's standard specified-disease exclusion (Code Excl 02) is
+written with a blank for the period. Star fills it with "24/36 months" and two
+lists: "24 Months waiting period" over twenty conditions including hernia,
+cataract and gallstones, and "36 Months waiting period" over joint replacement
+and age-related osteoarthritis. HDFC's wording puts its 36-month pre-existing
+disease period and its 24-month list in one numbered block, which the
+segmenter keeps as one clause.
+
+**What happened.** The schema holds one `waiting_period_value`. Star's clause
+was stored as 36 months. For a hernia 14 months in, the answer happened to be
+right (short of both). For a hernia 30 months in, the block would have said the
+bar "still applies" when the hernia list lifted six months earlier: a refusal
+of a payable claim, and no question in the answer key was in that window to
+show it. For the Dubai question, 24 months in, the block told a pneumonia
+question that exclusion 2 "still applies and blocks treatment".
+
+**Options considered.** Re-ask the model for a list of periods, each with the
+conditions it covers: a new schema, so every clause on every policy re-read and
+the clause-type score re-checked. Or keep what the model already read: its
+`time_windows` field for this clause was `["24 months", "36 months"]`. The
+second was chosen; it costs no model time.
+
+**The fix, in two parts.** The analysis now carries every period the clause
+sets:
+
+```python
+# api/app/pipeline/analyze.py, ClauseAnalysis
+    @property
+    def waiting_periods_days(self) -> list[int]:
+        first = self.waiting_period_days
+        if first is None:
+            return []
+        periods = {first}
+        for window in self.time_windows:
+            if m := _BARE_DURATION.fullmatch(window.strip()):   # "24 months"
+                periods.add(int(m[1]) * _DAYS_PER[m[2].lower()])
+        return sorted(p for p in periods if p > 0)
+```
+
+Only a `time_windows` entry that is nothing but a duration counts, and only on
+a clause that has a waiting period at all: "within 30 days of discharge" is a
+different kind of period, and reading it as a bar is Failure 61 again. The list
+replaces the single number everywhere it travels: `ClauseAnalysis` in the
+database (`waiting_periods_json`), the API's scenario router, the
+`ShortlistClause` the scenario step reads, and the eval's copy of that path.
+
+Then the comparison gains a fourth result:
+
+```python
+# api/app/pipeline/waiting.py, evaluate()
+        if days_held is None:
+            status = WaitingStatus.UNKNOWN
+        elif days_held >= required[-1]:
+            status = WaitingStatus.SERVED
+        elif days_held < required[0]:
+            status = WaitingStatus.NOT_SERVED
+        else:
+            status = WaitingStatus.PARTLY_SERVED
+```
+
+Past both periods, or short of both, the answer does not depend on which list a
+treatment is on, and nothing changes. Between them it does, and deciding which
+list names this treatment is reading, which is the model's job. So the line
+gives both results and hands over the reading:
+
+```
+- clause 2#2: requires 24 months or 36 months (different periods for different
+  treatments). Policy held 2 years, so the 24 months period is served and the
+  36 months period is NOT. Which period this clause sets for this treatment
+  decides whether it still blocks the claim: read the clause
+```
+
+A partly served period is listed with the periods that block, so the block
+never also says "No waiting period blocks this claim" beside it; and it is not
+in the set `find_contradictions` treats as cleared, so citing it as a refusal is
+not flagged as a contradiction.
+
+### Failure 64: the annexure lists, run together
+
+**Setup.** IRDAI's standard annexure lists items a policy does not pay for:
+List I, items never covered; Lists II–IV, items folded into room, procedure
+and treatment charges. Star's copy is headed `LIST I - Items for which coverage
+is not available in the policy`, in bold, smaller than body text.
+
+**What happened.** No rule recognised the list headings, so all four lists and
+the ombudsman addresses after them ran on as one clause under the previous
+section, "TABLE OF BENEFITS", and the size cap cut them every 3,000 characters.
+The piece `c74` began mid-list ("AMBULANCE EQUIPMENT 51 ABDOMINAL BINDER …"),
+held the end of List I and the start of Lists II–IV, and was read as a
+`sub_limit`. Because the reductions module looks up the treatment's words in
+every sub-limit, the caesarean question was told:
+
+```
+- NAMES THIS TREATMENT: clause c74 mentions "delivery", which is in what the
+  person described.
+```
+
+The word was List I's "DELIVERY KIT".
+
+**The fix.** "List I" joins the labelled numbering forms the segmenter already
+trusts on their own ("Clause 4.2", "Section 3"):
+
+```python
+# api/app/pipeline/segment.py
+_RE_LABELLED = re.compile(r"^(?:Clause|Section|Article|Part|List)\s+[\dIVXLivxl]+\b", re.I)
+```
+
+The closing `\b` is new, and it is what keeps prose like "List Items continue"
+from reading as "List I". The matched number has its whitespace collapsed
+before it becomes an id, because Niva sets it as "List  I", with two spaces,
+and the model cites that string.
+
+Compared segment by segment with the previous version on all four policies:
+the synthetic policy and HDFC are identical; Star's first 73 clauses are
+identical, and the tail is now the benefits table, then `LIST I`, `LIST II`,
+`LIST III`, and `LIST IV` (with the ombudsman addresses, cut into three pieces).
+Seven model calls, 48 seconds, analysed only those. List I was read as an
+`exclusion`, Lists II and III as `sub_limit`, List IV as `procedural` (its
+piece is mostly addresses). Niva's lists split too, but its text arrives with
+List II's rows under the List I heading, a reading-order problem with tables
+that this rule does not fix; before, all of it was one block.
+
+**A wrong turn, and a wrong claim.** The first version of this fix also taught
+the segmenter to read letter-spaced headings: Star sets its annexure heading as
+`A N N E X U R E  -  A`, which no word rule can match, at 1.18 times body size,
+just under the 1.20 section threshold. The comparison showed what that did:
+Star sets six other headings the same way (`S T A N D A R D  E X C L U S I O N S`
+and similar), so most of the policy's clauses moved to new section names.
+Section names are in the analysis prompt (`render_clause_batch`), so about 75
+clauses would have been re-read, and their readings could have moved for
+reasons unrelated to this fix. It was reverted; the list rule does the work on
+its own. While reading that comparison, the section label "STAR HEALTH AND
+ALLIED INSURANCE COMPANY LIMITED" on six definition clauses was first put down
+to the letter-spacing rule. Printing the section paths without it showed the
+label was already there: the company name is set large and bold, and passes
+the section size test. That is a separate, older fault, still open.
+
+### What the four fixes changed in the prompts
+
+Replayed for all ten Star questions, with no model calls:
+
+| Question | Before | After |
+|---|---|---|
+| dengue, 20 days | clause 4 listed first as a blocking waiting period | clause 4 gone |
+| cataract cost | "room rent are capped at 25% of the sum insured per day" | clause 3 named for "cataract" |
+| room over cap | "WITHIN THE LIMIT: clause 3: 25% of 3 lakh is 75,000 rupees per day" | line gone |
+| Dubai, 2 years | exclusion 2 "still applies and blocks" | partly served, with both periods |
+| hernia | "requires 36 months" | "requires 24 months or 36 months" |
+| caesarean | c74 named for "delivery" | line gone |
+
+One false lookup remains: the gallstones question's "gallbladder removal" now
+finds "HAIR REMOVAL CREAM" in List III, where it used to find it in c74.
+"removal" is one of the four noise words the one-word rule was measured to
+produce (Step 7).
+
+## Step 9: measuring it
+
+### Failure 65: an answer that never ended took the eval with it
+
+**Setup.** The Star questions were run three times each, in two halves of five
+to stay under ten minutes each (the laptop's memory guard, Failure 57).
+
+**What happened.** The first question, `star-hernia-too-soon`, never finished
+its answer. The client retried with the output ceiling doubled, twice, as it is
+built to; every attempt ran to the ceiling inside the `reasoning` string, and
+the third raised an error that ended the whole run after six minutes, with no
+results for any question:
+
+```
+attempt 1: response truncated mid-JSON; retrying with num_predict=3200.
+attempt 2: response truncated mid-JSON; retrying with num_predict=6400.
+prompt used 22578 of 28672 context tokens, leaving 6094 for an answer capped at num_predict=6400
+app.llm.client.LlmError: ... JSONDecodeError: Unterminated string starting at: line 3 column 16 (char 45)
+```
+
+The same prompt, sent again by a probe script with the cache bypassed, came
+back finished and correct, three times: `not_covered`, citing exclusion 2.
+
+**Why.** The server's log records, for every request, how much of the prompt
+it reused. The eval's first attempt restored the first 1,866 tokens (the shared
+system prompt) from the server's prompt store (Failure 58) and computed the
+other 20,700. The retries reused that state. The probe's first request found no
+stored prompt to restore and computed all 22,578 tokens from the start; its
+later requests reused *that* state.
+
+```
+eval,  attempt 1:  found better prompt with f_keep = 0.717   -> generated 1,599 tokens, cut off
+eval,  attempt 2:  n_past was set to 22577                   -> generated 3,199 tokens, cut off
+probe, request 1:  lcp = 4 on every stored prompt            -> 177 tokens, finished
+probe, request 2:  n_past was set to 22577                   -> 283 tokens, finished
+```
+
+## Concept 43: the same prompt, computed two ways
+
+Concepts 26 and 27 established that temperature 0 is not reproducibility: the
+GPU sums floating-point numbers in an order that depends on the shape of the
+work, and the last bits of a result can differ. There the shape changed because
+two requests were batched together.
+
+A long prompt is not computed in one piece. The server processes it in chunks
+of a fixed size, and each chunk's arithmetic depends on where the chunk starts.
+When the first 1,866 tokens are restored from memory, the remaining tokens are
+chunked from position 1,866; when nothing is restored, they are chunked from
+position 4. The notes the model keeps for each token (the KV cache, Concept 41)
+therefore differ in their last bits, and so do the probabilities of the next
+word. At a near-tie, the tie breaks the other way, and from there the two
+answers are different texts: one finishes in 177 tokens, the other repeats
+itself until it is cut off.
+
+What decides how much is restored is **which prompts the server happened to
+store before**, which is the history of earlier requests. So on this server,
+with its prompt store on, a fresh answer to a long prompt depends on what was
+asked before it. Only a replay from this project's own cache is exactly
+repeatable. A sample of three fresh answers measures what the system usually
+says under the history it had, which is still what the majority-of-three
+method (Concept 34) was designed for, but "run it again and it will say the
+same" is not a property this setup has.
+
+The store is not the cause of the non-determinism; it moves where the chunks
+start, and any reuse of a partly matching prompt does the same. Turning it off
+would make every Star question recompute 22,600 tokens and still leave the
+server's reuse of its own last prompt.
+
+### The fix: a length the grammar enforces, and a run that survives
+
+A runaway is a loop, and a larger ceiling only gives the loop more room. This
+project's answer to a model producing something it must not is to make it
+unrepresentable (the enum on citation ids is the first example). JSON Schema
+has `maxLength` for strings, and it was checked before being relied on: a field
+capped at 60 characters, given a prompt asking for a 300-word story, came back
+at exactly 60 characters inside valid JSON. The grammar closes the string when
+the cap is reached.
+
+```python
+# api/app/pipeline/scenario.py
+MAX_REASONING_CHARS = 1_500
+MAX_QUOTE_CHARS = 1_200
+...
+            "reasoning": {"type": "string", "maxLength": MAX_REASONING_CHARS},
+...
+                        "quote": {"type": "string", "maxLength": MAX_QUOTE_CHARS},
+```
+
+The sizes were read from the 229 answers in the cache, not chosen: the longest
+reasoning was 974 characters and the longest quote 832 (Concept 40's rule, that
+a limit is a measurement). A schema is part of the prompt (Concept 31), so this
+changes the cache key of every reasoning answer, and `PROMPT_VERSION` became
+`v41-two-period-waits-capped-answers`.
+
+And the eval no longer dies with one answer: a case whose answer cannot be
+produced is recorded as a row like any other, wrong and citing nothing
+(`_unanswered` in `evals/run_scenario_eval.py`), and the run goes on.
+
+### Results
+
+Three samples per question, every question unanimous, no answer lost:
+
+| | Before Step 8 | After |
+|---|---|---|
+| Star right verdicts | 7/10 | 7/10 |
+| Star citing the deciding clause | 2/10 | 2/10 |
+| Quotes that failed verification | 0 | 2 per sample, all flagged (detection 1.000) |
+
+The totals did not move, and four questions did:
+
+| Question | Before | After |
+|---|---|---|
+| hernia, 14 months | right verdict, wrong clause | right verdict, **right clause** (exclusion 2) |
+| hernia, 3 years | covered (wrong) | **conditional** (right), citing only the co-payment |
+| dengue, 20 days | right verdict, right clause | right verdict, cites the pre-existing diseases exclusion |
+| Dubai | not covered (right) | **conditional** (wrong), citing only the co-payment |
+
+Read the stored answers and the three wrong verdicts (caesarean, Dubai,
+gallstones) have one reason between them: "The claim is conditional because a
+5% co-payment applies." None mentions an exclusion or a waiting period. That is
+the next fix, not this one. As in Step 7, this is Concept 36 in action: ten
+questions, two moving each way. The fixes stay because each removes something
+false the pipeline was telling the model.
+
+**What the cap revealed.** Two answers that finished did so only because of the
+cap: the hernia and teeth-whitening reasoning both repeat a sentence until the
+1,500th character, and stop mid-word. The verdict and citation survive, but a
+person would read that text. The loop was always there; before, it cost the
+whole answer.
+
+**Also seen, not fixed.** The room-over-cap answer cites "1.1" for the room cap
+the block attributes to clause 1 (two nearly identical ids). The cataract answer
+computes "95% of 70,000" itself instead of the 40,000 limit, because a cap of
+"25% or Rs.40,000, whichever is lower, per eye" has no arithmetic in the
+reductions module. The fact extractor stored the cataract question's sum
+insured as 500000 lakh.
+
+### Check it yourself
+
+- `api/.venv/Scripts/python.exe -m pytest api/tests/test_analyze.py -v`: the
+  corrections, each on a clause shaped like the one it was measured on.
+- `api/.venv/Scripts/python.exe -m pytest api/tests/test_waiting.py -k two_periods`: the partly served
+  status. Before running it, predict: a clause with periods of 24 and 36 months,
+  a policy held exactly 24 months. Served, not served, or partly served? (The
+  comparison is `>=`, so the 24-month period counts as served: partly.)
+- In the server log (`%LOCALAPPDATA%\Ollama\server.log`), find a
+  `found better prompt with f_keep` line and the `stop processing: n_tokens`
+  line after it. The difference between that count and the prompt's length is
+  how many tokens the answer took.
+
+## Step 10: the co-payment line
+
+### The problem, restated
+
+Star's policy takes a 5% co-payment from each and every claim. The reductions
+block (`app/pipeline/reduction.py`) printed it on every Star question, the same
+each time:
+
+```
+- No waiting period blocks this claim. Some other clause decides it.
+
+WHAT REDUCES THE PAYOUT (arithmetic, not opinion).
+...
+- APPLIES: clause 9: a 5% co-payment applies to the admissible claim amount
+```
+
+After Step 8, the three wrong verdicts (caesarean, Dubai, gallstones) had one
+reason between them: "conditional because a 5% co-payment applies". Printing
+the prompt showed the chain: the waiting-period block ends "Some other clause
+decides it", and the next finding on the page is the only APPLIES line in the
+prompt.
+
+The age-based co-payment had met this before (Failure 38): "the 20% co-payment
+DOES apply, so this claim is paid at 80%" turned a refused nose job into
+`conditional`, and the fix made the line say only what was computed, "IF this
+claim is payable at all, it is paid at 80%". The branch for a co-payment with
+no condition never got that qualifier, because the synthetic policy has no
+such co-payment.
+
+### The change
+
+```python
+# api/app/pipeline/reduction.py, _copay_check(), no age condition
+f"a {percent}% co-payment is taken from EVERY claim this policy pays, "
+f"so it says nothing about whether THIS claim is paid - settle that "
+f"from the exclusions and waiting periods first. IF this claim is "
+f"payable at all, it is paid at {100 - percent}% of the admissible amount",
+```
+
+The synthetic policy's prompts do not change: its only co-payment has an age
+condition. `PROMPT_VERSION` became `v42-universal-copay-if-payable`.
+
+### What happened
+
+Three samples per question, all unanimous: 7/10 right verdicts, as before.
+The co-payment stopped being the only stated reason, and what replaced it was
+worse reading, not better:
+
+- **caesarean**: now `covered`, "under clause 18 of the policy, which states
+  that the Company shall indemnify medical expenses incurred for inpatient
+  care treatment under Ayurveda, Yoga …". That is coverage clause 2 (AYUSH).
+  Clause 18 is the maternity exclusion the answer key requires. The quote
+  failed verification, and the effect given was `permits`.
+- **Dubai**: the reasoning says exclusion 2's "24-month waiting period still
+  applies" after two years (the block said the 24-month period is served) and
+  "therefore, the claim is not covered at this time", and the verdict is
+  `conditional`.
+- **weekend trek**: cites "clause 3.3", a 30-day exclusion, as delaying a
+  claim four years in; the quote failed verification.
+- **gallstones**: repeats itself to the reasoning cap.
+
+**A measurement caveat this exposed.** Citation recall counted the caesarean
+answer as citing its deciding clause (3/10, up from 2/10), because it checks
+the cited id only. The quote attached to that id was another clause's text and
+failed verification. A citation whose quote is unverified is not evidence that
+the model read the right clause.
+
+**And a regression that was not one.** Dubai was right before Step 8, and its
+answers then never cited exclusion 22 (treatment outside India). The reason
+given was exclusion 2 "still applies and blocks" at 24 months, the false 36-month
+reading Step 8 removed. The verdict was right for a reason that was false. In
+no run on record has the model found exclusion 22, and in none before this one
+had it cited exclusion 18.
+
+### Reading
+
+The co-payment line was the excuse the model reached for, not the cause. With
+22,600 tokens and 80 clauses in front of it, this 7B model attaches one
+clause's text to another's id, contradicts its own reasoning in its verdict,
+and loops. The line is kept because it states something true the old wording
+left out (the Failure 38 standard). The next step was planned before M16's fixes
+began, for exactly this case: if Star still cites the wrong clauses, reason in
+two passes.
+
+## Step 11: two passes, the first one tested alone
+
+### The idea, and the risk it carries
+
+Two-pass reasoning splits the scenario step: pass 1 shows the model the
+question and every clause and asks only which clauses could decide it; pass 2
+answers from those clauses, plus the ones code already flags, in a prompt a
+quarter of the size. The risk is the reason this project has no retrieval
+(Concept 38): if pass 1 leaves out the deciding clause, pass 2 cannot cite it.
+Unlike retrieval, the model still reads every clause while choosing.
+
+So pass 1 was built and measured on its own first, as a probe
+(a throwaway script, not part of the app or this repository): pass 2 would be built only if the picks
+held the deciding clause for most questions.
+
+The pick is enum-locked to real ids, like every citation, and at most eight
+long:
+
+```python
+"clause_ids": {
+    "type": "array", "minItems": 1, "maxItems": 8,
+    "items": {"type": "string", "enum": ids},
+},
+```
+
+Its instructions list the kinds of clause that decide a claim and say that the
+deciding clause "often uses different words from the question, and often
+comes late". They contain no example, because the obvious examples (treatment
+abroad and "the geographical limits of India") are eval questions, and an
+instruction written from the answer key is tuning on it (Concept 36).
+
+Measured against each question's `must_cite`, alone and together with the
+clauses the computed blocks and lookups already name ("flagged").
+
+### Failure 66: a pick that did not read
+
+| | Synthetic policy | Star |
+|---|---|---|
+| clause text in the prompt | about 3,300 tokens | about 19,500 tokens |
+| pick holds every must_cite | 28 of 32 | 2, 1 and 1 of 10 (three samples) |
+| pick + flagged | 28 of 32 | 7 of 10, all from the flags |
+
+On Star the picks do not look like choices. For the caesarean question, three
+times: `c0, c1, c2, c3, c4, c5, c7, c8`, the first definition pieces in
+document order. Most others are short runs of low numbers (`1, 2, 9, 19, 21,
+22, 23`). No pick in thirty contained an id with a `#` suffix, and every
+exclusion and condition that shares a number with a coverage clause has one.
+For cosmetic teeth whitening the model picked `8` (Star's cumulative bonus)
+three times, not `8#2` (the cosmetic exclusion).
+
+On the synthetic policy the same instructions picked well, with a median of
+four clauses, and one of its four misses was the same kind of run: `4.1, 4.2,
+… 4.8` for a question decided by 6.4.
+
+**Reading.** Picking works where the text is short and fails where it is long:
+the same loss of track Step 10 showed in the answers, now without any answer
+to hide behind. Two things are mixed in the Star result and not separated:
+the length, and the `#` ids, where `8` is a complete id and also the start of
+`8#2`, so the grammar lets the model stop after the `8`. Pass 2 was not built
+on this pick.
+
+### The pick, in groups
+
+The synthetic result says the task is not beyond the model: at 3,300 tokens it
+picked well. So the policy is given to it at that length. The clauses, in
+document order, are cut into groups of about 3,000 tokens, and each group is
+asked on its own, at most three from each:
+
+```python
+# api/app/pipeline/scenario.py
+PICK_GROUP_TOKENS = 3_000
+MAX_PICKS_PER_GROUP = 3
+```
+
+Two details are what make it work at all. The schema allows an empty answer
+(`"minItems": 0`), because most groups of a policy have nothing to do with any
+one question, and a schema that demands a pick turns every group into a false
+positive. And each group's enum holds only that group's ids, so `8` and `8#2`
+are rarely offered together.
+
+Measured on Star, two samples:
+
+| | whole policy | in groups |
+|---|---|---|
+| pick holds every must_cite | 1-2 of 10 | 7 of 10 |
+| pick + flagged | 7 of 10 | 9 of 10 |
+| calls per question | 1 | 8 (about 15 seconds) |
+| clause text passed on | all 19,500 tokens | at most 6,800 |
+
+The picks now find what no run had found: exclusion 22 (treatment outside
+India), exclusion 18 (maternity), exclusion 8#2 (cosmetic). The one the pick
+still misses is the hazardous-sports exclusion for an amateur's weekend trek.
+
+## Concept 44: fitting in the window is not being read
+
+The premise for having no retrieval was a measurement: every decision-relevant
+clause of a policy fits in the context window (Concept 38), so nothing has to
+be dropped, and dropping is what loses the clause that decides a case.
+
+That premise is about the window. It says nothing about attention. M16
+measured the other half on a real wording: with 80 clauses and 22,600 tokens in
+front of it, this 7B model cited the deciding clause in 2 questions of 10,
+attached one clause's text to another's id, and repeated itself until it was
+cut off. The same model, given the same clauses in groups of a tenth the size,
+found the deciding clause in 7 of 10.
+
+So a context window has two limits, and only one of them is printed in the
+model card. The second has to be measured on the shape of your own prompt, and
+the measurement is cheap: ask the model to do a small, checkable part of the
+task at different prompt lengths - here, name the clauses that matter - and
+compare against the answer key you already have.
+
+What this does NOT license is retrieval. Nothing here is ranked, embedded or
+searched, and no clause is dropped before a model has read it: every clause is
+read, in a group, by the same model that answers. The difference between that
+and retrieval is who decides - a reader, or a similarity score - and it is the
+difference between a clause left out because it uses unusual words and one left
+out because the reader judged it irrelevant.
+
+## Step 12: answering from the picked clauses
+
+### What pass 2 is shown
+
+The clauses the model picked, plus every clause code already names - and the
+second half is not optional:
+
+```python
+# api/app/pipeline/scenario.py
+def named_by_code(computed, scenario, clauses, facts) -> set[str]:
+    named = {c.clause_id for c in computed.waiting}
+    named |= {c.clause_id for c in computed.reductions
+              if c.status is not reduction.ReductionStatus.NOT_RAISED}
+    named |= {c.clause_id for c in computed.windows
+              if c.status is not window.WindowStatus.NOT_RAISED}
+    named |= set(shared_words(scenario, clauses, facts))
+    named |= set(computed.absent)
+    return named
+```
+
+The computed blocks say "clause 2#2: requires 24 months or 36 months…". If a
+pick could drop 2#2, that line would point at a clause the model cannot read or
+cite, and the bar it describes would go unanswered. The waiting periods,
+reductions and windows are still computed over **every** clause, before any
+picking: what the model picks decides what it READS, never what is checked.
+
+A policy short enough to read whole is read whole:
+
+```python
+PICK_ABOVE_TOKENS = 6_000
+```
+
+The synthetic policy is 3,346 tokens, reads well whole, and picks at 28 of 32,
+so picking it could only lose clauses. Star is 19,500 and does not. The
+threshold sits between the two measured points, nearer the one that reads well.
+
+### What it changed, and what it exposed
+
+Three samples per question, all unanimous:
+
+| | before M16 Step 8 | after Step 10 | with two passes |
+|---|---|---|---|
+| Star right verdicts | 7/10 | 7/10 | 6/10 |
+| Star citing the deciding clause | 2/10 | 2-3/10 | 7/10 |
+
+The answers stopped being about the wrong clauses and started being wrong
+about the right ones:
+
+- **hernia, three years**: "The claim is covered… the 5% co-payment applies,
+  but this does not refuse the claim… Therefore, the claim is covered, but the
+  payment will be conditional on the actual amount being 95%." One sentence
+  saying both.
+- **caesarean**: finds the maternity exclusion, quotes it correctly, and then:
+  "Since your situation falls under the exception, the claim is covered in
+  full." The exception is for an ectopic pregnancy.
+- **gallstones, no dates**: "If the waiting period has been served, the claim
+  will be covered… If it has not, the claim will be refused" - the definition
+  of `insufficient_information` - and answers `conditional`.
+
+### Failure 67: a contradiction the check could not see
+
+**Setup.** `find_contradictions` compares an answer with what Python computed,
+and one of its rules is that a claim which is paid less than in full is
+`conditional`, never `covered`. It fired only when the answer CITED the
+reduction as reducing:
+
+```python
+        for citation in citations:
+            check = applies.get(citation.clause_id)
+            if citation.effect == "reduces" and check is not None:
+```
+
+**What happened.** On the hernia question the rule did fire, the retry put the
+calculation in front of the model, and the model answered `covered` again. On
+the caesarean question it did not fire at all: that answer cited only the
+maternity exclusion, so no cited clause matched a computed reduction, though
+the policy takes 5% from every claim it pays.
+
+**Why.** The contradiction is between the verdict and the ARITHMETIC, not
+between the verdict and the citation. A policy with a co-payment on every claim
+cannot pay one in full, whatever the answer happens to cite.
+
+**The fix, in two parts.** The check now also reports an applying reduction the
+answer never mentioned, in the words of what it does and does not settle:
+
+```
+- You answered covered, which means paid in full, but it was calculated that
+  clause 9: a 5% co-payment is taken from EVERY claim this policy pays...
+  If this claim is payable, it is paid at less than the full amount, which is
+  conditional; if some clause refuses it outright, it is not_covered. It
+  cannot be covered.
+```
+
+And when the retry answers `covered` anyway, the label is corrected rather than
+published:
+
+```python
+    if verdict == Verdict.COVERED and any(
+        c.status is reduction.ReductionStatus.APPLIES for c in computed.reductions
+    ):
+        log.warning("covered, though a reduction applies; correcting to conditional")
+        verdict = Verdict.CONDITIONAL
+```
+
+This is a departure from `find_contradictions`' own rule that code never
+changes a verdict, and the reason it is allowed here is that nothing about the
+claim is being decided: "covered" states that the claim is paid IN FULL, and
+the arithmetic - a percentage the policy takes from every claim it pays, or a
+room rate over its cap - says it is not. The citations are left alone, because
+which clause decides the case is the model's call and not arithmetic. It is the
+safe direction, like the downgrade for an answer with no citations: it takes
+away a promise of payment in full that no calculation supports.
+
+### Results
+
+| | before M16 Step 8 | now |
+|---|---|---|
+| Star right verdicts | 7/10 | 7/10 |
+| Star citing the deciding clause | 2/10 | 7/10 |
+| Synthetic main 40 | 34 | 34 |
+| Synthetic held-out 1 / 2 (one sample) | 10/16, 12/13 | 9/16, 11/13 |
+
+The verdict score has not moved all milestone. What has moved is what the
+answers are ABOUT: seven questions of ten are now decided by the clause the
+answer key names, against two before. For an app whose promise is to show a
+person which clause decides their claim, that is the number that was failing.
+(Step 13 measures it again the next day, and gets 5 of 10.)
+
+The three questions still wrong are wrong in ways that are now visible and
+separate: the caesarean answer applies an exception that does not fit, the
+Dubai answer cites the co-payment although the pick found exclusion 22, and
+the gallstones answer describes `insufficient_information` and labels it
+`conditional`.
+
+On the synthetic sets, one case each fell in the two held-out batches, both
+single samples, and neither from the correction above (it never fired there).
+`ho-icu-within-cap` is an answer whose own text says the claim is paid in full
+and whose label says conditional; `ho-dental-accident` misreads an exclusion
+this milestone did not touch.
+
+### Check it yourself
+
+- `api/.venv/Scripts/python.exe -m pytest api/tests/test_scenario.py -k "pick or picked or covered_"`:
+  the grouping, the empty pick, what code always shows, and the correction.
+- Predict before reading the code: a policy of 30 clauses, each about 250
+  tokens, is asked one question. How many model calls does the scenario step
+  make before it answers? (One per group of about 3,000 tokens - so three - plus
+  the facts call and the answer.)
+
+---
+
+## Step 13: the closing measurement
+
+### How it was run
+
+Every eval set, three samples per question: the synthetic main set and both
+held-out batches, recorded in the run history (`evals/run-history.json`, the
+local file the comparison and stability sections are computed from), and the
+ten Star questions, recorded in logs as in every Star run before, because the
+history file does not say which policy a case belongs to. The runs went one at
+a time, each under ten minutes, with nothing else using the model server.
+
+`evals/run_all.py` went first. Every answer it needed was already in the
+response cache (the first samples of the version under test, stored the day
+before), so it took under a second and stamped `evals/REPORT.md` with the exact
+commit. The main set's other two samples were then asked afresh with
+`--resample`, and the held-out batches and Star with `--repeats 3`, whose first
+sample replays the same stored answers and whose other two are fresh.
+
+### Results
+
+Majority of three per question. "After Step 5" is the first measurement of
+this milestone, taken with the new window and before the switch to a `q8_0`
+KV cache:
+
+| | End of M14 | After Step 5 | End of M16 |
+|---|---|---|---|
+| Clause classification, macro-F1 | 1.000 | 0.973 | 0.973 |
+| Synthetic main set (40) | 38/40 | 33/40 | 34/40 |
+| Held-out batch 1 (16) | 13/16 | 13/16 | 10/16 |
+| Held-out batch 2 (13) | 11/13 | 12/13 | 12/13 |
+| Star, right verdicts | — | 8/10 | 7/10 |
+| Star, citing the deciding clause | — | 1/10 | 5/10 |
+| Detection integrity, every sample | 1.000 | 1.000 | 1.000 |
+
+**Star.** Seven right verdicts, as in Step 12's final measurement, with every
+sample agreeing on every verdict. The deciding clause is cited in 5 questions:
+the same code, measured the day before in Step 12, cited it in 7. The two that
+moved had already split that day, each missing in one sample of three: the
+room-rent question cites `1.1` where the answer key requires coverage clause
+`1`, and the gallstones question leaves out exclusion 2 (`2#2`). The honest
+figure is 5 to 7 of 10, depending on the day (M17 found what the day changed:
+the Ollama version), against 1 of 10 after Step 5.
+
+**The synthetic sets.** The main set is 34/40 in every sample, and held-out
+batch 2 is 12/13. Held-out batch 1 is 10/16, down from 13/16 at the start of
+the milestone. Three questions account for the drop, each wrong in both fresh
+samples: scuba diving, a pre-hospitalisation bill from before the window, and a
+three-hour procedure the policy does not address. Failure 68 below explains
+two of the three. The third is a misreading:
+
+```
+ho-scuba-diving  expected not_covered, got covered
+  "... clause 4.3 explicitly excludes expenses related to hazardous
+  activities, but scuba diving is not listed as a hazardous activity in this
+  context."
+```
+
+Clause 4.3 names scuba diving. The same question was answered `not_covered` in
+all three samples after Step 5. It was not investigated further: batch 1 is a
+held-out set, and working through its failures to fix them is how a held-out
+set stops being one (Concept 36).
+
+### Failure 68: three samples, two of them the same one
+
+**Setup.** Concept 34 introduced majority of three because this model does not
+answer identically twice. One sample is a coin flip; three show which way the
+coin usually lands. Every "three samples, all unanimous" in this milestone
+depends on the three being different draws.
+
+**What happened.** The two fresh samples of the closing measurement agreed on
+all 79 verdicts: 40 main, 16 and 13 held-out, 10 Star. They differed on a few
+citations. The stored first sample, generated the day before by the same code,
+differed from both on 10 of the 69 synthetic verdicts. Then a script asked three
+held-out questions afresh, in a different order from the eval's, and two came
+back right that both fresh samples had got wrong:
+
+| Question | Day before | Fresh sample 2 | Fresh sample 3 | Asked in another order |
+|---|---|---|---|---|
+| `ho-pre-hospitalisation-too-early` | not_covered (right) | conditional | conditional | not_covered (right) |
+| `ho-short-procedure` | covered | conditional | conditional | insufficient_information (right) |
+| `ho-scuba-diving` | not_covered (right) | covered | covered | covered |
+
+**Why, as first understood.** Concept 43 established that, on this server, a
+fresh answer depends on the prompts the server stored before it. The history decides how much of the
+prompt is restored rather than recomputed, so it decides where the arithmetic's
+chunks start, and so the last bits of every probability. `--repeats` asks the
+questions in the same order in every sample. Each question is preceded by the
+same questions as last time, so it finds nearly the same stored states and
+computes nearly the same numbers. A second sample in the same order is not a
+second draw: it is mostly the first draw again. Across days the history
+differs, because the server restarted and other requests came first, and that
+is where the answers moved.
+
+M10 separated two properties: asking one question twice (repeat stability) and
+asking forty questions twice (sequence stability). This is a third: whether a
+sample is independent of the one before it at all. It is M10's lesson again:
+test the property your conclusion depends on. "Unanimous" was read as
+"stable", and what it measured was "reproducible under the same history".
+
+**Measured afterwards, that explanation was mostly wrong** (M17, Failure 70).
+Asked in shuffled orders, two samples still agreed on 76 of 79 verdicts, and a
+freshly loaded server gave the same answers as a warm one. What changed between
+the two days was Ollama itself: it updated from 0.34.1 to 0.34.2 overnight, and
+the stored first sample came from the old version.
+
+**What it means for the numbers above.** They are two days, not three
+samples. Main set: 34/40 on both. Held-out batch 1: 9/16, then 10/16. Held-out
+batch 2: 11/13, then 12/13. Star, deciding clause: 7/10, then 5/10.
+
+**The fix is not in M16.** Each sample should ask the questions in a different
+order, so each draws on a different history. That changes the harness and needs
+its own measurement, so it opens the next milestone.
+
+### Failure 69: a drop noticed and never explained
+
+**Setup.** M14 closed with the main set at 38/40 and classification at macro-F1
+1.000. The first measurement after Step 5 read 33/40 and 0.973: one clause of
+the synthetic policy that M14 read as a `sub_limit` was now read as a
+`condition`.
+
+**What happened.** The drop was seen: Failure 57 checks that the memory
+measurement running alongside did not cause it. Then nothing more was done with
+it. Every later table in this milestone starts from 33 or 34, and Step 8 as
+first written quoted the classification score as 1.000 (it is corrected
+there).
+
+**Why the runs on record cannot explain it.** Steps 1 to 5 changed three things
+that each regenerate every answer on the synthetic policy:
+
+- the context window, from 8,192 to 28,672 tokens (`num_ctx` is a decoding
+  option, and the options are part of every cache key);
+- the analysis schema, which gained two cap fields (a schema is part of the
+  prompt, Concept 31);
+- the reasoning prompt's example (Step 5).
+
+Any one of them moves every near-tie. With all three in one run, that run
+cannot say which one moved the main set. Nor can it say whether the move is a
+real loss or the redistribution Concept 36 describes: 38/40 was reached by keep
+or revert decisions, each judged on answers computed under the old window.
+
+**What it would take.** Rerun the main set at M14's commit with only the window
+changed: one variable per run, which is how the cache experiment of Concept 29
+isolates a change. Not done here; recorded as open.
+
+### Check it yourself
+
+- `api/.venv/Scripts/python.exe -c "import json; h = json.load(open('evals/run-history.json', encoding='utf-8')); print([(r['at'], r['verdict_accuracy'], sum(c['fresh'] for c in r['cases'].values())) for r in h])"`:
+  the recorded samples, with how many of each were fresh. The history is a
+  local file, not in the repository; this works after any eval run.
+- Predict before running: if `--repeats 3` shuffled the questions into a new
+  order for each sample, would you expect more questions or fewer to be
+  unanimous? (Fewer, if Failure 68's explanation is right; that prediction is
+  what the fix will be measured against.)
+
+---
+
+## Closing out M16
+
+### How it connects to what was already there
+
+M15 measured a system built on one synthetic document and found it unsound on
+real ones at every stage. M16 fixed the stages in the order they feed each
+other:
+
+- **Reading the page** (Steps 1 to 3). Ingest keeps the PDF's own reading order
+  and removes page furniture recognised by repetition. The segmenter reads a
+  document's own conventions, such as bold clause numbers, against its own
+  baseline (Concept 39). Everything downstream reads what these produce, which
+  is why they came first. On Star, coverage 1 to 9, exclusions 1 to 23 and
+  conditions 1 to 28 are one clause each, under the policy's own numbers.
+- **Fitting the policy** (Step 4). The window was re-measured rather than
+  inherited (Concept 40), so the whole Star policy fits in one prompt, as the
+  no-retrieval premise requires (Concept 38).
+- **Paying for the window** (Step 6). A rounded KV cache (Concept 41) and a cap
+  on the server's prompt store keep the long window inside an 8 GB laptop. The
+  prompt store is also why fresh answers depend on history (Concept 43,
+  Failure 68).
+- **Checking the model's readings** (Step 8). The computed blocks from M7 to
+  M13 are only as right as the fields they compute from. Four misreadings were
+  corrected in code, against each clause's own words, the pattern Concept 32
+  started, with Concept 42's rule for which way a correction may err.
+- **Being read, not only fitting** (Steps 11 and 12). Concept 44 found that a
+  prompt the window holds can still be one this model cannot keep track of.
+  Picking clauses in groups keeps what the no-retrieval premise was for: every
+  clause is read by the model that answers, and none is dropped by a
+  similarity score.
+
+### What it made possible
+
+An answer key with reasons for a real policy (`must_cite` for all ten Star
+questions), and with it a measurement of the app's actual promise on a real
+wording: showing a person which clause decides their claim. That went from
+1 question of 10 after Step 5 to 5 to 7 of 10. The verdict score moved the
+other way, from 8 of 10 to 7, and the two are related: before Step 7 most right
+verdicts on Star rested on the wrong clauses, and a right verdict for a wrong
+reason is a coin that happened to land well.
+
+### Where this leaves the numbers
+
+On the synthetic policy the main set is 34/40, down from M14's 38/40
+(Failure 69, unexplained), and the held-out batches together are 22 of 29 on
+the latest day: about 76%, against the 83 to 85% M14 recorded. On the Star
+wording, 7 of 10 verdicts are right, and 5 to 7 of 10 cite the deciding clause.
+Ten questions on one policy is a probe (Concept 37), not a benchmark. The Star
+figures describe this system on this policy, and are not an accuracy to quote
+for real policies in general.
+
+Detection integrity was 1.000 in every sample of every set. Every quotation
+the model invented was caught and shown as unverified.
+
+**Still open:**
+
+- the samples in one run are not independent (Failure 68), which is the first
+  thing the next milestone fixes;
+- the drop from 38/40 at the start of the milestone (Failure 69);
+- held-out: the scuba answer says the hazardous-sports exclusion does not name
+  scuba diving, and it does;
+- Star: the caesarean answer applies the maternity exclusion's
+  ectopic-pregnancy carve-out to itself; the Dubai answer cites the
+  co-payment although the pick found exclusion 22; the gallstones answer
+  describes `insufficient_information` and labels it `conditional`; the pick
+  misses the hazardous-sports exclusion (`9#2`) for the weekend trek;
+- answers that repeat a sentence until the 1,500-character cap cuts them
+  mid-word;
+- the room-rent answer cites `1.1` for coverage clause 1;
+- a cap of "25% or Rs.40,000, whichever is lower, per eye" has no arithmetic;
+- the fact extractor stored one sum insured as "500000 lakh";
+- citation recall counts a citation whose quotation failed verification;
+- Star's company name and letter-spaced headings are read as section labels,
+  and "removal" finds "HAIR REMOVAL CREAM" in List III.
+
+---
+
+## Check it yourself
+
+```bash
+api/.venv/Scripts/python.exe -m pytest api/tests -m "not llm"     # no model needed
+python evals/run_all.py                                           # the report; replays from cache
+python evals/run_scenario_eval.py --heldout 2 --repeats 3         # three samples, one batch
+python evals/run_scenario_eval.py --policy samples/real/star-arogya-sanjeevani.pdf \
+    --cases evals/real/scenarios-star-arogya-sanjeevani.json --repeats 3 --no-report
+```
+
+**Question to sit with:** the grouped pick (Step 11) finds the deciding clause
+for 7 of 10 Star questions, and pass 2 is also shown every clause the computed
+blocks name. Suppose a policy's deciding clause is one the pick misses and
+that no computed block names, as the hazardous-sports exclusion is for the
+weekend-trek question. What does pass 2 do, and why is that failure harder to see than
+the same failure in retrieval?
+
+<details>
+<summary>Answer</summary>
+
+Pass 2 cannot cite it: the citation enum holds only the clauses in its prompt,
+so the deciding clause is unrepresentable. The model answers from what it was
+shown, and nothing in its prompt contradicts that answer.
+
+It is harder to see because it looks like a reading. A retrieval system's miss
+has a visible cause: a similarity score below a cut-off, which can be logged
+and inspected. Here a model read the clause and judged it irrelevant, and that
+judgement leaves no trace except the list of picks. The mitigation this system
+has is structural: every clause that code can connect to the question is added
+back whatever the pick says. The measurement that watches the rest is the one
+M16 built: `must_cite` in the answer key, checked against the picks and against
+the citations.
+</details>
