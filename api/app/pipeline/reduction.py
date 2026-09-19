@@ -213,9 +213,22 @@ def _copay_check(clause, facts, policy_age_days) -> ReductionCheck | None:
     if threshold is None:
         # The clause imposes a co-payment but states no age condition, so it
         # applies to everyone and there is nothing to compare.
+        #
+        # M16, Star: "a 5% co-payment applies" was the only APPLIES line on
+        # the page, right after "Some other clause decides it", and the same
+        # on every question. A caesarean, a stay in Dubai and a gallbladder
+        # with no dates were all answered "conditional because a 5%
+        # co-payment applies", none mentioning the exclusion or waiting period
+        # that decides them. The age-based line above was given "IF this
+        # claim is payable at all" for the same reason (a nose job at 70);
+        # this branch never was, because the synthetic policy has no
+        # co-payment without a condition.
         return ReductionCheck(
             clause.clause_id, ReductionKind.COPAY, ReductionStatus.APPLIES,
-            f"a {percent}% co-payment applies to the admissible claim amount",
+            f"a {percent}% co-payment is taken from EVERY claim this policy pays, "
+            f"so it says nothing about whether THIS claim is paid - settle that "
+            f"from the exclusions and waiting periods first. IF this claim is "
+            f"payable at all, it is paid at {100 - percent}% of the admissible amount",
         )
 
     if inception_age is None:
@@ -268,6 +281,13 @@ def _room_cap_check(clause, facts) -> ReductionCheck | None:
     )
     if not percent:
         return None
+    # "2% of the Sum Insured subject to maximum of Rs.5000/- per day": the
+    # limit is the lower of the two. Only the percentage was modelled until M16,
+    # because the synthetic policy never set a maximum - and on a real wording
+    # this stated a 6,000-rupee cap for a policy capped at 5,000.
+    maximum = getattr(
+        clause, "icu_cap_max_inr_per_day" if in_icu else "cap_max_inr_per_day", None
+    )
 
     sum_insured = sum_insured_rupees(facts)
     charged = facts.get("room_rent_per_day_inr")
@@ -287,21 +307,27 @@ def _room_cap_check(clause, facts) -> ReductionCheck | None:
         # ONE of the two given: they did raise it, and left it incomplete.
         # That gap is worth naming, because the answer may turn on it.
         missing = "the sum insured" if not sum_insured else "the per-day charge"
+        ceiling = f", up to {_human_rupees(maximum)}," if maximum else ""
         return ReductionCheck(
             clause.clause_id, ReductionKind.ROOM_CAP, ReductionStatus.UNKNOWN,
-            f"{label} are capped at {percent}% of the sum insured per day, but "
-            f"{missing} was not stated, so whether the cap is exceeded cannot "
+            f"{label} are capped at {percent}% of the sum insured{ceiling} per day, "
+            f"but {missing} was not stated, so whether the cap is exceeded cannot "
             f"be determined",
         )
 
     limit = sum_insured * percent // 100
+    # Stated with both numbers when the maximum is what decides, so the line
+    # shows its working rather than a figure the clause never prints.
+    rule = f"{percent}% of {_human_rupees(sum_insured)} is {_human_rupees(limit)} per day"
+    if maximum and maximum < limit:
+        rule += f", above the {_human_rupees(maximum)} maximum, so the limit is {_human_rupees(maximum)}"
+        limit = maximum
+
     if charged > limit:
         return ReductionCheck(
             clause.clause_id, ReductionKind.ROOM_CAP, ReductionStatus.APPLIES,
-            f"{percent}% of {_human_rupees(sum_insured)} is "
-            f"{_human_rupees(limit)} per day; {label} of "
-            f"{_human_rupees(charged)} per day EXCEED that, so the excess is "
-            f"not paid",
+            f"{rule}; {label} of {_human_rupees(charged)} per day EXCEED that, "
+            f"so the excess is not paid",
         )
 
     # "does NOT exceed that limit" on purpose: it is the condition the
@@ -310,8 +336,7 @@ def _room_cap_check(clause, facts) -> ReductionCheck | None:
     # result to that clause without code having to interpret it.
     return ReductionCheck(
         clause.clause_id, ReductionKind.ROOM_CAP, ReductionStatus.DOES_NOT_APPLY,
-        f"{percent}% of {_human_rupees(sum_insured)} is "
-        f"{_human_rupees(limit)} per day; {label} of {_human_rupees(charged)} "
+        f"{rule}; {label} of {_human_rupees(charged)} "
         f"per day does NOT exceed that limit, so this cap costs nothing here",
     )
 

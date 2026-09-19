@@ -32,6 +32,22 @@ GOLDEN_LABELS = GOLDEN_DIR / "synthetic-health-policy.labels.json"
 BUILDER = GOLDEN_DIR / "build_synthetic_policy.py"
 
 
+@pytest.fixture(autouse=True, scope="session")
+def _private_llm_cache():
+    """Every test's model answers go to a throwaway cache.
+
+    The response cache lives at `data/llm_cache.db`, relative to the working
+    directory, and one live test empties it. Run from `api/` that was a separate
+    file; run from the repository root it was the evals' own cache, and running
+    the live tests there once deleted every stored answer (M17, Failure 72).
+    """
+    from app.llm import cache
+
+    cache._CACHE_PATH = _TMP / "llm_cache.db"
+    cache._conn = None
+    yield
+
+
 @pytest.fixture(scope="session")
 def golden_pdf() -> Path:
     if not GOLDEN_PDF.exists():

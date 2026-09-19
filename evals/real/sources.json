@@ -1,0 +1,35 @@
+{
+  "_about": "Real Indian health insurance policy wordings, published by the insurers themselves. Only the address and a fingerprint of each is committed - never the document, which belongs to the insurer. Fetch with: python evals/real/fetch_policies.py",
+  "policies": [
+    {
+      "id": "star-arogya-sanjeevani",
+      "insurer": "Star Health and Allied Insurance",
+      "product": "Arogya Sanjeevani Policy",
+      "uin": "SHAHLIP26045V042526",
+      "why_chosen": "IRDAI's standard product: every insurer must sell it with the same terms, so this wording is the closest thing to a common baseline.",
+      "url": "https://d28c6jni2fmamz.cloudfront.net/Policy_Arogya_Sanjeevani_Insurance_Policy_V_12_84d133b97f.pdf",
+      "sha256": "ee7b02424ab9274b790a0935d1f51f3c8088bd9a80f485d411597dbe8e4954c0",
+      "retrieved": "2026-09-15"
+    },
+    {
+      "id": "niva-reassure-2",
+      "insurer": "Niva Bupa Health Insurance",
+      "product": "ReAssure 2.0",
+      "uin": "NBHHLIP23169V012223",
+      "why_chosen": "A retail product from a standalone health insurer, typeset differently from the standard product.",
+      "url": "https://www.nivabupa.com/content/dam/nivabupa/PDF/reassure-2-0/ReAssure%202.0%20-%20Policy%20Wording.pdf",
+      "sha256": "f187fca7e07842dfff3ef788790465f7d39c857add3a20750e2072be4005b399",
+      "retrieved": "2026-09-15"
+    },
+    {
+      "id": "hdfc-optima-secure",
+      "insurer": "HDFC ERGO General Insurance",
+      "product": "my: Optima Secure",
+      "uin": "HDFHLIP25041V062425",
+      "why_chosen": "A large retail product from a general insurer: the longest of the three, and the hardest test of whether a whole policy fits in one prompt.",
+      "url": "https://www.hdfcergo.com/docs/default-source/downloads/policy-wordings/health/optima-secure-revision-pw.pdf",
+      "sha256": "79662228bf4a304621c15fd76425f1fd8ac4ff915b688c9033f2ff3c210216e5",
+      "retrieved": "2026-09-15"
+    }
+  ]
+}

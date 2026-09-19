@@ -15,6 +15,7 @@ from run_scenario_eval import (  # noqa: E402
     citation_problems,
     compare_with_previous,
     majority,
+    render_comparison,
     stability_section,
     unstable_cases,
     watchlist,
@@ -177,3 +178,105 @@ def test_citation_problems_name_the_case_and_how_often():
         "a": ["cited forbidden 5.3 in 1/2"],
         "b": ["missing 6.6 in 2/2"],
     }
+
+
+def test_an_unanswered_case_is_wrong_and_cites_nothing():
+    """M16: one answer that never finished used to end the whole eval. It is now
+    a row like any other - wrong, missing its citation, counted by majority."""
+    from run_scenario_eval import NO_ANSWER, _unanswered
+
+    case = {"id": "a", "scenario": "", "expected_verdict": "not_covered",
+            "must_cite": ["2#2"], "why": ""}
+    unanswered = _unanswered(case, "LlmError: truncated")
+
+    assert unanswered["got"] == NO_ANSWER and not unanswered["verdict_ok"]
+    assert not unanswered["citation_ok"]
+    assert citation_problems([{"rows": [unanswered]}]) == {"a": ["missing 2#2 in 1/1"]}
+    right = {"rows": [row("a", "not_covered", "not_covered", True)]}
+    assert majority([{"rows": [unanswered]}, right, right])[0]["ok"]
+
+
+
+def test_a_comparison_across_ollama_versions_says_so():
+    """M17: an Ollama update alone moved 10 of 69 verdicts, so a comparison that
+    spans one must not read as the effect of whatever else changed."""
+    history = [dict(entry({"a": ("covered", True)}), ollama_version="0.34.1")]
+
+    def compared(version):
+        res = {"rows": [row("a", "covered", "covered", fresh=True)], "ollama_version": version}
+        return render_comparison(compare_with_previous(res, history))
+
+    across = compared("0.34.2")
+    assert "Ollama 0.34.1" in across and "Ollama 0.34.2" in across
+    assert "Ollama 0.34.2" not in compared("0.34.1")
+
+# --- the order each sample asks its questions in ------------------------------
+
+
+def _fake_eval(monkeypatch, tmp_path, n_cases: int):
+    """The eval's run() with the model replaced, recording the order it asks in."""
+    import asyncio
+    import json
+    from types import SimpleNamespace
+
+    import run_scenario_eval as eval_module
+
+    ids = [f"q{i}" for i in range(n_cases)]
+    path = tmp_path / "cases.json"
+    path.write_text(json.dumps({"cases": [
+        {"id": i, "scenario": i, "expected_verdict": "covered", "must_cite": [], "why": ""}
+        for i in ids
+    ]}), encoding="utf-8")
+    asked: list[str] = []
+
+    async def no_clauses(pdf):
+        return []
+
+    async def no_facts(scenario):
+        return None
+
+    async def no_server_version():
+        return "test"
+
+    async def answer(scenario, clauses, resample=False):
+        asked.append(scenario)
+        return SimpleNamespace(verdict="covered", citations=[], verified=True, reasoning="")
+
+    monkeypatch.setattr(eval_module, "build_clauses", no_clauses)
+    monkeypatch.setattr(eval_module, "extract_facts", no_facts)
+    monkeypatch.setattr(eval_module, "run_scenario", answer)
+    monkeypatch.setattr(eval_module.client, "runtime_version", no_server_version)
+
+    def repeats(n):
+        return asyncio.run(eval_module.run_repeats(n, True, None, cases_path=path))
+
+    return ids, asked, repeats
+
+
+def test_repeated_samples_ask_in_different_orders(monkeypatch, tmp_path):
+    """M16, Failure 68: asked in the same order, each sample found the same
+    server history and the three samples agreed on every verdict - copies, not
+    draws. The first sample keeps the file's order; each later one its own."""
+    ids, asked, repeats = _fake_eval(monkeypatch, tmp_path, 12)
+
+    results = repeats(3)
+
+    first, second, third = asked[0:12], asked[12:24], asked[24:36]
+    assert first == ids
+    assert sorted(second) == sorted(ids) and sorted(third) == sorted(ids)
+    assert len({tuple(first), tuple(second), tuple(third)}) == 3
+    # Reported in the file's order whatever order it was asked in, so every
+    # sample's table reads the same way.
+    assert all([r["id"] for r in res["rows"]] == ids for res in results)
+
+
+def test_a_sample_number_always_asks_in_the_same_order(monkeypatch, tmp_path):
+    """Seeded by the sample number, so a run can be repeated exactly."""
+    ids, asked, repeats = _fake_eval(monkeypatch, tmp_path, 12)
+
+    repeats(2)
+    once = asked[12:24]
+    asked.clear()
+    repeats(2)
+
+    assert asked[12:24] == once

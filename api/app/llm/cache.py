@@ -5,9 +5,11 @@ tweak means re-running all 200 clauses to see the effect on the handful you
 actually changed. With one, only genuinely-new work costs time.
 
 The cache is keyed by a hash of *everything the model actually receives*: the
-model name, the messages, the JSON schema and the decoding options. That makes
-stale reuse impossible by construction - if any input differs, the key differs,
-so there is no manual "remember to clear the cache" step to forget.
+model name, the messages, the JSON schema and the decoding options - plus two
+things that shape the answer without being sent: the server's KV cache
+precision, and the version of Ollama itself. That makes stale reuse impossible
+by construction - if any input differs, the key differs, so there is no manual
+"remember to clear the cache" step to forget.
 
 PROMPT_VERSION IS DELIBERATELY NOT PART OF THE KEY, though it used to be. It was
 redundant for safety: a reworded prompt is different message text, so it
@@ -65,6 +67,8 @@ def make_key(
     messages: list[dict[str, str]],
     schema: dict[str, Any] | None,
     options: dict[str, Any] | None = None,
+    kv_cache_type: str = "f16",
+    runtime_version: str | None = None,
 ) -> str:
     """Hash every input that could change the response.
 
@@ -75,19 +79,34 @@ def make_key(
     another. The same rule the messages enforce for wording, applied to the
     parameters rather than the words.
 
+    `kv_cache_type` is the same rule for a setting that no request carries: the
+    server's KV cache precision, fixed when Ollama starts. It is added only when
+    it is not f16, Ollama's default, because every entry stored before it was
+    hashed was generated at f16 - so those entries keep their keys.
+
+    `runtime_version` is the Ollama version that answers the request (M17).
+    Ollama updates itself when it restarts, and a new version computes the same
+    prompt with different arithmetic: across one update, 10 of 69 eval verdicts
+    changed while the answers stored under the old version kept replaying as if
+    nothing had. Unlike the KV precision there is no version the old entries can
+    be assumed to share, so every entry stored without one is unreachable from a
+    client that passes it, which the client always does.
+
     sort_keys=True matters: Python preserves dict insertion order, so two
     logically identical schemas built in a different field order would otherwise
     hash differently and silently miss the cache.
     """
-    payload = json.dumps(
-        {
-            "model": model,
-            "messages": messages,
-            "schema": schema,
-            "options": options or {},
-        },
-        sort_keys=True,
-    )
+    fields: dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "schema": schema,
+        "options": options or {},
+    }
+    if kv_cache_type != "f16":
+        fields["kv_cache_type"] = kv_cache_type
+    if runtime_version is not None:
+        fields["runtime_version"] = runtime_version
+    payload = json.dumps(fields, sort_keys=True)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 

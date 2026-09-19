@@ -5,6 +5,9 @@ harness can swap models or budgets without editing logic. Values can be
 overridden by environment variables or a .env file (see .env.example).
 """
 
+from typing import Literal
+
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -16,7 +19,8 @@ class Settings(BaseSettings):
     # The model verified on this machine: fits fully in the RTX 4060's 8GB VRAM
     # and enforces JSON-schema enums, which the grounding design depends on.
     model: str = "qwen2.5:7b-instruct-q4_K_M"
-    # The scenario reasoner sends the whole policy (~4k tokens) and generates a
+    # The scenario reasoner sends the whole policy (~4k tokens for the synthetic
+    # one; ~22,600 for a real wording, about 11s to read) and generates a
     # few hundred more, on top of a possible ~27s cold model load. 180s was not
     # enough and produced httpx.ReadTimeout under real load; 420s has margin
     # without hanging a request forever.
@@ -37,23 +41,53 @@ class Settings(BaseSettings):
     # the prompt, and the answer would be reasoned over a policy missing its
     # first clauses, with nothing to indicate it.
     #
-    # 8,192, not the full 32,768 and not the 16,384 first tried here.
+    # 28,672: the largest window measured to run entirely on this machine's GPU.
     #
-    # The KV cache lives in VRAM alongside the 4.7GB of weights. At 16,384 the
-    # runtime held 5.46GB and the machine was left with 2GB of 15.7GB free -
-    # the scenario eval was killed by the OS for memory pressure. Over-
-    # provisioning "to be safe" is not free; it was paid for in RAM that the
-    # rest of the system needed.
+    # It was 8,192 from M5, sized to the synthetic policy (~3,100 tokens) after
+    # 16,384 had the OS kill an eval for memory pressure on Ollama 0.33. M15
+    # measured real wordings at 69,000-129,000 characters, and at 8,192 the
+    # scenario step saw a quarter of the smallest - the premise of having no
+    # retrieval, failing silently.
     #
-    # 8,192 is sized from the actual requirement rather than from caution:
-    # a 40-clause policy is ~3,100 tokens, the system prompt ~1,200, the
-    # response ~500. That is ~4,800, so this leaves comfortable headroom while
-    # halving the cache.
-    num_ctx: int = 8_192
+    # Re-measured in M16 on Ollama 0.34, with a policy-sized prompt:
+    #
+    #     num_ctx   GPU memory   placement         prompt speed
+    #      8,192     4.9 GB      100% GPU          2,149 tok/s
+    #     24,576     5.8 GB      100% GPU          2,036 tok/s
+    #     28,672     6.2 GB      100% GPU
+    #     32,768     6.8 GB      8% CPU / 92% GPU  generation 20% slower
+    #
+    # The KV cache sits in VRAM, so free system RAM did not change between the
+    # sizes. 32,768 is qwen2.5's maximum, but spilling onto the CPU slows every
+    # call, including the per-clause analyses that need no long context. One
+    # window for every call, because Ollama reloads the model when it changes.
+    #
+    # Those figures are for a 16-bit KV cache. With the q8_0 cache below, 28,672
+    # takes 5.0 GB and even 32,768 fits entirely on the GPU (5.2 GB).
+    num_ctx: int = 28_672
 
-    # Tokens reserved inside the context for everything that is NOT clause text:
-    # the system prompt, the extracted facts, and the generated answer.
-    scenario_reserved_tokens: int = 2_500
+    # PRECISION OF THE KV CACHE: a setting of the Ollama server, mirrored here.
+    #
+    # For every token of the window, each layer stores a key and a value, 56 KB
+    # per token for this model in 16-bit floats (`f16`, Ollama's default). The
+    # store is allocated for the whole window when the model loads: 1,568 MiB at
+    # 28,672. Starting the server with OLLAMA_KV_CACHE_TYPE=q8_0 rounds those
+    # numbers to 8 bits and roughly halves that. Rounding moves the logits a
+    # little, so it can change an answer.
+    #
+    # No request carries it, so the cache cannot learn it from the decoding
+    # options; it is hashed in separately (see cache.make_key). It is read from
+    # the same environment variable the server reads, so the two agree when both
+    # start from the same environment. Ollama only reads it at start-up: after a
+    # change, restart Ollama and check the `llama_kv_cache` line in its log.
+    #
+    # q8_0 is the project's setting from M16 (see the README's Ollama setup), so
+    # it is also the default here. A default of f16 would be wrong exactly when
+    # it matters: a process started before the variable was set would store
+    # q8_0 answers under f16 keys.
+    kv_cache_type: Literal["f16", "q8_0", "q4_0"] = Field(
+        "q8_0", validation_alias="OLLAMA_KV_CACHE_TYPE"
+    )
 
     # HARD CAP on generated tokens. Without one, llama.cpp generates until the
     # model emits a stop token or the context fills - and a model that starts
@@ -142,19 +176,9 @@ class Settings(BaseSettings):
     # original measurement, carried one step further than it was taken. The
     # concurrency was buying 19 seconds and costing reproducibility.
     analyze_concurrency: int = 1
-    @property
-    def scenario_token_budget(self) -> int:
-        """How many tokens of clause text the reasoner may be given.
-
-        DERIVED from the context window rather than set independently, because
-        the two were briefly inconsistent: a 12,000-token clause budget against
-        an 8,192-token window would build a prompt larger than the context and
-        Ollama would silently truncate it - dropping exactly the clauses the
-        shortlist had just been careful to include.
-
-        Two numbers that must agree should not be two numbers.
-        """
-        return max(self.num_ctx - self.scenario_reserved_tokens, 1_000)
+    # The clause budget for the scenario step is derived from num_ctx, num_predict
+    # and the measured system prompt: see `clause_token_budget()` in
+    # app/pipeline/scenario.py. It lives there because it needs the prompt.
 
     # --- Storage ---
     db_path: str = "data/app.db"

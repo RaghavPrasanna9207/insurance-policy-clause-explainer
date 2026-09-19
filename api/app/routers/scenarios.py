@@ -10,7 +10,7 @@ from sqlmodel import Session
 from app.db import get_session
 from app.models import Document, ScenarioRun
 from app.pipeline.run import clause_rows
-from app.pipeline.scenario import ShortlistClause, run_scenario
+from app.pipeline.scenario import ShortlistClause, citation_ids, run_scenario
 from app.schemas import CitationOut, ScenarioRequest, ScenarioResponse
 from app.taxonomy import DocStatus
 
@@ -39,7 +39,13 @@ async def create_scenario(
         # subset of the clauses while appearing to consider all of them.
         raise HTTPException(409, "This policy has not finished being analysed")
 
-    rows = [(c, a) for c, a in clause_rows(session, doc_id) if a is not None]
+    # Sorted here, not trusted from the query, which has no ORDER BY. Two things
+    # depend on document order: which repeat of a number becomes "10#2" - the
+    # eval must assign the same ids - and the order the shortlist keeps.
+    rows = sorted(
+        ((c, a) for c, a in clause_rows(session, doc_id) if a is not None),
+        key=lambda row: row[0].order_idx,
+    )
     if not rows:
         raise HTTPException(409, "This policy has no analysed clauses")
 
@@ -48,15 +54,12 @@ async def create_scenario(
     # string. `ref` carries the database id so the answer can be mapped back to
     # a real row for the page number and heading.
     #
-    # Numbers are made unique defensively: a malformed document could repeat
-    # one, and a duplicate id would make a citation ambiguous.
-    seen: dict[str, int] = {}
+    # Numbers are made unique: real wordings repeat them, and a duplicate id
+    # would make a citation ambiguous.
+    ids = citation_ids([(clause.number, clause.order_idx) for clause, _ in rows])
     shortlist_clauses: list[ShortlistClause] = []
     meta: dict[str, tuple] = {}
-    for clause, analysis in rows:
-        base = clause.number or f"c{clause.order_idx}"
-        seen[base] = seen.get(base, 0) + 1
-        citation_id = base if seen[base] == 1 else f"{base}#{seen[base]}"
+    for (clause, analysis), citation_id in zip(rows, ids):
         shortlist_clauses.append(
             ShortlistClause(
                 clause_id=citation_id,
@@ -65,7 +68,7 @@ async def create_scenario(
                 clause_type=analysis.clause_type,
                 text=clause.text,
                 impact_score=analysis.impact_score,
-                waiting_period_days=analysis.waiting_period_days,
+                waiting_periods_days=json.loads(analysis.waiting_periods_json or "[]"),
                 exceptions=json.loads(analysis.exceptions_json or "[]"),
                 copay_percent=analysis.copay_percent,
                 copay_min_age_at_inception=analysis.copay_min_age_at_inception,
@@ -73,6 +76,8 @@ async def create_scenario(
                 icu_cap_percent_of_sum_insured=(
                     analysis.icu_cap_percent_of_sum_insured
                 ),
+                cap_max_inr_per_day=analysis.cap_max_inr_per_day,
+                icu_cap_max_inr_per_day=analysis.icu_cap_max_inr_per_day,
                 cover_window_days=analysis.cover_window_days,
                 cover_window_anchor=analysis.cover_window_anchor,
                 section_path=clause.section_path,

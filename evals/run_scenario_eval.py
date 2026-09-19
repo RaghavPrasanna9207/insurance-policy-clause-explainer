@@ -36,6 +36,7 @@ import argparse
 import asyncio
 import json
 from collections import Counter
+import random
 import sys
 import time
 from datetime import datetime, timezone
@@ -50,7 +51,12 @@ from app.llm.prompts import PROMPT_VERSION  # noqa: E402
 from app.llm import cache, client  # noqa: E402
 from app.pipeline.analyze import analyze  # noqa: E402
 from app.pipeline.ingest import ingest  # noqa: E402
-from app.pipeline.scenario import ShortlistClause, extract_facts, run_scenario  # noqa: E402
+from app.pipeline.scenario import (  # noqa: E402
+    ShortlistClause,
+    citation_ids,
+    extract_facts,
+    run_scenario,
+)
 from app.pipeline.score import score  # noqa: E402
 from app.pipeline.segment import segment  # noqa: E402
 
@@ -66,33 +72,40 @@ HELDOUT_PATHS = {
 REPORT_PATH = REPO_ROOT / "evals" / "scenario-report.md"
 
 
-async def build_clauses() -> list[ShortlistClause]:
+async def build_clauses(pdf: Path = GOLDEN_PDF) -> list[ShortlistClause]:
     """Run the map pipeline once; every scenario reuses the result."""
-    result = ingest(GOLDEN_PDF)
+    result = ingest(pdf)
     segments = segment(result)
     analyses = await analyze(segments)
     scored = score(segments, analyses)
 
+    analysed = [
+        seg for seg in segments
+        if str(seg.order_idx) in analyses and str(seg.order_idx) in scored
+    ]
+    # The same ids the scenario endpoint gives the model, from the same function.
+    ids = citation_ids([(seg.number, seg.order_idx) for seg in analysed])
+
     clauses = []
-    for seg in segments:
-        analysis = analyses.get(str(seg.order_idx))
-        sc = scored.get(str(seg.order_idx))
-        if analysis is None or sc is None:
-            continue
+    for seg, clause_id in zip(analysed, ids):
+        analysis = analyses[str(seg.order_idx)]
+        sc = scored[str(seg.order_idx)]
         clauses.append(
             ShortlistClause(
-                clause_id=seg.number or f"c{seg.order_idx}",
-                ref=f"golden:{seg.order_idx}",
+                clause_id=clause_id,
+                ref=f"{pdf.stem}:{seg.order_idx}",
                 number=seg.number,
                 clause_type=analysis.clause_type,
                 text=seg.text,
                 impact_score=sc.impact_score,
-                waiting_period_days=analysis.waiting_period_days,
+                waiting_periods_days=analysis.waiting_periods_days,
                 exceptions=analysis.exceptions,
                 copay_percent=analysis.copay_percent,
                 copay_min_age_at_inception=analysis.copay_min_age_at_inception,
                 cap_percent_of_sum_insured=analysis.cap_percent_of_sum_insured,
                 icu_cap_percent_of_sum_insured=analysis.icu_cap_percent_of_sum_insured,
+                cap_max_inr_per_day=analysis.cap_max_inr_per_day,
+                icu_cap_max_inr_per_day=analysis.icu_cap_max_inr_per_day,
                 cover_window_days=analysis.cover_window_days,
                 cover_window_anchor=analysis.cover_window_anchor,
                 section_path=seg.section_path,
@@ -101,9 +114,47 @@ async def build_clauses() -> list[ShortlistClause]:
     return clauses
 
 
+NO_ANSWER = "no_answer"
+
+
+def _unanswered(case: dict, error: str) -> dict:
+    """The row for a case the model could not answer: wrong, and citing nothing."""
+    required = sorted(case["must_cite"])
+    return {
+        "id": case["id"], "expected": case["expected_verdict"], "got": NO_ANSWER,
+        "verdict_ok": False, "required": required,
+        "forbidden": sorted(case.get("must_not_cite", [])), "wrongly_cited": [],
+        "cited": [], "citation_ok": not required, "grounded": True, "unverified": [],
+        "reasoning": error, "why": case["why"], "truly_bad": 0, "flagged_bad": 0,
+        "fresh": True,
+    }
+
+
+def asking_order(cases: list[dict], sample: int) -> list[dict]:
+    """The order one sample asks its questions in.
+
+    WHY IT VARIES (M16, Failure 68). On this Ollama a fresh answer depends on
+    the prompts the server stored before it (Concept 43): they decide how much
+    of a prompt is restored rather than recomputed, and so the last bits of the
+    arithmetic. Asked in the same order, every sample found the same history,
+    and two fresh samples agreed on all 79 verdicts while the previous day's
+    sample differed on 10 of 69. A sample that repeats the history is a copy,
+    not a second draw.
+
+    Sample 1 keeps the file's order, so a single run is asked exactly as it
+    always was. Each later sample is shuffled with its number as the seed, so
+    a run can be repeated in the same orders.
+    """
+    if sample <= 1:
+        return list(cases)
+    shuffled = list(cases)
+    random.Random(sample).shuffle(shuffled)
+    return shuffled
+
+
 async def run(
     use_cache: bool, only: list[str] | None = None, resample: bool = False,
-    cases_path: Path = CASES_PATH,
+    cases_path: Path = CASES_PATH, pdf: Path = GOLDEN_PDF, sample: int = 1,
 ) -> dict:
     if not use_cache:
         cache.clear()
@@ -116,15 +167,15 @@ async def run(
             raise SystemExit(f"unknown case id(s): {', '.join(unknown)}")
         cases = [c for c in cases if c["id"] in only]
     print(f"model: {settings.model}")
-    print("preparing policy...")
-    clauses = await build_clauses()
+    print(f"preparing policy {pdf.name}...")
+    clauses = await build_clauses(pdf)
     print(f"  {len(clauses)} analysed clauses\n")
 
     source_by_id = {c.clause_id: c.text for c in clauses}
 
     rows = []
     started = time.perf_counter()
-    for index, case in enumerate(cases, 1):
+    for index, case in enumerate(asking_order(cases, sample), 1):
         print(f"  [{index}/{len(cases)}] {case['id']}", flush=True)
         # Facts are extracted FIRST, outside the count, so the count below sees
         # only the reasoning step - the one that produces the verdict.
@@ -137,7 +188,15 @@ async def run(
         # run_scenario's own call to extract_facts is then a cache hit.
         await extract_facts(case["scenario"])
         calls_before = client.model_calls
-        result = await run_scenario(case["scenario"], clauses, resample=resample)
+        try:
+            result = await run_scenario(case["scenario"], clauses, resample=resample)
+        except client.LlmError as exc:
+            # M16: one answer that never finished ended the whole run, and every
+            # answer already given was lost with it. It is a wrong answer for
+            # this case, and is recorded as one.
+            print(f"      no answer: {exc}", flush=True)
+            rows.append(_unanswered(case, str(exc)))
+            continue
         # True if the reasoning reached the model. False means the verdict is
         # the stored bytes of an earlier run and cannot have moved. See
         # compare_with_previous for why that distinction carries the eval.
@@ -185,6 +244,11 @@ async def run(
             "fresh": fresh,
         })
 
+    # Reported in the file's order whatever order it was asked in, so every
+    # sample's table reads the same way.
+    position = {case["id"]: i for i, case in enumerate(cases)}
+    rows.sort(key=lambda r: position[r["id"]])
+
     elapsed = time.perf_counter() - started
     total = len(rows)
     # Citation recall is only meaningful for cases that require a citation;
@@ -198,11 +262,15 @@ async def run(
         "prompt_version": PROMPT_VERSION,
         "num_ctx": settings.num_ctx,
         "num_predict": settings.num_predict,
+        "kv_cache_type": settings.kv_cache_type,
+        # The runtime is part of the model (M17): an Ollama update alone moved
+        # 10 of 69 verdicts, so every record says which version answered.
+        "ollama_version": await client.runtime_version(),
         "seconds": round(elapsed, 1),
         "rows": rows,
         # Another case file is never the report's 40 cases, so it is recorded
         # like a subset and never overwrites the main report.
-        "subset": only is not None or cases_path != CASES_PATH,
+        "subset": only is not None or cases_path != CASES_PATH or pdf != GOLDEN_PDF,
         "verdict_accuracy": sum(r["verdict_ok"] for r in rows) / max(total, 1),
         "citation_recall": (
             sum(r["citation_ok"] for r in citable) / len(citable) if citable else 1.0
@@ -267,6 +335,7 @@ def record_run(res: dict) -> list[dict]:
     history.append({
         "at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
         "prompt_version": PROMPT_VERSION,
+        "ollama_version": res.get("ollama_version"),
         "subset": res["subset"],
         "verdict_accuracy": res["verdict_accuracy"],
         "cases": {
@@ -338,6 +407,7 @@ def compare_with_previous(res: dict, history: list[dict]) -> dict:
         "replayed": [], "drifted": [], "no_baseline": [],
         "fixed": [], "broken": [], "still_right": [], "still_wrong": [],
         "wobbly": wobbly,
+        "ollama_version": res.get("ollama_version"),
     }
     for row in res["rows"]:
         previous = next(
@@ -388,8 +458,10 @@ def render_comparison(cmp: dict) -> str:
         len(cmp["fixed"]) + len(cmp["broken"])
         + len(cmp["still_right"]) + len(cmp["still_wrong"])
     )
+    then, now = base.get("ollama_version"), cmp.get("ollama_version")
+    runtime = f", Ollama {then}" if then else ""
     lines = [
-        f"Compared with the previous run ({base['at']}, {base['prompt_version']}):",
+        f"Compared with the previous run ({base['at']}, {base['prompt_version']}{runtime}):",
         "",
         f"  {len(cmp['replayed']):3} replayed from cache   same text sent, stored answer returned - cannot have moved",
         f"  {regenerated:3} regenerated         the only cases this run could have changed",
@@ -410,6 +482,13 @@ def render_comparison(cmp: dict) -> str:
             "  above - usually because a change was reverted and the old prompt's",
             "  answers replayed, or because an unrecorded run filled the cache.",
             "  They are not counted as fixed or broken.",
+        ]
+    if then and now and then != now:
+        lines += [
+            "",
+            f"  NOTE: the previous run was answered by Ollama {then}, this one by",
+            f"  Ollama {now}. A runtime update alone moves answers (M17), so what",
+            "  changed above is not only the effect of any other change.",
         ]
     if cmp["no_baseline"]:
         lines.append(f"\n  {len(cmp['no_baseline'])} case(s) never run before: {', '.join(cmp['no_baseline'])}")
@@ -490,7 +569,8 @@ def report(res: dict) -> str:
         "",
         f"- **Model**: `{res['model']}`",
         f"- **Prompt version**: `{res['prompt_version']}`",
-        f"- **Decoding**: num_ctx {res['num_ctx']}, num_predict {res['num_predict']}",
+        f"- **Decoding**: num_ctx {res['num_ctx']}, num_predict {res['num_predict']}, "
+        f"KV cache {res['kv_cache_type']}",
         f"- **Cases**: {res['total']}",
         f"- **Wall time**: {res['seconds']}s",
         "",
@@ -648,13 +728,16 @@ def render_majority(samples: list[dict]) -> str:
 
 
 async def run_repeats(
-    n: int, use_cache: bool, only: list[str] | None, cases_path: Path = CASES_PATH
+    n: int, use_cache: bool, only: list[str] | None, cases_path: Path = CASES_PATH,
+    pdf: Path = GOLDEN_PDF,
 ) -> list[dict]:
-    """The first sample may replay the cache; every later one is asked afresh."""
-    results = [await run(use_cache=use_cache, only=only, cases_path=cases_path)]
-    for _ in range(n - 1):
+    """The first sample may replay the cache; every later one is asked afresh,
+    in an order of its own (see asking_order)."""
+    results = [await run(use_cache=use_cache, only=only, cases_path=cases_path, pdf=pdf)]
+    for sample in range(2, n + 1):
         results.append(
-            await run(use_cache=use_cache, only=only, resample=True, cases_path=cases_path)
+            await run(use_cache=use_cache, only=only, resample=True,
+                      cases_path=cases_path, pdf=pdf, sample=sample)
         )
     return results
 
@@ -685,12 +768,31 @@ def main() -> None:
         help="ask each case N times (first may replay the cache, the rest afresh) "
              "and score the majority verdict; combine with --only to split a long run",
     )
+    parser.add_argument(
+        "--sample", type=int, default=1,
+        help="ask in the order --repeats gives sample N (with --resample, one "
+             "sample of a long run at a time, still recorded as a whole run)",
+    )
+    parser.add_argument(
+        "--policy", type=Path, default=GOLDEN_PDF,
+        help="a different policy PDF, e.g. one from evals/real (requires --cases)",
+    )
+    parser.add_argument(
+        "--cases", type=Path, default=None,
+        help="a scenario file written for --policy",
+    )
     args = parser.parse_args()
+    # The golden cases cite the golden policy's clause numbers, so asking them
+    # of any other document would score answers against the wrong answer key.
+    if args.policy != GOLDEN_PDF and args.cases is None:
+        parser.error("--policy needs --cases written for that policy")
+    if args.sample != 1 and args.repeats > 1:
+        parser.error("--repeats orders its own samples; --sample is for one run")
 
     # Read before this run is recorded: the comparison is against what came
     # BEFORE, and the watchlist is chosen from it.
     history = load_history()
-    cases_path = HELDOUT_PATHS[args.heldout] if args.heldout else CASES_PATH
+    cases_path = args.cases or (HELDOUT_PATHS[args.heldout] if args.heldout else CASES_PATH)
     cases = json.loads(cases_path.read_text(encoding="utf-8"))["cases"]
 
     only = None
@@ -704,7 +806,9 @@ def main() -> None:
         print(f"watchlist: {len(only)} of {len(cases)} cases\n")
 
     if args.repeats > 1:
-        results = asyncio.run(run_repeats(args.repeats, not args.no_cache, only, cases_path))
+        results = asyncio.run(
+            run_repeats(args.repeats, not args.no_cache, only, cases_path, args.policy)
+        )
         print()
         print(render_majority(results))
         if not args.no_report:
@@ -717,7 +821,7 @@ def main() -> None:
 
     res = asyncio.run(
         run(use_cache=not args.no_cache, only=only, resample=args.resample,
-            cases_path=cases_path)
+            cases_path=cases_path, pdf=args.policy, sample=args.sample)
     )
 
     print()

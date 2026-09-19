@@ -9,23 +9,23 @@ The obvious architecture for "answer a question about a document" is retrieval:
 embed the clauses, embed the question, fetch the top k. This project does not,
 and the reason is arithmetic rather than taste.
 
-The synthetic golden policy has 39 clauses and is about 3,100 tokens. The
-context window is set to 8,192 (`settings.num_ctx`; qwen2.5 supports 32,768, but
-16,384 was measured to exhaust this machine's memory), leaving
-`settings.scenario_token_budget` for clause text. On that policy every clause
-that could possibly matter fits in a single prompt with room to spare. Whether
-that holds for a real insurer's wording has not yet been measured.
+A policy's clauses are shown to the model whole, and the premise that allows it
+is size. The synthetic golden policy is about 3,100 tokens. Real wordings, first
+measured in M15, are 69,000-129,000 characters - roughly 16,000-30,000 tokens at
+the 4.25 characters per token measured on policy text - and at the 8,192-token
+window of the time the scenario step saw a quarter of the smallest. The window is now 28,672
+(`settings.num_ctx`, measured in M16 as the largest that runs entirely on this
+machine's GPU), which holds IRDAI's standard Arogya Sanjeevani wording whole.
+`clause_token_budget()` derives the room for clause text from it.
 
 Given that, retrieval could only make the answer worse. Top-k means choosing a
 k, and any k below "all of them" can drop the one clause that decides the case -
 which in this domain means confidently telling someone they are covered because
-the exclusion did not make the cut. Retrieval solves a problem this document
-does not have, and introduces a failure mode it did not previously have.
+the exclusion did not make the cut.
 
-So `shortlist()` sorts by impact and takes everything that fits the budget. On the
-golden policy that is all of it. The impact ordering only starts to matter for a
-document large enough to overflow the context, and then it keeps the clauses
-most likely to cost the reader money.
+So `shortlist()` takes everything that fits. For a document too large even for
+the wider window, it gives up definitions and administrative clauses first,
+then the lowest impact, and says so in a warning.
 
 TWO CALLS, NOT ONE
 ------------------
@@ -47,7 +47,9 @@ from app.grounding import QuoteCheck, verified_prefix, verify_citations
 from app.llm import client
 from app.llm.prompts import (
     FACTS_SYSTEM,
+    PICK_SYSTEM,
     REASON_SYSTEM,
+    render_pick_request,
     render_reasoning_request,
     render_scenario,
 )
@@ -68,6 +70,16 @@ CITATION_EFFECTS = ["denies", "delays", "reduces", "requires", "permits"]
 # clauses than a real question has, and it shrinks the worst-case response
 # enough to stay clear of the generation cap.
 MAX_CITATIONS = 4
+
+# Length caps on the two free-text fields, enforced by the grammar like the
+# enums: a string that has reached its cap can only close. M16: a Star answer
+# ran on inside "reasoning" past 1,600, 3,200 and 6,400 tokens, and the eval
+# died with it. Retrying with a higher ceiling cannot fix a loop; making it
+# unrepresentable does. Sized from the 229 answers stored at the time: the
+# longest reasoning was 974 characters and the longest quote 832 (a whole
+# clause, which the prompt already discourages).
+MAX_REASONING_CHARS = 1_500
+MAX_QUOTE_CHARS = 1_200
 
 # Rough characters-per-token for budgeting. Deliberately conservative: an
 # underestimate would silently truncate the clause list and drop the exclusion
@@ -153,7 +165,9 @@ class ShortlistClause:
     impact_score: float
     # Structured facts extracted at analysis time, so stage 5 can reason over
     # them arithmetically instead of asking the model to re-read the prose.
-    waiting_period_days: int | None = None
+    # Every waiting period the clause sets, in days - usually one. See
+    # ClauseAnalysis.waiting_periods_days.
+    waiting_periods_days: list[int] = field(default_factory=list)
     exceptions: list[str] = field(default_factory=list)
     # The operands a reduction is computed from, carried through from analysis.
     # See app/pipeline/reduction.py for what is done with them.
@@ -161,6 +175,8 @@ class ShortlistClause:
     copay_min_age_at_inception: int | None = None
     cap_percent_of_sum_insured: int | None = None
     icu_cap_percent_of_sum_insured: int | None = None
+    cap_max_inr_per_day: int | None = None
+    icu_cap_max_inr_per_day: int | None = None
     # A cover window around one hospital stay, in days, and which side of the
     # stay it counts from. See app/pipeline/window.py.
     cover_window_days: int | None = None
@@ -168,6 +184,29 @@ class ShortlistClause:
     # The section this clause was segmented under. Used to tell whether an
     # annexure another clause refers to is part of the document at all.
     section_path: str = ""
+
+
+def citation_ids(numbered: list[tuple[str, int]]) -> list[str]:
+    """The id the model cites for each clause: its own number, made unique.
+
+    Takes (number, order_idx) per clause, in document order. A repeated number
+    gets a suffix - "10", "10#2" - because the id enum and the quote check both
+    look a clause up by id, and two clauses under one id would make a citation
+    ambiguous and verify a quote against the wrong text.
+
+    Real wordings repeat numbers routinely (the Star Health standard policy
+    restarts its numbering in each section). This lived inline in the scenario
+    endpoint while the eval built ids its own way without the suffix; on the
+    synthetic policy, which repeats no number, the two could not disagree, so
+    nothing showed they had drifted. One function, so they cannot.
+    """
+    seen: dict[str, int] = {}
+    ids = []
+    for number, order_idx in numbered:
+        base = number or f"c{order_idx}"
+        seen[base] = seen.get(base, 0) + 1
+        ids.append(base if seen[base] == 1 else f"{base}#{seen[base]}")
+    return ids
 
 
 @dataclass
@@ -338,37 +377,81 @@ async def extract_facts(scenario: str, *, use_cache: bool = True) -> dict[str, A
 # --- 5b: shortlist (no LLM) ----------------------------------------------
 
 
+# Prompt tokens that are neither the system prompt nor clause text: the person's
+# words, the facts, and the computed waiting-period, window and reduction lines.
+# Measured in M15: the synthetic policy's pneumonia prompt was 5,270 tokens, of
+# which about 2,700 were clause text and 1,900 system prompt, leaving ~650 with
+# the clause headers included. 1,000 leaves room for a question that produces
+# more computed lines - and an underestimate is refused as truncation, not
+# silently answered.
+QUESTION_TOKENS = 1_000
+
+# The clause types given up first when a policy is too large for the context.
+# M15 ranked by impact alone, and on three real wordings that dropped every
+# coverage clause: impact measures what a clause can cost you, and the clause
+# granting cover costs nothing. No question is answerable without the clause
+# that says what is paid for; definitions and administration rarely decide one.
+DROPPED_FIRST = frozenset({"definition", "procedural"})
+
+
+def clause_token_budget() -> int:
+    """How many tokens of clause text the reasoning prompt can hold.
+
+    Derived from everything else that must fit, not reserved beside it. The
+    reservation this replaces was a fixed 2,500 tokens, set in M5; by M15 the
+    system prompt alone had grown to about 1,900 and the answer ceiling is
+    1,600, so the reservation could no longer hold what it was reserving for.
+    Measuring the system prompt here means growing it shrinks the budget.
+    """
+    system_prompt = int(len(REASON_SYSTEM) / CHARS_PER_TOKEN)
+    return settings.num_ctx - settings.num_predict - system_prompt - QUESTION_TOKENS
+
+
 def shortlist(
     clauses: list[ShortlistClause], token_budget: int | None = None
 ) -> list[ShortlistClause]:
     """Choose which clauses the reasoning step sees.
 
-    Sorted by impact, then truncated to fit the context budget. On the golden
-    policy nothing is dropped at all - the whole document fits. The ordering
-    exists so that if a larger document does overflow, what survives
-    is the clauses most likely to cost the reader money, rather than whichever
-    ones happened to come first.
+    Everything, whenever it fits - which is the design: there is no retrieval,
+    because any selection can drop the clause that decides the case. With the
+    context window measured in M16, IRDAI's standard Arogya Sanjeevani wording
+    fits whole.
 
-    Returned in document order, because a person reading the answer expects
-    clause 3.2 to be discussed before 6.1.
+    When a policy does not fit, clauses are given up in a stated order -
+    definitions and procedural clauses first, then lowest impact - and a clause
+    too large for the remaining room is skipped rather than ending the
+    selection, so one long annexure cannot push out every short exclusion
+    ranked after it. That is logged as a warning: the answer may be missing
+    the clause that decides it.
+
+    `clauses` must arrive in document order, and the selection keeps it. Real
+    wordings restart their numbering in every section, so sorting by clause
+    number - as this once did - interleaves coverage 1, exclusion 1 and
+    condition 1.
     """
-    budget = token_budget or settings.scenario_token_budget
-    ranked = sorted(clauses, key=lambda c: c.impact_score, reverse=True)
+    budget = token_budget or clause_token_budget()
+    ranked = sorted(
+        range(len(clauses)),
+        key=lambda i: (clauses[i].clause_type in DROPPED_FIRST, -clauses[i].impact_score),
+    )
 
-    kept: list[ShortlistClause] = []
+    keep: set[int] = set()
     used = 0
-    for clause in ranked:
-        cost = int(len(clause.text) / CHARS_PER_TOKEN) + 20  # +20 for the header
-        if used + cost > budget and kept:
-            break
-        kept.append(clause)
+    for i in ranked:
+        cost = int(len(clauses[i].text) / CHARS_PER_TOKEN) + 20  # +20 for the header
+        if used + cost > budget and keep:
+            continue
+        keep.add(i)
         used += cost
 
-    if len(kept) < len(clauses):
-        log.info("shortlist dropped %d clause(s) for budget", len(clauses) - len(kept))
-
-    kept.sort(key=lambda c: _sort_key(c.number))
-    return kept
+    if len(keep) < len(clauses):
+        dropped = Counter(c.clause_type for i, c in enumerate(clauses) if i not in keep)
+        log.warning(
+            "policy too large for the context: %d of %d clauses left out (%s)",
+            len(clauses) - len(keep), len(clauses),
+            ", ".join(f"{n} {t}" for t, n in dropped.most_common()),
+        )
+    return [c for i, c in enumerate(clauses) if i in keep]
 
 
 # Standard English function words: long enough to pass the length filter,
@@ -397,8 +480,46 @@ def _stems(text: str) -> dict[str, str]:
     return out
 
 
-def shared_words(scenario: str, clauses: list[ShortlistClause]) -> dict[str, list[str]]:
-    """Clauses that share several unusual words with the question.
+def named_in_question(
+    facts: dict[str, Any], clauses: list[ShortlistClause]
+) -> dict[str, list[str]]:
+    """Clauses using an unusual word from the procedure or condition the person named.
+
+    One word is enough here, where the whole-question rule below needs two,
+    because these words are not drawn from anywhere in the question: they are
+    what the question is about. On the Star policy the clause that decides a
+    hernia question is the only one naming "hernia", and the maternity
+    exclusion the only one naming "caesarean"; neither shares a second unusual
+    word with its question, so the two-word rule never named them.
+
+    The word must still be rare (used by at most two clauses), and definitions
+    and procedural clauses are never named - the same types the shortlist gives
+    up first, because they rarely decide a claim. Measured on the 69 synthetic
+    questions and 10 Star questions, from their stored facts: it names a clause
+    for 18 of them, and for 13 of those the named clauses include one the
+    answer must cite. Of the 21 clauses named, 13 must be cited, 4 are about the
+    same treatment without deciding the case (a cataract waiting period on a
+    cataract cost question), and 4 are noise ("admitted", "removal",
+    "existing", "anaesthesia") - which is why this, too, only names clauses.
+    """
+    wanted = _stems(" ".join(str(facts.get(k) or "") for k in ("procedure", "condition")))
+    per_clause = {c.clause_id: _stems(c.text) for c in clauses}
+    used_by = Counter(s for stems in per_clause.values() for s in stems)
+    rare = {s for s in wanted if 0 < used_by[s] <= _RARE_IN_POLICY}
+
+    named: dict[str, list[str]] = {}
+    for clause in clauses:
+        common = rare & per_clause[clause.clause_id].keys()
+        if common and clause.clause_type not in DROPPED_FIRST:
+            named[clause.clause_id] = sorted(wanted[s] for s in common)
+    return named
+
+
+def shared_words(
+    scenario: str, clauses: list[ShortlistClause], facts: dict[str, Any] | None = None
+) -> dict[str, list[str]]:
+    """Clauses that share several unusual words with the question, or one with
+    the procedure or condition it names (named_in_question).
 
     Measured case: Ayurvedic treatment at an unaccredited private clinic. The
     verdict was right and the citation was the definition of a hospital, in
@@ -429,7 +550,158 @@ def shared_words(scenario: str, clauses: list[ShortlistClause]) -> dict[str, lis
         common = rare_mine & stems.keys()
         if len(common) >= _MIN_SHARED:
             shared[clause_id] = sorted(mine[s] for s in common)
-    return shared
+    for clause_id, words in named_in_question(facts or {}, clauses).items():
+        shared[clause_id] = sorted(set(shared.get(clause_id, [])) | set(words))
+    # In policy order, as the clauses are shown.
+    order = {c.clause_id: i for i, c in enumerate(clauses)}
+    return dict(sorted(shared.items(), key=lambda item: order[item[0]]))
+
+
+# --- 5b2: picking, for a policy too long to read in one pass ---------------
+#
+# WHY THIS EXISTS, AND WHY IT IS NOT RETRIEVAL
+# -------------------------------------------
+# The premise of having no retrieval (M15) is that every clause fits in the
+# window, so nothing can be dropped before the model sees it. On the standard
+# IRDAI wording that holds: 80 clauses, about 19,500 tokens, all of it in the
+# prompt. What M16 measured is that fitting is not the same as reading. With
+# the whole policy in front of it, this 7B model attached one clause's text to
+# another's id, contradicted its own reasoning, and cited the deciding clause
+# in 2 questions of 10.
+#
+# Asked ONLY to pick the clauses that bear on a question, measured against the
+# answer key:
+#
+#     synthetic policy,  3,300 tokens of clauses   28 of 32 questions
+#     Star policy,      19,500 tokens of clauses    1-2 of 10
+#     Star, in groups of 3,000 tokens               7 of 10 (9 with the
+#                                                   clauses code already names)
+#
+# So the model reads a short list well and a long one badly, and the fix is to
+# give it short lists: the clauses in document order, in groups, each group
+# answered on its own. Every clause is still read by the model, and nothing is
+# ranked, embedded or searched - the difference from retrieval is that the
+# model sees each clause in full and decides, rather than a score deciding for
+# it.
+PICK_GROUP_TOKENS = 3_000
+# Per group, not per policy: a group is a slice of a document, and the question
+# it decides may have three of its clauses in one slice and none in the next.
+MAX_PICKS_PER_GROUP = 3
+# Below this, the policy is read in one pass. The synthetic policy (3,346
+# tokens) is read well whole and picked at 28 of 32, so picking it could only
+# lose clauses; Star at 19,500 is not. The threshold sits between the two
+# measured points, nearer the one that reads well.
+PICK_ABOVE_TOKENS = 6_000
+
+
+def clause_tokens(clauses: list[ShortlistClause]) -> int:
+    return int(sum(len(c.text) for c in clauses) / CHARS_PER_TOKEN)
+
+
+def clause_groups(clauses: list[ShortlistClause]) -> list[list[ShortlistClause]]:
+    """Clauses in document order, in groups of about PICK_GROUP_TOKENS.
+
+    Document order, not relevance order: a clause is easier to judge beside the
+    ones the insurer wrote around it, and the groups then line up with the
+    policy's own sections.
+    """
+    groups: list[list[ShortlistClause]] = []
+    current: list[ShortlistClause] = []
+    used = 0
+    for clause in clauses:
+        cost = int(len(clause.text) / CHARS_PER_TOKEN) + 20  # +20 for the header
+        if current and used + cost > PICK_GROUP_TOKENS:
+            groups.append(current)
+            current, used = [], 0
+        current.append(clause)
+        used += cost
+    if current:
+        groups.append(current)
+    return groups
+
+
+def _pick_schema(ids: list[str]) -> dict[str, Any]:
+    """Ids the model may pick from this group, and how many.
+
+    `minItems` is 0 on purpose: most groups of a policy have nothing to do with
+    any one question, and a schema that demands a pick turns every group into a
+    false positive. The enum is this group's ids only, which also keeps "8" and
+    "8#2" from being offered together.
+    """
+    return {
+        "type": "object",
+        "properties": {
+            "clause_ids": {
+                "type": "array",
+                "minItems": 0,
+                "maxItems": MAX_PICKS_PER_GROUP,
+                "items": {"type": "string", "enum": ids},
+            },
+        },
+        "required": ["clause_ids"],
+    }
+
+
+async def pick_clauses(
+    scenario: str, facts: dict[str, Any], clauses: list[ShortlistClause],
+    *, use_cache: bool = True,
+) -> list[str]:
+    """Clause ids the model picks as bearing on this situation, group by group."""
+    picked: list[str] = []
+    for group in clause_groups(clauses):
+        payload = await client.complete_json(
+            [
+                {"role": "system", "content": PICK_SYSTEM},
+                {"role": "user", "content": render_pick_request(
+                    scenario, facts, group, MAX_PICKS_PER_GROUP)},
+            ],
+            _pick_schema([c.clause_id for c in group]),
+            use_cache=use_cache,
+        )
+        picked += [i for i in payload["clause_ids"] if i not in picked]
+    return picked
+
+
+def named_by_code(
+    computed: "Computed", scenario: str, clauses: list[ShortlistClause],
+    facts: dict[str, Any],
+) -> set[str]:
+    """Clauses the computed blocks and the word lookups put in the prompt.
+
+    These must be shown whatever the model picks, for two reasons. The blocks
+    name them ("clause 2#2: requires 24 months or 36 months ..."), and a line
+    about a clause that is not in the prompt is a dangling reference the model
+    cannot check or cite. And they are named because code found something in
+    them - a bar not yet served, a cap that bites, a word from the question -
+    which is exactly what a pick can miss.
+    """
+    named = {c.clause_id for c in computed.waiting}
+    named |= {c.clause_id for c in computed.reductions
+              if c.status is not reduction.ReductionStatus.NOT_RAISED}
+    named |= {c.clause_id for c in computed.windows
+              if c.status is not window.WindowStatus.NOT_RAISED}
+    named |= set(shared_words(scenario, clauses, facts))
+    named |= set(computed.absent)
+    return named
+
+
+async def narrow(
+    scenario: str, facts: dict[str, Any], clauses: list[ShortlistClause],
+    computed: "Computed", *, use_cache: bool = True,
+) -> list[ShortlistClause]:
+    """The clauses the reasoning step sees, for a policy too long to read whole.
+
+    The model's picks plus everything code already names, in document order. A
+    pick is never allowed to remove a clause the blocks talk about.
+    """
+    keep = set(await pick_clauses(scenario, facts, clauses, use_cache=use_cache))
+    keep |= named_by_code(computed, scenario, clauses, facts)
+    chosen = [c for c in clauses if c.clause_id in keep]
+    log.info(
+        "picked %d of %d clauses (%d of %d tokens of clause text)",
+        len(chosen), len(clauses), clause_tokens(chosen), clause_tokens(clauses),
+    )
+    return chosen
 
 
 _ANNEXURE = re.compile(r"\bannexure\s+([ivxl]+|\d+)\b", re.IGNORECASE)
@@ -450,14 +722,6 @@ def absent_annexures(clauses: list[ShortlistClause]) -> dict[str, list[str]]:
         if labels:
             absent[clause.clause_id] = [f"Annexure {label}" for label in labels]
     return absent
-
-
-def _sort_key(number: str) -> tuple:
-    """Sort clause numbers numerically: 3.2 before 3.10, and both before 4.1."""
-    try:
-        return (0, tuple(int(part) for part in number.split(".") if part))
-    except ValueError:
-        return (1, (0,))
 
 
 # --- 5c: reason -----------------------------------------------------------
@@ -482,7 +746,7 @@ def _reasoning_schema(clause_ids: list[str]) -> dict[str, Any]:
         "type": "object",
         "properties": {
             "verdict": {"type": "string", "enum": Verdict.values()},
-            "reasoning": {"type": "string"},
+            "reasoning": {"type": "string", "maxLength": MAX_REASONING_CHARS},
             "deciding_clauses": {
                 "type": "array",
                 # No minItems: insufficient_information legitimately cites
@@ -494,7 +758,7 @@ def _reasoning_schema(clause_ids: list[str]) -> dict[str, Any]:
                     "type": "object",
                     "properties": {
                         "clause_id": {"type": "string", "enum": clause_ids},
-                        "quote": {"type": "string"},
+                        "quote": {"type": "string", "maxLength": MAX_QUOTE_CHARS},
                         "effect": {"type": "string", "enum": CITATION_EFFECTS},
                     },
                     "required": ["clause_id", "quote", "effect"],
@@ -529,7 +793,7 @@ def compute(facts: dict[str, Any], clauses: list[ShortlistClause]) -> Computed:
         # Python, before the model sees anything. Nothing is guessed: if the
         # person said nothing, every waiting period comes back UNKNOWN rather
         # than being compared against an invented figure.
-        waiting=waiting.evaluate(clauses, held),
+        waiting=waiting.evaluate(clauses, held, named_in_question(facts, clauses)),
         # And the second family of comparisons, added after the first was
         # fixed: a waiting period decides whether the claim is PAID, a
         # reduction decides whether it is paid IN FULL. Only the first question
@@ -652,13 +916,29 @@ def find_contradictions(
             c.clause_id: c for c in computed.reductions
             if c.status is reduction.ReductionStatus.APPLIES
         }
+        flagged = set()
         for citation in citations:
             check = applies.get(citation.clause_id)
             if citation.effect == "reduces" and check is not None:
+                flagged.add(citation.clause_id)
                 problems.append(
                     f"- You cited clause {citation.clause_id} as reducing this claim, "
                     f"and it was calculated that it does: {check.describe()}. A claim "
                     f"paid less than in full is conditional, not covered."
+                )
+        # The same contradiction where the answer never mentioned the clause.
+        # M16, Star: a policy that takes 5% from every claim it pays cannot pay
+        # one in full, whatever the answer cites. Covered was still the verdict
+        # on a hernia three years in, and on a caesarean the maternity
+        # exclusion refuses outright.
+        for clause_id, check in applies.items():
+            if clause_id not in flagged:
+                problems.append(
+                    f"- You answered covered, which means paid in full, but it was "
+                    f"calculated that {check.describe()}. If this claim is payable, "
+                    f"it is paid at less than the full amount, which is conditional; "
+                    f"if some clause refuses it outright, it is not_covered. It "
+                    f"cannot be covered."
                 )
 
     denying = [c.clause_id for c in citations if c.effect == "denies"]
@@ -815,6 +1095,16 @@ async def run_scenario(
         )
 
     computed = compute(facts, considered)
+    # Computed on every clause, before any picking: a waiting period or a cap
+    # must be checked whether or not the model picks its clause. The picking
+    # below only decides what the reasoning step READS, and it can never drop a
+    # clause these results name.
+    if clause_tokens(considered) > PICK_ABOVE_TOKENS:
+        # The pick is cached even when the answer is resampled, for the reason
+        # the facts are: what a repeat sample measures is whether the ANSWER is
+        # stable, and re-picking would change the question it answers.
+        considered = await narrow(scenario, facts, considered, computed)
+
     payload = await reason(
         scenario, facts, considered, computed, use_cache=not resample
     )
@@ -910,6 +1200,21 @@ async def run_scenario(
             # window cites the window clause as "permits".
             log.warning("refusal after the missing-list retry names no refusing clause; downgrading")
             verdict = Verdict.INSUFFICIENT_INFORMATION
+
+    # Covered means paid in full, and the arithmetic says something cuts this
+    # claim: a co-payment on every claim, a room rate over its cap. The retry
+    # above puts that in front of the model, and M16 measured it answering
+    # covered anyway - "the claim is covered, but the payment will be
+    # conditional on the actual amount being 95%", its own sentence saying
+    # both. Correcting the label is the safe direction, the same as the
+    # downgrade for an answer with no citations: it takes away a promise of
+    # payment in full that no calculation supports, and leaves the citations,
+    # which are the model's to make.
+    if verdict == Verdict.COVERED and any(
+        c.status is reduction.ReductionStatus.APPLIES for c in computed.reductions
+    ):
+        log.warning("covered, though a reduction applies; correcting to conditional")
+        verdict = Verdict.CONDITIONAL
 
     # Only when something else still stands: a verdict is never left with nothing
     # behind it by this filter, so it can never trigger a downgrade.

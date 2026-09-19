@@ -188,6 +188,60 @@ Held-out scenario batches, and what they said: about 0.83-0.85 on unseen questio
 - **Failure 45: blaming the last change for a drop that was sampling** - check a change can reach the cases that moved before attributing the movement to it.
 - **Failure 46: a report that misdescribed its own run** - a commit stamp that could not say the tree was dirty, and a generated sentence describing a cache key M10 had removed. Plus a check of the fix that ran the old code: setting up a clean tree had removed the change under test.
 
+### M15 - First contact with real policies
+Three real insurer wordings, measured before anything was fixed. **If you read one entry about why a system needs real input, read Concept 38.**
+
+- **Getting real documents without committing them** - addresses and SHA-256 fingerprints in the repo, the PDFs fetched by script, a changed wording treated as an error.
+- **Concept 37: a probe is not an eval** - measuring whether the design's assumptions hold, before writing an answer key that would name artefacts.
+- **Failure 47: page furniture became clauses** - running headers, a wrapped toll-free number ranked the riskiest clause in the policy, table amounts as clause numbers.
+- **Failure 48: a defensive sort that interleaved two columns** - and why the offset invariant still held: a perfect slice of scrambled text is still scrambled.
+- **Concept 38: the no-retrieval premise, measured** - real policies are 6-12x the synthetic one; the shortlist kept 6-27 clauses and dropped every coverage clause on all three, becoming top-k retrieval biased toward refusal.
+- **The prompt, measured in tokens** - Ollama's own count, checked twice; 4.3 characters per token, and a reservation already smaller than the prompt it was meant to hold.
+- **Failure 49: a warning that claimed more than it measured.**
+- **Failure 50: the eval and the product gave clauses different ids** - an eval that rebuilds part of the product measures its rebuild.
+- **Failure 51: nine right answers, mostly for wrong reasons** - 9 of 10 verdicts on a real policy, read case by case: refusals through the wrong clause, payable claims through the one co-payment that makes everything conditional. A verdict-only score cannot see reasons.
+- **Failure 52: the arithmetic was right about a cap the policy does not have** - "2% subject to Rs.5,000" modelled as 2%; deterministic code is only as complete as its model of the input.
+
+### M16 - Reading a real policy correctly
+M15's findings fixed in pipeline order, on the standard IRDAI product (Star Health's Arogya Sanjeevani). The deciding clause went from cited in 1 Star question of 10 to 5-7; right verdicts stayed at 7-8. **If you read one entry about long prompts, read Concept 44.**
+
+- **Steps 1-3: reading the page** - PyMuPDF's own block order instead of a sort that spliced two columns; page furniture recognised by repetition in the margin; a clause number alone on its row read with the words beside it.
+- **Concept 39: evidence relative to the document** - bold means "clause number" only in a document that bolds its clause numbers, the same way font size is judged against the document's own body text.
+- **Failure 53: a threshold written down before it was measured** - "62% bold" was an estimate; measured, it was 25%, and the guessed threshold split three similar documents by rounding.
+- **Concept 40: a limit is a measurement, with a version** - the 8,192-token window from M5 re-measured on a newer runtime: 28,672 runs fully on the GPU.
+- **Failure 54: a truncation check that could never fire** - Ollama discards half the window on overflow and reports a smaller count, which the check read as healthy.
+- **Failure 55: the second detector, disproven in both directions** - a characters-per-token rule failed on long words and on numbers; the exact count `num_ctx // 2 + 2` held everywhere.
+- **Failure 56: document order was clause-number order, until numbers repeated.**
+- **Step 5: a cap with a maximum** - "2% subject to Rs.5,000 per day" computed as the lower of the two, with its working shown.
+- **Step 6: what the long window cost the machine** - the KV cache explained from the model's shape (56 KB per token), read from the runtime's own log.
+- **Failure 57: measuring memory while an eval was running** - two clients asking for different windows forced 18 model reloads in nine minutes.
+- **Concept 41: rounding the KV cache** - `q8_0` halves its memory, and moves near-tie answers; and a server setting the response cache key could not see.
+- **Failure 58: a memory measurement that could not see the workload** - a two-token prompt measured 6 GB; the server's saved-prompt store grew to 14 GB on real prompts.
+- **Failure 59: restarting Ollama left the old runner alive** - on Windows, killing a parent does not kill its child.
+- **Failure 60: a plausible cause, checked before it was built** - a replay showed the planned id change would have fixed nothing; the pipeline's own computed lines were misdirecting the model.
+- **Concept 42: a correction needs positive evidence** - a check that overrides a model acts only on evidence for the other reading, because its two kinds of mistake do not cost the same.
+- **Failures 61-64: four clauses the analysis misread** - a hospital window read as a waiting period, a per-eye cap read as a per-day room cap (on the synthetic policy too), two waiting periods stored as one number, and annexure lists run together.
+- **Failure 65: an answer that never ended took the eval with it** - fixed with a length the grammar enforces.
+- **Concept 43: the same prompt, computed two ways** - the server restores part of a prompt instead of recomputing it, so a fresh answer depends on what was asked before.
+- **Step 10: the co-payment line** - a 5% co-payment on every claim was the reason the model reached for; rewording it exposed worse reading underneath.
+- **Failure 66: a pick that did not read** - asked only to pick the relevant clauses, the model found them for 28 of 32 synthetic questions and 1-2 of 10 on Star.
+- **Concept 44: fitting in the window is not being read** - a context window has a second limit, measured on your own prompts; picking in groups of 3,000 tokens is reading, not retrieval.
+- **Failure 67: a contradiction the check could not see** - "covered" means paid in full, which a co-payment on every claim rules out whatever the answer cites.
+- **Failure 68: three samples, two of them the same one** - samples asked in the same order draw on the same server history and agree on every verdict; the honest unit was the day.
+- **Failure 69: a drop noticed and never explained** - the synthetic main set fell from 38/40 to 33/40 in a run that changed three things at once.
+
+### M17 - What a sample is
+Testing M16's explanation of why its samples agreed, and finding a different cause. **If you read one entry about evaluating models, read Concept 45.**
+
+- **Step 1: a different order for every sample** - shuffled per sample, seeded by its number; it moved 3 verdicts in 79, far less than the 10 in 69 it was meant to explain.
+- **Step 2: the reload test that had already run** - the server log showed fresh and warm servers giving the same answers.
+- **Failure 70: an explanation that fitted, and the cause nobody had looked at** - Ollama had updated itself overnight, and yesterday's stored answers came from the old version.
+- **Concept 45: the runtime is part of the model** - weights, prompt, settings, and the program that does the arithmetic; record it, hold it fixed, re-measure when it changes.
+- **Step 3: the version in the cache key** - and what it costs: about 85 minutes of fresh measurement after every update.
+- **Step 4: one runtime, measured from nothing** - 76 of 79 questions unanimous across three samples in three orders.
+- **Failure 71: a cost called small without measuring it** - asking for the version on every call made each cache hit take 0.8 s; a timing test from the first commit caught it.
+- **Failure 72: a test that emptied the evals' cache** - a cache path relative to the working directory, and a test run from the wrong one.
+
 ---
 
 ## Related documents

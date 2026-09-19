@@ -12,18 +12,32 @@ from app.pipeline.scenario import (
     MAX_CITATIONS,
     ShortlistClause,
     _reasoning_schema,
-    _sort_key,
+    citation_ids,
+    clause_token_budget,
     shortlist,
 )
 from app.taxonomy import Verdict
 
 
-def _clause(number: str, impact: float, text: str = "x" * 200) -> ShortlistClause:
+def test_repeated_clause_numbers_get_distinct_citation_ids():
+    """Real wordings restart numbering per section; ids must still be unique.
+
+    The id enum and the quote check both look a clause up by id. Two clauses
+    under "10" would let a quote from one be checked against the other.
+    """
+    numbered = [("10", 0), ("11", 1), ("10", 2), ("", 3), ("10", 4)]
+    ids = citation_ids(numbered)
+    assert ids == ["10", "11", "10#2", "c3", "10#3"]
+    assert len(set(ids)) == len(ids)
+
+
+def _clause(number: str, impact: float, text: str = "x" * 200,
+            clause_type: str = "exclusion") -> ShortlistClause:
     return ShortlistClause(
         clause_id=number,
         ref=f"doc:{number}",
         number=number,
-        clause_type="exclusion",
+        clause_type=clause_type,
         text=text,
         impact_score=impact,
     )
@@ -53,21 +67,56 @@ def test_budget_keeps_the_highest_impact_clauses():
     assert [c.number for c in kept] == ["1.2"]
 
 
-def test_shortlist_returns_document_order():
-    """Selection is by impact; presentation is by document order, because a
-    reader expects clause 3.2 discussed before 6.1."""
-    clauses = [_clause("6.1", 90.0), _clause("3.2", 50.0), _clause("4.10", 70.0)]
-    assert [c.number for c in shortlist(clauses)] == ["3.2", "4.10", "6.1"]
+def test_shortlist_keeps_document_order_when_numbering_restarts():
+    """Selection is by impact; presentation is in the order the clauses arrived.
+
+    It used to sort by clause number, which is document order only while
+    numbers never repeat. Real wordings restart them per section - coverage 1-9,
+    exclusions 1-23, conditions 1-28 in one of them - so number order put
+    "coverage 1, exclusion 1, condition 1" side by side.
+    """
+    in_document_order = [_clause("1", 20.0, clause_type="coverage"), _clause("2", 30.0),
+                         _clause("1", 90.0), _clause("c7", 10.0), _clause("1", 50.0)]
+    kept = shortlist(in_document_order, token_budget=10_000)
+    assert [c.impact_score for c in kept] == [20.0, 30.0, 90.0, 10.0, 50.0]
 
 
-def test_clause_numbers_sort_numerically_not_alphabetically():
-    """"4.10" must come after "4.2". String ordering would put it before."""
-    assert _sort_key("4.2") < _sort_key("4.10")
-    assert _sort_key("3.9") < _sort_key("4.1")
+def test_an_oversized_policy_gives_up_definitions_before_coverage():
+    """Regression test for M15's measurement: impact order dropped all coverage.
+
+    Impact measures what a clause can cost the reader, so the clause granting
+    cover ranks lowest - and on three real wordings, every coverage clause was
+    the first to go. Definitions and procedural clauses now give way first.
+    """
+    clauses = [
+        _clause("1", 5.0, clause_type="coverage"),
+        _clause("2", 60.0, clause_type="definition"),
+        _clause("3", 70.0, clause_type="procedural"),
+        _clause("4", 80.0, clause_type="exclusion"),
+    ]
+    # Room for two clauses of ~77 tokens each.
+    kept = shortlist(clauses, token_budget=160)
+    assert [c.clause_type for c in kept] == ["coverage", "exclusion"]
 
 
-def test_unnumbered_clauses_sort_last_without_crashing():
-    assert _sort_key("c7") > _sort_key("9.9")
+def test_one_clause_too_large_does_not_end_the_selection():
+    """A long annexure that does not fit must not push out every short clause after it."""
+    clauses = [_clause("1", 90.0), _clause("A", 80.0, text="x" * 3_000), _clause("2", 70.0)]
+    kept = shortlist(clauses, token_budget=160)
+    assert [c.number for c in kept] == ["1", "2"]
+
+
+def test_the_clause_budget_is_what_the_window_has_left():
+    """Derived, not reserved: a longer system prompt must shrink it."""
+    from app.config import settings
+    from app.llm.prompts import REASON_SYSTEM
+    from app.pipeline.scenario import CHARS_PER_TOKEN, QUESTION_TOKENS
+
+    assert clause_token_budget() == (
+        settings.num_ctx - settings.num_predict
+        - int(len(REASON_SYSTEM) / CHARS_PER_TOKEN) - QUESTION_TOKENS
+    )
+    assert clause_token_budget() > 0
 
 
 def test_empty_input_is_handled():
@@ -116,6 +165,21 @@ def test_citations_are_capped_but_not_floored():
     array = _reasoning_schema(["3.2"])["properties"]["deciding_clauses"]
     assert array["maxItems"] == MAX_CITATIONS
     assert "minItems" not in array
+
+
+def test_the_free_text_fields_have_a_length_the_grammar_enforces():
+    """Regression test for a Star answer that ran on inside "reasoning" past
+    three rising output ceilings (M16). A longer ceiling cannot end a loop; a
+    string at its maximum length can only close. Measured before relying on
+    it: a field capped at 60 characters came back at exactly 60, and valid."""
+    from app.pipeline.scenario import MAX_QUOTE_CHARS, MAX_REASONING_CHARS
+
+    schema = _reasoning_schema(["3.2"])["properties"]
+    assert schema["reasoning"]["maxLength"] == MAX_REASONING_CHARS
+    quote = schema["deciding_clauses"]["items"]["properties"]["quote"]
+    assert quote["maxLength"] == MAX_QUOTE_CHARS
+    # Room for every answer stored when the caps were set (974 and 832).
+    assert MAX_REASONING_CHARS > 974 and MAX_QUOTE_CHARS > 832
 
 
 def test_every_schema_string_field_that_is_categorical_has_an_enum():
@@ -236,8 +300,19 @@ def _clauses():
     return [
         ShortlistClause("2.1", "t:1", "2.1", "coverage", INPATIENT_TEXT, 1.0),
         ShortlistClause("3.2", "t:2", "3.2", "waiting_period", PED_TEXT, 1.0,
-                        waiting_period_days=1080),
+                        waiting_periods_days=[1080]),
     ]
+
+
+def _copay_clause():
+    """Star's co-payment: 5% of every claim, no condition to compare."""
+    from app.pipeline.scenario import ShortlistClause
+
+    return ShortlistClause(
+        "9", "t:9", "9", "sub_limit",
+        "9. Co-payment: Each and every claim shall be subject to a co-payment of 5%.",
+        1.0, copay_percent=5,
+    )
 
 
 def _citation(clause_id, effect):
@@ -526,6 +601,64 @@ def test_a_treatment_the_policy_names_elsewhere_is_not_questioned():
     assert find_contradictions(cited, "conditional", computed) == ([], [])
 
 
+# --- 5b2: picking the clauses a long policy is answered from ----------------
+
+
+def _long_policy(count: int = 30):
+    """A policy far past the length one pass reads reliably.
+
+    Each clause is padded to about 250 tokens, the size of a real one, so the
+    groups below come out at roughly the number a real wording produces.
+    """
+    from app.pipeline.scenario import ShortlistClause
+
+    padding = " Words of the policy, repeated to the length of a real clause." * 13
+    return [
+        ShortlistClause(f"{i}", f"t:{i}", f"{i}", "exclusion", f"Clause {i}.{padding}", 1.0)
+        for i in range(count)
+    ]
+
+
+def test_clauses_are_grouped_in_document_order_at_the_length_that_reads_well():
+    """Measured in M16: asked to pick the clauses bearing on a question, the
+    model was right for 28 of 32 questions at 3,300 tokens of clause text and
+    for 1-2 of 10 at 19,500. So it is given the shorter length, and the policy's
+    own order, never a ranking."""
+    from app.pipeline.scenario import PICK_GROUP_TOKENS, clause_groups, clause_tokens
+
+    clauses = _long_policy()
+    groups = clause_groups(clauses)
+
+    assert [c.clause_id for g in groups for c in g] == [c.clause_id for c in clauses]
+    assert all(clause_tokens(g) <= PICK_GROUP_TOKENS for g in groups)
+    assert len(groups) > 1
+
+
+def test_a_group_may_pick_nothing():
+    """Most groups of a policy have nothing to do with any one question. A
+    schema demanding at least one pick would turn every group into a false
+    positive - and the enum is the group's own ids, which is also what keeps
+    "8" and "8#2" from being offered in the same list."""
+    from app.pipeline.scenario import _pick_schema
+
+    array = _pick_schema(["8#2", "9#2"])["properties"]["clause_ids"]
+
+    assert array["minItems"] == 0
+    assert array["items"]["enum"] == ["8#2", "9#2"]
+
+
+def test_what_code_names_is_shown_whatever_the_model_picks():
+    """The computed blocks say "clause 3.2: requires 36 months ...". If a pick
+    could drop 3.2, that line would point at a clause the model cannot read or
+    cite, and the bar it describes would go unanswered."""
+    from app.pipeline.scenario import compute, named_by_code
+
+    clauses = _clauses()
+    facts = {"time_since_policy_start_value": 1, "time_since_policy_start_unit": "years"}
+
+    assert "3.2" in named_by_code(compute(facts, clauses), "hernia surgery", clauses, facts)
+
+
 def _fake_model(monkeypatch, answers):
     """Replace the model: facts first, then the given reasoning answers in order."""
     from app.pipeline import scenario
@@ -541,6 +674,105 @@ def _fake_model(monkeypatch, answers):
 
     monkeypatch.setattr(scenario.client, "complete_json", fake_complete_json)
     return sent
+
+
+def test_covered_contradicts_an_applying_reduction_the_answer_never_cited():
+    """M16, Star: the policy takes 5% from every claim it pays, so no claim on
+    it is paid in full. The check only fired when the answer happened to cite
+    the co-payment as reducing; the contradiction is with the calculation, not
+    with the citation."""
+    from app.pipeline.scenario import Verdict, compute, find_contradictions
+
+    facts = {"time_since_policy_start_value": 5, "time_since_policy_start_unit": "years"}
+    clauses = _clauses() + [_copay_clause()]
+    problems, _ = find_contradictions(
+        [_citation("2.1", "permits")], Verdict.COVERED, compute(facts, clauses))
+
+    assert any("cannot be covered" in p for p in problems)
+
+
+def test_covered_is_corrected_when_the_retry_still_claims_payment_in_full(monkeypatch):
+    """Measured on the Star policy: told the co-payment applies, the retry
+    answered covered again, in a sentence that said both ("covered, but the
+    payment will be conditional"). A promise of payment in full that no
+    calculation supports is not published."""
+    import asyncio
+
+    from app.pipeline.scenario import Verdict, run_scenario
+
+    covered = _answer("covered", "2.1", INPATIENT_QUOTE, "permits")
+    _fake_model(monkeypatch, [covered, covered])
+
+    result = asyncio.run(run_scenario("hernia surgery", _clauses() + [_copay_clause()]))
+
+    assert result.verdict == Verdict.CONDITIONAL
+    assert [c.clause_id for c in result.citations] == ["2.1"]
+
+
+def _fake_picker(monkeypatch, answer):
+    """A model that picks the first clause of each group, then gives `answer`.
+
+    Returns (picked, prompts): the ids it picked, and the reasoning prompt.
+    """
+    from app.pipeline import scenario
+
+    picked: list[str] = []
+    prompts: list[str] = []
+
+    async def fake_complete_json(messages, schema, **kwargs):
+        if schema is scenario.FACTS_SCHEMA:
+            return {"time_since_policy_start_value": 1, "time_since_policy_start_unit": "years"}
+        ids = schema["properties"].get("clause_ids")
+        if ids is not None:  # a pick, for one group
+            first = ids["items"]["enum"][0]
+            picked.append(first)
+            return {"clause_ids": [first]}
+        prompts.append(messages[-1]["content"])
+        return answer
+
+    monkeypatch.setattr(scenario.client, "complete_json", fake_complete_json)
+    return picked, prompts
+
+
+def test_a_long_policy_is_answered_from_the_picked_clauses(monkeypatch):
+    """The reasoning step reads what the model picked plus what code names -
+    not the whole policy, which M16 measured this model reading badly."""
+    import asyncio
+
+    from app.pipeline.scenario import ShortlistClause, run_scenario
+
+    clauses = _long_policy()
+    # A bar nobody picks: it must still be read, because its result is computed.
+    clauses.insert(15, ShortlistClause("3.2", "t:w", "3.2", "waiting_period",
+                                       PED_TEXT, 1.0, waiting_periods_days=[1080]))
+    picked, prompts = _fake_picker(
+        monkeypatch, _answer("not_covered", "0", "Clause 0.", "denies"))
+
+    asyncio.run(run_scenario("hernia surgery", clauses))
+
+    shown = [line.split("=")[1].split()[0]
+             for line in prompts[0].splitlines() if line.startswith("### clause_id=")]
+    assert len(picked) > 1                       # one pick per group
+    assert set(picked) <= set(shown)             # every pick is shown
+    assert "3.2" in shown                        # and the computed bar, unpicked
+    assert len(shown) < len(clauses)             # but not the whole policy
+
+
+def test_a_short_policy_is_read_whole(monkeypatch):
+    """Picking is for a policy too long to read in one pass. The synthetic
+    policy is read well whole, and picked at 28 of 32, so picking it could only
+    lose clauses."""
+    import asyncio
+
+    from app.pipeline.scenario import run_scenario
+
+    picked, prompts = _fake_picker(
+        monkeypatch, _answer("not_covered", "3.2", PED_QUOTE, "denies"))
+
+    asyncio.run(run_scenario("hernia surgery", _clauses()))
+
+    assert picked == []
+    assert "### clause_id=2.1" in prompts[0] and "### clause_id=3.2" in prompts[0]
 
 
 def _answer(verdict, clause_id, quote, effect):
@@ -732,3 +964,62 @@ def test_the_policy_duration_field_is_not_named_like_an_age():
     durations = [k for k in FACTS_SCHEMA["properties"] if k.endswith(("_value", "_unit"))]
     assert "time_since_policy_start_value" in durations
     assert not [k for k in durations if "age" in k.split("_")]
+
+
+# --- one rare word from the named condition (M16, the Star policy) ----------
+
+HERNIA_LIST = (
+    "2.4 Specified disease waiting period. The following listed conditions are excluded "
+    "for 24 months: hernia of all types, hydrocele, piles and fissures."
+)
+
+
+def test_one_rare_word_from_the_named_condition_is_enough():
+    """Regression test for Star's hernia and caesarean questions.
+
+    Each is decided by the one clause that names the condition - the
+    specified-disease list names "hernia", the maternity exclusion names
+    "caesarean" - and shares no second unusual word with the question, so the
+    two-word rule never named it. The two-word rule exists because single
+    words drawn from the whole question were a coincidence as often as a
+    signal ("years" is in the co-payment clause). A word from the procedure or
+    condition the person named is not a coincidence of that kind: it is what
+    the question is about.
+    """
+    from app.pipeline.scenario import shared_words
+
+    question = "Surgery for an inguinal hernia, bought over a year ago."
+    policy = _policy(HERNIA_LIST, HOSPITAL_TEXT)
+    assert shared_words(question, policy) == {}, "the two-word rule alone names nothing here"
+
+    facts = {"procedure": "surgery", "condition": "inguinal hernia"}
+    assert shared_words(question, policy, facts) == {"2.4": ["hernia"]}
+
+
+def test_a_named_condition_word_must_still_be_rare_and_the_clause_must_decide_claims():
+    """A word most clauses use names nothing, and a definition does not decide
+    a claim: definitions and procedural clauses are the types the shortlist
+    gives up first for the same reason."""
+    from app.pipeline.scenario import ShortlistClause, shared_words
+
+    common = [f"{n} Every clause here mentions surgery." for n in ("1.2", "1.3", "1.4")]
+    assert shared_words("q", _policy(*common), {"procedure": "surgery"}) == {}
+
+    definition = ShortlistClause("1.9", "t:9", "1.9", "definition",
+                                 "1.9 Hernia means a protrusion of an organ.", 1.0)
+    assert shared_words("q", [definition], {"condition": "hernia"}) == {}
+
+
+def test_the_named_condition_reaches_the_prompt_and_the_waiting_block():
+    from app.llm.prompts import render_reasoning_request
+    from app.pipeline.scenario import ShortlistClause, compute
+
+    facts = {"condition": "hernia", "time_since_policy_start_value": 14,
+             "time_since_policy_start_unit": "months"}
+    listed = ShortlistClause("2.4", "t:1", "2.4", "waiting_period", HERNIA_LIST, 1.0,
+                             waiting_periods_days=[720])
+    clauses = [listed, *_policy(HOSPITAL_TEXT)]
+
+    rendered = render_reasoning_request("A hernia operation.", facts, clauses)
+    assert "clause 2.4 uses these words from the question" in rendered
+    assert compute(facts, clauses).waiting[0].named == ["hernia"]

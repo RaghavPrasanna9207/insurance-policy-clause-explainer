@@ -88,6 +88,9 @@ async def test_schema_forces_a_value_even_for_an_unrelated_clause():
 
 @pytest.mark.llm
 async def test_cache_returns_identical_result_and_skips_the_model():
+    # Emptying is only safe on the test suite's own cache (conftest.py). Run
+    # from the repository root, this line once emptied the evals' cache.
+    assert "ipce-tests-" in str(cache._CACHE_PATH), f"refusing to clear {cache._CACHE_PATH}"
     cache.clear()
 
     t0 = time.perf_counter()
@@ -172,6 +175,89 @@ def test_decode_options_change_the_cache_key():
     assert key == cache.make_key("m", msgs, CLASSIFY_SCHEMA, dict(base)), "key unstable"
 
 
+def test_the_servers_kv_cache_precision_changes_the_cache_key():
+    """A setting that changes the answer without being part of the request.
+
+    Ollama reads OLLAMA_KV_CACHE_TYPE once, at start-up, and no request carries
+    it, so `options` cannot hold it. At q8_0 the stored keys and values are
+    rounded to 8 bits, which moves the logits slightly - enough to break a
+    near-tie the other way - so an answer generated at f16 must not be replayed
+    for a q8_0 run.
+
+    f16 is Ollama's default, and every entry stored before this parameter
+    existed was generated at f16. At f16 the key must therefore be exactly the
+    key those entries were stored under, or all of them would silently miss.
+    """
+    import hashlib
+    import json
+
+    msgs = _messages(PRE_EXISTING_CLAUSE)
+    options = {"temperature": 0.0, "num_ctx": 8192}
+
+    f16 = cache.make_key("m", msgs, CLASSIFY_SCHEMA, options, kv_cache_type="f16")
+    q8 = cache.make_key("m", msgs, CLASSIFY_SCHEMA, options, kv_cache_type="q8_0")
+    stored_before = hashlib.sha256(json.dumps(
+        {"model": "m", "messages": msgs, "schema": CLASSIFY_SCHEMA, "options": options},
+        sort_keys=True,
+    ).encode("utf-8")).hexdigest()
+
+    assert q8 != f16, "the KV cache precision is not in the key"
+    assert f16 == stored_before, "entries stored at f16 before this setting existed would all miss"
+
+
+def test_the_ollama_version_changes_the_cache_key():
+    """M17: the runtime is part of the model.
+
+    Ollama updates itself when it restarts. Between two days of M16's
+    measurements it went from 0.34.1 to 0.34.2, and answers stored under 0.34.1
+    were replayed beside fresh 0.34.2 answers as if one system had given both:
+    10 of 69 verdicts differed. A new runtime computes the same prompt with
+    different arithmetic, so its answer is a different measurement - the rule
+    the KV cache precision follows above.
+    """
+    msgs = _messages(PRE_EXISTING_CLAUSE)
+    options = {"temperature": 0.0, "num_ctx": 8192}
+
+    old = cache.make_key("m", msgs, CLASSIFY_SCHEMA, options, "q8_0", runtime_version="0.34.1")
+    new = cache.make_key("m", msgs, CLASSIFY_SCHEMA, options, "q8_0", runtime_version="0.34.2")
+
+    assert old != new, "the Ollama version is not in the key"
+
+
+async def test_the_client_hashes_the_kv_precision_and_the_ollama_version(monkeypatch):
+    """The key parameters above protect nothing unless the client passes them.
+
+    q4_0 is neither the project's default (q8_0) nor make_key's (f16), so the
+    test fails whichever default the client might fall back to; the version is
+    whatever the server reports, so it comes from the server and not a constant.
+    """
+    from app.config import settings
+    from app.llm import client as llm_client
+
+    stored: dict[str, dict] = {}
+    monkeypatch.setattr(cache, "get", lambda key: None)
+    monkeypatch.setattr(cache, "put", lambda key, model, response: stored.update({key: response}))
+
+    async def fake_post(messages, schema, model, options):
+        return '{"clause_type": "exclusion", "plain_language": "ok", "waiting_months": 0}'
+
+    async def fake_version():
+        return "9.9.9"
+
+    monkeypatch.setattr(llm_client, "_post_chat", fake_post)
+    monkeypatch.setattr(llm_client, "runtime_version", fake_version)
+    monkeypatch.setattr(settings, "kv_cache_type", "q4_0")
+
+    msgs = _messages(PRE_EXISTING_CLAUSE)
+    await llm_client.complete_json(msgs, CLASSIFY_SCHEMA)
+
+    expected = cache.make_key(
+        settings.model, msgs, CLASSIFY_SCHEMA, llm_client._decode_options(),
+        kv_cache_type="q4_0", runtime_version="9.9.9",
+    )
+    assert list(stored) == [expected]
+
+
 def test_the_options_sent_are_the_options_hashed():
     """Guards against the two drifting apart.
 
@@ -250,3 +336,115 @@ async def test_transport_errors_are_retried_unchanged(monkeypatch):
     )
 
     assert seen == [seen[0], seen[0]], "transport retry must not change the ceiling"
+
+
+def test_a_prompt_that_leaves_no_room_for_the_answer_is_reported(caplog):
+    """Ollama truncates an over-long prompt without an error (Failure 10).
+
+    The only signal is the token count it reports back, so the client checks
+    it on every call - and names which of two failures it saw, because a prompt
+    that was cut and an answer that lost its margin are different problems.
+    """
+    options = {"num_ctx": 8_192, "num_predict": 1_600}
+
+    client._check_context(6_000, options)
+    assert client.last_prompt_tokens == 6_000
+    assert not caplog.records, "6,000 + 1,600 fits in 8,192"
+
+    # The measured case on a real policy: fits, but the answer's margin is gone.
+    client._check_context(7_326, options)
+    assert client.last_prompt_tokens == 7_326
+    assert "leaving 866" in caplog.text
+    assert "truncated" not in caplog.text, "7,326 < 8,192: nothing was truncated"
+
+    client._check_context(None, options)  # older Ollama builds omit the field
+    assert client.last_prompt_tokens is None
+
+
+def test_a_truncated_prompt_is_refused_although_its_token_count_looks_small():
+    """Regression test for M16's finding about what truncation looks like.
+
+    Measured against Ollama, stepping one prompt across an 8,192-token window:
+    33,000 characters reported 8,115 tokens; 34,000 reported 4,098. Overflow
+    discards half the window, so a truncated prompt reports FEWER tokens than
+    one that fit. The M15 check looked for a count at the window's size and
+    could never have fired.
+    """
+    options = {"num_ctx": 8_192, "num_predict": 1_600}
+
+    client._check_context(8_115, options)  # the longest prompt that fit
+    client._check_context(8_192, options)  # a full window is not the signature
+
+    with pytest.raises(client.LlmError, match="truncated"):
+        client._check_context(4_098, options)
+
+
+@pytest.mark.llm
+async def test_ollama_really_halves_an_overflowing_prompt():
+    """The test above encodes a measurement of Ollama; this one re-takes it.
+
+    If a future Ollama truncated differently - to exactly the window, say - the
+    unit test would keep passing against a behaviour that no longer exists.
+    A sentence repeated past the window must be refused, never answered.
+    """
+    from app.config import settings
+
+    sentence = "The Company shall not be liable for expenses of cosmetic surgery. "
+    # Measured at 5.5 characters per token, so 7 characters per token of window
+    # overflows it by about a quarter. Sized from the configured window: a fixed
+    # 60,000 characters overflowed 8,192 and fits in 28,672. (40,000, the first
+    # guess against 8,192, was 7,306 tokens and fit even then.)
+    overflowing = sentence * (settings.num_ctx * 7 // len(sentence))
+
+    with pytest.raises(client.LlmError, match="truncated"):
+        await client.complete_json(
+            [{"role": "user", "content": "Classify this.\n\n" + overflowing}],
+            {"type": "object", "properties": {"word": {"type": "string"}}, "required": ["word"]},
+            use_cache=False,
+        )
+
+
+async def test_the_ollama_version_is_asked_at_most_once_a_minute(monkeypatch):
+    """Asked on every call, the version request made each cache hit take 0.8s
+    instead of milliseconds (a new HTTP client, and "localhost" trying IPv6
+    first). Remembered forever, it would go stale when Ollama updates itself
+    under a running app. A minute bounds both."""
+    from app.llm import client as llm_client
+
+    asked: list[str] = []
+    now = [1000.0]
+
+    class FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"version": f"0.0.{len(asked)}"}
+
+    class FakeHttp:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def get(self, url):
+            asked.append(url)
+            return FakeResponse()
+
+    monkeypatch.setattr(llm_client.httpx, "AsyncClient", FakeHttp)
+    monkeypatch.setattr(llm_client.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(llm_client, "_version", None)
+
+    first = await llm_client.runtime_version()
+    now[0] += 59
+    within_a_minute = await llm_client.runtime_version()
+    now[0] += 2
+    after_a_minute = await llm_client.runtime_version()
+
+    assert first == within_a_minute == "0.0.1"
+    assert after_a_minute == "0.0.2"
+    assert len(asked) == 2
