@@ -240,6 +240,7 @@ Testing M16's explanation of why its samples agreed, and finding a different cau
 - **Step 3: the version in the cache key** - and what it costs: about 85 minutes of fresh measurement after every update.
 - **Step 4: one runtime, measured from nothing** - 76 of 79 questions unanimous across three samples in three orders.
 - **Failure 71: a cost called small without measuring it** - asking for the version on every call made each cache hit take 0.8 s; a timing test from the first commit caught it.
+- **Failure 72: a test that emptied the evals' cache** - a cache path relative to the working directory, and a test run from the wrong one.
 
 ---
 

@@ -8075,6 +8075,72 @@ about cost is a measurement or it is a guess. This one was caught because a
 test written with the client, in the project's first commit, measured the
 property instead of assuming it.
 
+### Failure 72: a test that emptied the evals' cache
+
+**Setup.** To check Failure 71's fix, every test was run, including the eight
+that need the live model, from the repository root rather than from `api/`.
+
+**What happened.** The next report run found almost nothing stored. Everything
+Step 4 had generated, about 85 minutes of answers, was gone, and so was every
+older entry. The cache held 93 entries, the oldest written at the minute the
+live tests ran.
+
+**Why.** One live test checks that a second identical call is served from the
+cache, and it starts from an empty one:
+
+```python
+# api/tests/test_llm.py
+async def test_cache_returns_identical_result_and_skips_the_model():
+    cache.clear()
+```
+
+The cache's location is relative to the working directory:
+
+```python
+# api/app/llm/cache.py
+_CACHE_PATH = Path("data/llm_cache.db")
+```
+
+Run from `api/`, as the README says, that is `api/data/llm_cache.db`, a file
+only the tests use. Run from the repository root, where the eval scripts run,
+it is the evals' own cache. The test suite already moved the app's database
+and upload folder to a temporary directory for exactly this reason (`DB_PATH`
+and `UPLOAD_DIR` in `api/tests/conftest.py`); the response cache was never
+included.
+
+**What it cost.** The measurement's results were not lost: they are in the run
+history and the logs. The stored answers behind them were, so `evals/REPORT.md`
+was generated from a fresh sample (20 minutes) instead of a replay. The older
+entries could no longer be reached by the current code, because they have no
+Ollama version in their key, but checking out an older commit would have
+replayed them; that is gone too.
+
+**The fix.** Every test now gets a private cache, the same way it gets a
+private database:
+
+```python
+# api/tests/conftest.py
+@pytest.fixture(autouse=True, scope="session")
+def _private_llm_cache():
+    from app.llm import cache
+    cache._CACHE_PATH = _TMP / "llm_cache.db"
+    cache._conn = None
+    yield
+```
+
+and the test that empties a cache first checks whose it is:
+
+```python
+    assert "ipce-tests-" in str(cache._CACHE_PATH), f"refusing to clear {cache._CACHE_PATH}"
+```
+
+Checked the way it went wrong: all 256 tests run from the repository root, and
+the evals' cache held 187 entries before and 187 after.
+
+**The lesson.** A path relative to the working directory means a different
+file depending on where a command is typed. A destructive test has to check
+its own target, not trust that it is being run from the right place.
+
 ---
 
 ## Closing out M17

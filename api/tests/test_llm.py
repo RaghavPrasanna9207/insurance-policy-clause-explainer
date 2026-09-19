@@ -88,6 +88,9 @@ async def test_schema_forces_a_value_even_for_an_unrelated_clause():
 
 @pytest.mark.llm
 async def test_cache_returns_identical_result_and_skips_the_model():
+    # Emptying is only safe on the test suite's own cache (conftest.py). Run
+    # from the repository root, this line once emptied the evals' cache.
+    assert "ipce-tests-" in str(cache._CACHE_PATH), f"refusing to clear {cache._CACHE_PATH}"
     cache.clear()
 
     t0 = time.perf_counter()
