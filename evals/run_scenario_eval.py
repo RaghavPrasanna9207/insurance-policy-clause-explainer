@@ -36,6 +36,7 @@ import argparse
 import asyncio
 import json
 from collections import Counter
+import random
 import sys
 import time
 from datetime import datetime, timezone
@@ -129,9 +130,31 @@ def _unanswered(case: dict, error: str) -> dict:
     }
 
 
+def asking_order(cases: list[dict], sample: int) -> list[dict]:
+    """The order one sample asks its questions in.
+
+    WHY IT VARIES (M16, Failure 68). On this Ollama a fresh answer depends on
+    the prompts the server stored before it (Concept 43): they decide how much
+    of a prompt is restored rather than recomputed, and so the last bits of the
+    arithmetic. Asked in the same order, every sample found the same history,
+    and two fresh samples agreed on all 79 verdicts while the previous day's
+    sample differed on 10 of 69. A sample that repeats the history is a copy,
+    not a second draw.
+
+    Sample 1 keeps the file's order, so a single run is asked exactly as it
+    always was. Each later sample is shuffled with its number as the seed, so
+    a run can be repeated in the same orders.
+    """
+    if sample <= 1:
+        return list(cases)
+    shuffled = list(cases)
+    random.Random(sample).shuffle(shuffled)
+    return shuffled
+
+
 async def run(
     use_cache: bool, only: list[str] | None = None, resample: bool = False,
-    cases_path: Path = CASES_PATH, pdf: Path = GOLDEN_PDF,
+    cases_path: Path = CASES_PATH, pdf: Path = GOLDEN_PDF, sample: int = 1,
 ) -> dict:
     if not use_cache:
         cache.clear()
@@ -152,7 +175,7 @@ async def run(
 
     rows = []
     started = time.perf_counter()
-    for index, case in enumerate(cases, 1):
+    for index, case in enumerate(asking_order(cases, sample), 1):
         print(f"  [{index}/{len(cases)}] {case['id']}", flush=True)
         # Facts are extracted FIRST, outside the count, so the count below sees
         # only the reasoning step - the one that produces the verdict.
@@ -221,6 +244,11 @@ async def run(
             "fresh": fresh,
         })
 
+    # Reported in the file's order whatever order it was asked in, so every
+    # sample's table reads the same way.
+    position = {case["id"]: i for i, case in enumerate(cases)}
+    rows.sort(key=lambda r: position[r["id"]])
+
     elapsed = time.perf_counter() - started
     total = len(rows)
     # Citation recall is only meaningful for cases that require a citation;
@@ -235,6 +263,9 @@ async def run(
         "num_ctx": settings.num_ctx,
         "num_predict": settings.num_predict,
         "kv_cache_type": settings.kv_cache_type,
+        # The runtime is part of the model (M17): an Ollama update alone moved
+        # 10 of 69 verdicts, so every record says which version answered.
+        "ollama_version": await client.runtime_version(),
         "seconds": round(elapsed, 1),
         "rows": rows,
         # Another case file is never the report's 40 cases, so it is recorded
@@ -304,6 +335,7 @@ def record_run(res: dict) -> list[dict]:
     history.append({
         "at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
         "prompt_version": PROMPT_VERSION,
+        "ollama_version": res.get("ollama_version"),
         "subset": res["subset"],
         "verdict_accuracy": res["verdict_accuracy"],
         "cases": {
@@ -375,6 +407,7 @@ def compare_with_previous(res: dict, history: list[dict]) -> dict:
         "replayed": [], "drifted": [], "no_baseline": [],
         "fixed": [], "broken": [], "still_right": [], "still_wrong": [],
         "wobbly": wobbly,
+        "ollama_version": res.get("ollama_version"),
     }
     for row in res["rows"]:
         previous = next(
@@ -425,8 +458,10 @@ def render_comparison(cmp: dict) -> str:
         len(cmp["fixed"]) + len(cmp["broken"])
         + len(cmp["still_right"]) + len(cmp["still_wrong"])
     )
+    then, now = base.get("ollama_version"), cmp.get("ollama_version")
+    runtime = f", Ollama {then}" if then else ""
     lines = [
-        f"Compared with the previous run ({base['at']}, {base['prompt_version']}):",
+        f"Compared with the previous run ({base['at']}, {base['prompt_version']}{runtime}):",
         "",
         f"  {len(cmp['replayed']):3} replayed from cache   same text sent, stored answer returned - cannot have moved",
         f"  {regenerated:3} regenerated         the only cases this run could have changed",
@@ -447,6 +482,13 @@ def render_comparison(cmp: dict) -> str:
             "  above - usually because a change was reverted and the old prompt's",
             "  answers replayed, or because an unrecorded run filled the cache.",
             "  They are not counted as fixed or broken.",
+        ]
+    if then and now and then != now:
+        lines += [
+            "",
+            f"  NOTE: the previous run was answered by Ollama {then}, this one by",
+            f"  Ollama {now}. A runtime update alone moves answers (M17), so what",
+            "  changed above is not only the effect of any other change.",
         ]
     if cmp["no_baseline"]:
         lines.append(f"\n  {len(cmp['no_baseline'])} case(s) never run before: {', '.join(cmp['no_baseline'])}")
@@ -689,12 +731,13 @@ async def run_repeats(
     n: int, use_cache: bool, only: list[str] | None, cases_path: Path = CASES_PATH,
     pdf: Path = GOLDEN_PDF,
 ) -> list[dict]:
-    """The first sample may replay the cache; every later one is asked afresh."""
+    """The first sample may replay the cache; every later one is asked afresh,
+    in an order of its own (see asking_order)."""
     results = [await run(use_cache=use_cache, only=only, cases_path=cases_path, pdf=pdf)]
-    for _ in range(n - 1):
+    for sample in range(2, n + 1):
         results.append(
             await run(use_cache=use_cache, only=only, resample=True,
-                      cases_path=cases_path, pdf=pdf)
+                      cases_path=cases_path, pdf=pdf, sample=sample)
         )
     return results
 
@@ -726,6 +769,11 @@ def main() -> None:
              "and score the majority verdict; combine with --only to split a long run",
     )
     parser.add_argument(
+        "--sample", type=int, default=1,
+        help="ask in the order --repeats gives sample N (with --resample, one "
+             "sample of a long run at a time, still recorded as a whole run)",
+    )
+    parser.add_argument(
         "--policy", type=Path, default=GOLDEN_PDF,
         help="a different policy PDF, e.g. one from evals/real (requires --cases)",
     )
@@ -738,6 +786,8 @@ def main() -> None:
     # of any other document would score answers against the wrong answer key.
     if args.policy != GOLDEN_PDF and args.cases is None:
         parser.error("--policy needs --cases written for that policy")
+    if args.sample != 1 and args.repeats > 1:
+        parser.error("--repeats orders its own samples; --sample is for one run")
 
     # Read before this run is recorded: the comparison is against what came
     # BEFORE, and the watchlist is chosen from it.
@@ -771,7 +821,7 @@ def main() -> None:
 
     res = asyncio.run(
         run(use_cache=not args.no_cache, only=only, resample=args.resample,
-            cases_path=cases_path, pdf=args.policy)
+            cases_path=cases_path, pdf=args.policy, sample=args.sample)
     )
 
     print()

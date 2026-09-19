@@ -202,11 +202,31 @@ def test_the_servers_kv_cache_precision_changes_the_cache_key():
     assert f16 == stored_before, "entries stored at f16 before this setting existed would all miss"
 
 
-async def test_the_client_hashes_the_configured_kv_cache_precision(monkeypatch):
-    """The key parameter above protects nothing unless the client passes it.
+def test_the_ollama_version_changes_the_cache_key():
+    """M17: the runtime is part of the model.
+
+    Ollama updates itself when it restarts. Between two days of M16's
+    measurements it went from 0.34.1 to 0.34.2, and answers stored under 0.34.1
+    were replayed beside fresh 0.34.2 answers as if one system had given both:
+    10 of 69 verdicts differed. A new runtime computes the same prompt with
+    different arithmetic, so its answer is a different measurement - the rule
+    the KV cache precision follows above.
+    """
+    msgs = _messages(PRE_EXISTING_CLAUSE)
+    options = {"temperature": 0.0, "num_ctx": 8192}
+
+    old = cache.make_key("m", msgs, CLASSIFY_SCHEMA, options, "q8_0", runtime_version="0.34.1")
+    new = cache.make_key("m", msgs, CLASSIFY_SCHEMA, options, "q8_0", runtime_version="0.34.2")
+
+    assert old != new, "the Ollama version is not in the key"
+
+
+async def test_the_client_hashes_the_kv_precision_and_the_ollama_version(monkeypatch):
+    """The key parameters above protect nothing unless the client passes them.
 
     q4_0 is neither the project's default (q8_0) nor make_key's (f16), so the
-    test fails whichever default the client might fall back to.
+    test fails whichever default the client might fall back to; the version is
+    whatever the server reports, so it comes from the server and not a constant.
     """
     from app.config import settings
     from app.llm import client as llm_client
@@ -218,14 +238,19 @@ async def test_the_client_hashes_the_configured_kv_cache_precision(monkeypatch):
     async def fake_post(messages, schema, model, options):
         return '{"clause_type": "exclusion", "plain_language": "ok", "waiting_months": 0}'
 
+    async def fake_version():
+        return "9.9.9"
+
     monkeypatch.setattr(llm_client, "_post_chat", fake_post)
+    monkeypatch.setattr(llm_client, "runtime_version", fake_version)
     monkeypatch.setattr(settings, "kv_cache_type", "q4_0")
 
     msgs = _messages(PRE_EXISTING_CLAUSE)
     await llm_client.complete_json(msgs, CLASSIFY_SCHEMA)
 
     expected = cache.make_key(
-        settings.model, msgs, CLASSIFY_SCHEMA, llm_client._decode_options(), kv_cache_type="q4_0"
+        settings.model, msgs, CLASSIFY_SCHEMA, llm_client._decode_options(),
+        kv_cache_type="q4_0", runtime_version="9.9.9",
     )
     assert list(stored) == [expected]
 
@@ -374,3 +399,49 @@ async def test_ollama_really_halves_an_overflowing_prompt():
             {"type": "object", "properties": {"word": {"type": "string"}}, "required": ["word"]},
             use_cache=False,
         )
+
+
+async def test_the_ollama_version_is_asked_at_most_once_a_minute(monkeypatch):
+    """Asked on every call, the version request made each cache hit take 0.8s
+    instead of milliseconds (a new HTTP client, and "localhost" trying IPv6
+    first). Remembered forever, it would go stale when Ollama updates itself
+    under a running app. A minute bounds both."""
+    from app.llm import client as llm_client
+
+    asked: list[str] = []
+    now = [1000.0]
+
+    class FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"version": f"0.0.{len(asked)}"}
+
+    class FakeHttp:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def get(self, url):
+            asked.append(url)
+            return FakeResponse()
+
+    monkeypatch.setattr(llm_client.httpx, "AsyncClient", FakeHttp)
+    monkeypatch.setattr(llm_client.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(llm_client, "_version", None)
+
+    first = await llm_client.runtime_version()
+    now[0] += 59
+    within_a_minute = await llm_client.runtime_version()
+    now[0] += 2
+    after_a_minute = await llm_client.runtime_version()
+
+    assert first == within_a_minute == "0.0.1"
+    assert after_a_minute == "0.0.2"
+    assert len(asked) == 2

@@ -230,6 +230,17 @@ M15's findings fixed in pipeline order, on the standard IRDAI product (Star Heal
 - **Failure 68: three samples, two of them the same one** - samples asked in the same order draw on the same server history and agree on every verdict; the honest unit was the day.
 - **Failure 69: a drop noticed and never explained** - the synthetic main set fell from 38/40 to 33/40 in a run that changed three things at once.
 
+### M17 - What a sample is
+Testing M16's explanation of why its samples agreed, and finding a different cause. **If you read one entry about evaluating models, read Concept 45.**
+
+- **Step 1: a different order for every sample** - shuffled per sample, seeded by its number; it moved 3 verdicts in 79, far less than the 10 in 69 it was meant to explain.
+- **Step 2: the reload test that had already run** - the server log showed fresh and warm servers giving the same answers.
+- **Failure 70: an explanation that fitted, and the cause nobody had looked at** - Ollama had updated itself overnight, and yesterday's stored answers came from the old version.
+- **Concept 45: the runtime is part of the model** - weights, prompt, settings, and the program that does the arithmetic; record it, hold it fixed, re-measure when it changes.
+- **Step 3: the version in the cache key** - and what it costs: about 85 minutes of fresh measurement after every update.
+- **Step 4: one runtime, measured from nothing** - 76 of 79 questions unanimous across three samples in three orders.
+- **Failure 71: a cost called small without measuring it** - asking for the version on every call made each cache hit take 0.8 s; a timing test from the first commit caught it.
+
 ---
 
 ## Related documents

@@ -28,6 +28,7 @@ Two consequences the rest of the project leans on:
 import asyncio
 import json
 import logging
+import time
 from typing import Any
 
 import httpx
@@ -86,8 +87,9 @@ async def complete_json(
     model = model or settings.model
     options = _decode_options()
 
-    key = cache.make_key(model, messages, schema, options, settings.kv_cache_type)
     if use_cache:
+        version = await runtime_version()
+        key = cache.make_key(model, messages, schema, options, settings.kv_cache_type, version)
         if (hit := cache.get(key)) is not None:
             log.debug("llm cache hit %s", key[:12])
             return hit
@@ -104,7 +106,9 @@ async def complete_json(
                 # Keyed on the options that actually produced this answer, which
                 # may not be the ones we started with (see the escalation below).
                 cache.put(
-                    cache.make_key(model, messages, schema, options, settings.kv_cache_type),
+                    cache.make_key(
+                        model, messages, schema, options, settings.kv_cache_type, version
+                    ),
                     model,
                     parsed,
                 )
@@ -149,6 +153,43 @@ async def complete_json(
         f"{model} failed after {max_attempts} attempts: "
         f"{type(last_error).__name__}: {last_error or '(no message)'}"
     ) from last_error
+
+
+# The Ollama version, and when it was read: (time.monotonic(), version).
+#
+# Remembered for a minute, because both simpler choices were wrong. Asked on
+# every call, it made each cache hit take 0.8s instead of milliseconds - a new
+# HTTP client costs about 0.2s, and "localhost" about 0.25s more while Windows
+# tries IPv6 first. Remembered for the whole process, it would go stale when
+# Ollama updates itself under an app that has been running for hours. With a
+# minute, the only answer that can be filed under the old version is one
+# generated in the first minute after an update, by a process already running.
+_VERSION_TTL_SECONDS = 60.0
+_version: tuple[float, str] | None = None
+
+
+async def runtime_version() -> str:
+    """The version of Ollama answering requests, as the server reports it.
+
+    Part of every cache key (see cache.make_key), because an Ollama update alone
+    changes answers (M17).
+    """
+    global _version
+    now = time.monotonic()
+    if _version is not None and now - _version[0] < _VERSION_TTL_SECONDS:
+        return _version[1]
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as http:
+            resp = await http.get(f"{settings.ollama_url}/api/version")
+            resp.raise_for_status()
+            version = resp.json()["version"]
+    except httpx.HTTPError as exc:
+        raise LlmError(
+            f"could not read the Ollama version from {settings.ollama_url}: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+    _version = (now, version)
+    return version
 
 
 def _decode_options() -> dict[str, Any]:

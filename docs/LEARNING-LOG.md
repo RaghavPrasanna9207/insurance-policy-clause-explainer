@@ -7719,3 +7719,432 @@ back whatever the pick says. The measurement that watches the rest is the one
 M16 built: `must_cite` in the answer key, checked against the picks and against
 the citations.
 </details>
+
+---
+
+# M17 — What a sample is
+
+## The starting position
+
+Since M12, every headline number in this project has been a **majority of
+three samples** (Concept 34): the model does not answer identically twice, even
+at temperature 0 (Concepts 26 and 27), so one run is one coin flip, and three
+show which way the coin usually lands.
+
+M16 closed on a finding about that method (Failure 68). In its closing
+measurement, the two fresh samples of every question set agreed on all 79
+verdicts, while the first sample, an answer stored the day before and replayed
+from the response cache, differed from them on 10 of 69 synthetic verdicts. If
+two of three samples are copies, a majority of three is one sample counted
+twice.
+
+M16's explanation was the order of the questions. On this server a fresh answer
+depends on the prompts the server stored before it (Concept 43), and the eval
+asked the questions in the same order in every sample. M17 tests that
+explanation before building on it, and fixes what the test finds.
+
+---
+
+## Step 1: a different order for every sample
+
+The change is small. Each sample after the first asks its questions in its own
+order, shuffled with the sample's number as the seed, so a run can be repeated
+in exactly the same orders:
+
+```python
+# evals/run_scenario_eval.py
+def asking_order(cases: list[dict], sample: int) -> list[dict]:
+    if sample <= 1:
+        return list(cases)
+    shuffled = list(cases)
+    random.Random(sample).shuffle(shuffled)
+    return shuffled
+```
+
+Sample 1 keeps the file's order, so a single run is asked exactly as it always
+was. The rows are sorted back into the file's order before anything is scored
+or printed, so every sample's table reads the same way. And `--sample N` runs
+one sample in the order `--repeats` would give it, so a set too long for one
+sitting can be run a sample at a time and still be recorded as whole runs.
+
+The test drives the real `run_repeats` with the model replaced, records the
+order the questions arrive in, and asserts that three samples use three
+different orders of the same questions and report in the file's order. It was
+run against the unchanged code first and failed there: all three samples asked
+in the same order.
+
+### What it changed
+
+The same questions, on the same day and the same server, asked first in one
+order and then in shuffled orders:
+
+| | One order | Shuffled orders |
+|---|---|---|
+| Synthetic main set, majority of three | 34/40 | 32/40 |
+| Held-out batch 1 | 10/16 | 11/16 |
+| Held-out batch 2 | 12/13 | 12/13 |
+| Star, verdicts / deciding clause cited | 7/10 / 5/10 | 7/10 / 6/10 |
+| Verdicts that differ between the two fresh samples | 0 of 79 | 3 of 79 |
+
+Order matters, a little: 3 verdicts in 79 moved when it changed. The difference
+between the two days had been 10 in 69. Whatever changed between the days, it
+was mostly not the order.
+
+---
+
+## Step 2: the reload test that had already run
+
+The next candidate was the server's state. A server that has just loaded the
+model has an empty prompt store; one that has answered a hundred questions has
+a full one. If that decided the answers, reloading the model before each
+sample would make every sample start the same way, and each day's first run
+would differ from a warm server's.
+
+The test turned out to have run twice already. Ollama's server log records
+every time it starts a model runner, and the model unloads itself after five
+idle minutes:
+
+```
+time=2026-09-19T17:43:57 ... msg="starting llama-server"    <- one-order sample 2 begins
+time=2026-09-19T18:31:30 ... msg="starting llama-server"    <- shuffled sample 2 begins
+```
+
+Both second samples began on a freshly loaded server, and both third samples
+ran on the warm one. In the one-order run, the fresh and the warm sample agreed
+on all 40 main verdicts. A fresh server does not change the answers.
+
+### Failure 70: an explanation that fitted, and the cause nobody had looked at
+
+**Setup.** Failure 68 put the difference between two days of samples down to
+the history of requests the server had seen, because that was the mechanism
+this project already knew (Concept 43), and it fitted the evidence.
+
+**What happened.** Tested directly, the two parts of that history moved 3
+verdicts in 79 (the order) and none (a fresh server). The ten verdicts that
+differed between the days had another cause.
+
+**Why.** Ollama's logs name the version at every start:
+
+| Log | Covers | Ollama |
+|---|---|---|
+| `server-3.log` | 17 September 15:53 to 18 September 00:24 | 0.34.1 |
+| `server-2.log` | 18 September 18:10 to 22:49 | 0.34.1 |
+| `server-1.log` | 19 September, 10:46 to 10:49 | 0.34.1 |
+| `server.log` | 19 September, from 10:49 | **0.34.2** |
+
+and `upgrade.log` records the installer running at 10:49:02. Ollama had started
+with the laptop at 10:46, found an update, installed it and restarted itself. It had done the same two days earlier, from
+0.34.0 to 0.34.1, in the middle of M16's measurements. The stored first sample
+was answered by 0.34.1, the two fresh ones by 0.34.2.
+
+Ollama ships its own copy of the inference engine (llama.cpp), and a new
+version can compute the same prompt through different code. Concept 27 showed
+what that does: floating-point addition gives slightly different results in a
+different order, a slightly different probability breaks a near-tie the other
+way, and from there the answer is a different text.
+
+**What is and is not shown.** Proving it would mean reinstalling 0.34.1 and
+asking again. What is shown: the update is the only difference found between
+the two days, and the two differences that were tested moved 3 verdicts and 0.
+
+**The lesson.** An explanation that fits is a hypothesis until it is tested,
+and the one this project already knew was the one it reached for. The log that
+held the answer was read in M16 for other reasons, in Failures 57 to 59, and
+it names the version every time the server starts.
+
+## Concept 45: the runtime is part of the model
+
+A language model's answer is usually described as a function of three things:
+the weights, the prompt, and the decoding settings. This project versions all
+three: the model name, the exact prompt text, and the options are all in the
+cache key.
+
+There is a fourth. The weights are numbers; something has to do the arithmetic
+with them, and that program has a version too. On a GPU the result depends on
+the order the program adds numbers in (Concept 27), so two versions of the same
+runtime, given the same weights, prompt and settings, can return different
+answers. Here the runtime changed twice in one milestone, silently, because the
+application updates itself.
+
+Two consequences. A cache keyed on the first three things will replay an answer
+from one runtime as if the current one had given it. And any comparison that
+spans a runtime change measures the change and the runtime together, with no
+way to separate them afterwards. Concept 41's KV cache precision was the first
+instance of this in the project: a setting no request carries, which changes
+the answer.
+
+The transferable practice, for any evaluation of a model: record the runtime's
+version with every number, hold it fixed for the length of a comparison, and
+when it changes, measure the baseline again before comparing anything with it.
+
+---
+
+## Step 3: the version in the cache key
+
+The fix follows Concept 41's: the version becomes part of every stored answer's
+key, read from the server itself.
+
+```python
+# api/app/llm/client.py, runtime_version(), as first written
+    async with httpx.AsyncClient(timeout=5.0) as http:
+        resp = await http.get(f"{settings.ollama_url}/api/version")
+        resp.raise_for_status()
+        return resp.json()["version"]
+```
+
+```python
+# api/app/llm/client.py, complete_json()
+    if use_cache:
+        version = await runtime_version()
+        key = cache.make_key(model, messages, schema, options, settings.kv_cache_type, version)
+```
+
+```python
+# api/app/llm/cache.py, make_key()
+    if runtime_version is not None:
+        fields["runtime_version"] = runtime_version
+```
+
+Three decisions in that:
+
+- **Asked on every cached call, not once per process.** The app runs for hours,
+  and Ollama updates when it restarts, which can happen while the app is
+  running. The reasoning was that one local request costs little beside a
+  model call of seconds. That was not measured, and it was wrong (Failure 71).
+- **No exception for old entries.** The KV precision was added to the key only
+  when it was not f16, because every older entry was known to be f16. No
+  version can be assumed for the older entries here, so every one of them is
+  unreachable, and the first measurement after the change is a full fresh run.
+  So is the first after every Ollama update: that is the cost, measured in
+  Step 4.
+- **If the server cannot say its version, the call fails** with an error that
+  says so, rather than hashing a guess. A request that could not reach the
+  server could not have been answered by it either.
+
+The rejected alternative was to record the version in reports and leave the
+cache alone. It is cheaper, and it leaves the failure in place: a replayed
+answer from the old version, printed beside fresh ones from the new version,
+with nothing to tell them apart.
+
+The eval now records the version in every run-history entry and in
+`evals/REPORT.md`, and a comparison that spans two versions says so:
+
+```
+  NOTE: the previous run was answered by Ollama 0.34.1, this one by
+  Ollama 0.34.2. A runtime update alone moves answers (M17), so what
+  changed above is not only the effect of any other change.
+```
+
+Each change has a test, and each test was seen failing first. Two check that
+different versions give different keys and that the client hashes the version
+the server reports (a fake server says `9.9.9`, which no default could produce).
+One checks the comparison's note. And the tests that drive the eval with the
+model replaced now also replace the version request: the whole suite passes
+with Ollama unreachable, which is how it was checked.
+
+**Not covered:** a GPU driver update also changes the code that does the
+arithmetic, and Ollama's version does not say which driver ran. That was not
+measured, and it is not in the key.
+
+---
+
+## Step 4: one runtime, measured from nothing
+
+With the version in every key, nothing stored before could be replayed, so
+this was a full measurement from nothing: every clause reading, every set of
+facts, every pick and every answer, all from Ollama 0.34.2. Three samples per
+question, the first in the file's order and the other two shuffled.
+
+### What it cost
+
+The first measurement after every Ollama update will look like this one:
+
+| Piece | Minutes |
+|---|---:|
+| Synthetic policy, 40 clause readings | 5 |
+| Main set, sample 1 (facts and answers) | 11.5 |
+| Main set, samples 2 and 3 | 7.5 + 8 |
+| Held-out batch 1, three samples | 11 |
+| Held-out batch 2, three samples | 9.5 |
+| Star policy, 80 clause readings | 9.7 |
+| Star questions, three samples, in three pieces | 9.9 + 6.9 + 6.1 |
+| **Total** | **about 85** |
+
+About 4 of those minutes went on the version request itself, before
+Failure 71 (below) was found and fixed. Even so, that is nearly three times what this change
+was expected to cost when it was chosen (25 to 30 minutes, an estimate that
+counted the answers and forgot that the clause readings and facts are keyed
+too). Two pieces ran past the ten
+minutes each piece was meant to stay under and finished in the background.
+
+### Results
+
+| | M16 closing (two Ollama versions mixed) | M17 (one version, every answer fresh) |
+|---|---|---|
+| Synthetic main set | 34/40 | 34/40 |
+| Held-out batch 1 | 10/16 | 11/16 |
+| Held-out batch 2 | 12/13 | 11/13 |
+| Star, right verdicts | 7/10 | 7/10 |
+| Star, citing the deciding clause | 5/10 | 5/10 |
+| Questions whose three samples disagree | 10 of 79 | **3 of 79** |
+| Detection integrity, every sample | 1.000 | 1.000 |
+
+The headline numbers barely moved. What moved is the last row: on one runtime,
+with every answer from that runtime, 76 of 79 questions gave the same verdict
+in all three samples, asked in three different orders. The three that did not:
+`initial-waiting-period` (conditional, conditional, covered; wrong every time),
+`dental-no-accident` (right once in three), and `ho-icu-within-cap` (right once
+in three).
+
+The held-out questions M16 lost came back: scuba diving, the early
+pre-hospitalisation bill and the short procedure are right in all three
+samples, and every scuba answer cites the hazardous-sports exclusion (4.3).
+Three others went the other way (`ho2-drunk-scooter`, `ho-icu-within-cap`,
+`ho-dental-accident`). The held-out batches together are 22 of 29, as on
+M16's second day, against 24 of 29 at the end of M14.
+
+**Reading.** On a fixed runtime this system is close to deterministic, and a
+majority of three mostly confirms that. What a sample can still show is the
+handful of questions whose answer depends on what was asked before them, and
+the shuffled order is what lets it show them. The large movements between
+measurements came from the runtime changing underneath, and now that the
+runtime is in the key, a replayed answer can no longer carry one runtime's
+verdict into another's measurement.
+
+### Failure 71: a cost called small without measuring it
+
+**Setup.** The version request was written to run before every cached call,
+with a docstring saying it "costs little beside a model call of seconds".
+
+**What happened.** The measurement in Step 4 ran with it, and then the tests
+that use the live model were run. One of them times a cache hit against a
+model call, and failed:
+
+```
+AssertionError: cache appears not to be hit: cold=2.59s warm=0.81s
+```
+
+The answer came from the cache (the test's other assertions passed); the
+lookup itself had become most of a second slower.
+
+**Why.** Timing the request on its own found two costs, neither of them the
+request:
+
+| Version request | Time |
+|---|---:|
+| new HTTP client, `localhost` | 430 ms |
+| new HTTP client, `127.0.0.1` | 170 ms |
+| new client, no TLS context, `127.0.0.1` | 14 ms |
+| one client reused, `localhost` | 6 ms |
+
+Building an `httpx` client prepares a TLS context, about 0.2 s, even for a plain
+`http://` address that will never use it. And `localhost` costs about 0.25 s
+more, because Windows tries the IPv6 address first and Ollama listens only on
+IPv4.
+
+**The fix.** The version is remembered for a minute:
+
+```python
+# api/app/llm/client.py
+_VERSION_TTL_SECONDS = 60.0
+_version: tuple[float, str] | None = None
+
+async def runtime_version() -> str:
+    global _version
+    now = time.monotonic()
+    if _version is not None and now - _version[0] < _VERSION_TTL_SECONDS:
+        return _version[1]
+    ...
+    _version = (now, version)
+    return version
+```
+
+That trades exactness for speed, and the trade is written down in the code:
+the only answer that can be filed under an old version is one generated in the
+first minute after an Ollama update, by a process that was already running. A
+test pins the minute with a fake clock and a fake server.
+
+**What it showed about everything else.** Every model call builds the same
+kind of client, so every call has always paid about 0.4 s of setup. Beside an
+answer of several seconds that is small, and it is left alone here: noted, not
+measured further. It did inflate Step 4's timings, by roughly 0.4 s on each of
+about 500 calls, about 4 minutes of the 85.
+
+The lesson is the one Failure 53 recorded about a number in a comment: a claim
+about cost is a measurement or it is a guess. This one was caught because a
+test written with the client, in the project's first commit, measured the
+property instead of assuming it.
+
+---
+
+## Closing out M17
+
+### How it connects to what was already there
+
+Majority of three (Concept 34, M12) assumed each sample was a new draw. M17
+measured what actually varies from one sample to the next, and found three
+layers, in decreasing size:
+
+1. **The runtime** (Failure 70, Concept 45): an Ollama update moved 10 of 69
+   verdicts. Now in the cache key, beside the KV cache precision (Concept 41),
+   and recorded in every report and history entry.
+2. **The order of the questions** (Concept 43 through Step 1): 3 of 79. Now
+   varied deliberately, one order per sample.
+3. **A freshly loaded server** (Step 2): none measured.
+
+The first layer is the one that had been read as noise. It is not noise: it is
+a different system answering, and the fix is to keep it out of comparisons, not
+to average over it.
+
+### Where this leaves the numbers
+
+All on Ollama 0.34.2 and `qwen2.5:7b-instruct-q4_K_M`, every answer generated
+for this measurement: main set 34/40, held-out batches 11/16 and 11/13
+(together about 76%), Star 7/10 verdicts with 5/10 citing the deciding clause,
+and detection integrity 1.000 in every sample.
+
+**Still open:**
+
+- whether the version explains all ten of M16's day-to-day differences: shown
+  only by elimination, not by running 0.34.1 again;
+- a GPU driver update changes the arithmetic too, and is not in the key;
+- the first measurement after each Ollama update costs about 80 minutes;
+  Ollama's automatic updates are what decide when that happens;
+- every model call spends about 0.4 s building an HTTP client and trying IPv6
+  for `localhost` (Failure 71);
+- everything M16 left open, including the unexplained drop from 38/40
+  (Failure 69).
+
+---
+
+## Check it yourself
+
+```bash
+curl http://localhost:11434/api/version                        # the runtime the keys now carry
+api/.venv/Scripts/python.exe -m pytest api/tests -m "not llm"  # passes with Ollama switched off
+python evals/run_scenario_eval.py --heldout 2 --repeats 3      # three samples, three orders
+```
+
+**Question to sit with:** after an Ollama update, the first eval run finds
+nothing in the cache and regenerates everything. Someone proposes keeping the
+old answers reachable, to save the 85 minutes, by leaving the version out of
+the key for runs that only compare prompts. What would a prompt comparison
+across the update then measure, and how would its report look different from
+an honest one?
+
+<details>
+<summary>Answer</summary>
+
+It would measure the prompt change and the runtime change together, and could
+not separate them. The cases the prompt change touched would be answered fresh
+by the new runtime; the cases it did not touch would replay the old runtime's
+answers. The report would call the first group "regenerated" and the second
+"replayed - cannot have moved", which is true of the stored bytes and false of
+the system: under the new runtime some of the replayed cases would answer
+differently. The comparison's central promise (Concept 29), that a replayed
+case cannot have moved, would hold for the cache and not for the model.
+
+An honest report either regenerates everything, which is what the key forces,
+or says which runtime answered each case. The note printed when a comparison
+spans two versions is the second half of that.
+</details>

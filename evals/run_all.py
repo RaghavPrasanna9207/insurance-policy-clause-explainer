@@ -98,6 +98,7 @@ def build(classification: dict, scenario: dict, seconds: float,
         "| | |",
         "|---|---|",
         f"| Model | `{settings.model}` |",
+        f"| Ollama | `{scenario.get('ollama_version')}` |",
         f"| Prompt version | `{PROMPT_VERSION}` |",
         f"| Decoding | num_ctx {settings.num_ctx}, num_predict {settings.num_predict},"
         f" temperature {settings.temperature}, KV cache {settings.kv_cache_type} |",
