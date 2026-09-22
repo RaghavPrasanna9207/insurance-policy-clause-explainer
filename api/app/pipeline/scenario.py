@@ -314,6 +314,19 @@ FACTS_SCHEMA: dict[str, Any] = {
             "type": ["string", "null"],
             "enum": ["before_admission", "after_discharge", None],
         },
+        # HOW LONG THE CONDITION HAS BEEN KNOWN, as a value and a unit, like
+        # every other duration here. Whether a condition is pre-existing is
+        # often not stated at all - it is the comparison between this and
+        # `time_since_policy_start`. "Found last month" on a policy bought 14
+        # months ago is a condition that arose 13 months INTO cover, and the
+        # model was answering "unknown" to it, because working that out is
+        # subtraction. The model reports the sentence; `derive_pre_existing`
+        # below does the comparison.
+        "condition_known_for_value": {"type": ["integer", "null"]},
+        "condition_known_for_unit": {
+            "type": ["string", "null"],
+            "enum": ["days", "weeks", "months", "years", None],
+        },
         "pre_existing_condition": {
             "type": "string",
             "enum": ["yes", "no", "unknown"],
@@ -327,6 +340,7 @@ FACTS_SCHEMA: dict[str, Any] = {
         "estimated_cost_inr", "sum_insured_value", "sum_insured_unit",
         "room_rent_per_day_inr", "room_is_icu",
         "expense_timing_value", "expense_timing_unit", "expense_timing_anchor",
+        "condition_known_for_value", "condition_known_for_unit",
         "pre_existing_condition", "notes",
     ],
 }
@@ -362,6 +376,48 @@ def correct_misfiled_age(facts: dict[str, Any], scenario: str) -> dict[str, Any]
     return facts
 
 
+def condition_known_days(facts: dict[str, Any]) -> int | None:
+    """How long the condition has been known, in days. None when unstated."""
+    value = facts.get("condition_known_for_value")
+    unit = facts.get("condition_known_for_unit")
+    if not value or value <= 0 or unit not in _DAYS_PER_UNIT:
+        return None
+    return value * _DAYS_PER_UNIT[unit]
+
+
+def derive_pre_existing(facts: dict[str, Any]) -> dict[str, Any]:
+    """Settle whether a condition predates the policy, by comparing two durations.
+
+    Measured on Star Health: "I need surgery for an inguinal hernia that was
+    found last month. I bought this policy 14 months ago and it is my first
+    health insurance." came back `pre_existing_condition: "unknown"`, and the
+    interface then told the reader it would need to know whether the condition
+    was pre-existing - about a description that says so twice over. A condition
+    found one month ago, under a policy held for fourteen, began thirteen months
+    INTO cover. Nothing about that is a judgement; it is one subtraction, and
+    this project's whole design keeps arithmetic out of the model.
+
+    TWO RULES, AND WHY EACH IS NARROW.
+
+    Only fills an "unknown". A person who says outright that a condition is
+    long-standing has given evidence no comparison should overrule - and a
+    wrong "yes" here denies a claim that should be paid, while a wrong "no"
+    pays one that should not. Neither mistake is cheap, so the correction acts
+    only where the model declined to answer.
+
+    Only fires when BOTH durations were stated. One duration is not a
+    comparison, and guessing the other is exactly the invention the extraction
+    prompt spends its length forbidding.
+    """
+    if facts.get("pre_existing_condition") != "unknown":
+        return facts
+    known = condition_known_days(facts)
+    policy = policy_age_days(facts)
+    if known is None or policy is None or known == policy:
+        return facts
+    return facts | {"pre_existing_condition": "yes" if known > policy else "no"}
+
+
 async def extract_facts(scenario: str, *, use_cache: bool = True) -> dict[str, Any]:
     facts = await client.complete_json(
         [
@@ -371,7 +427,7 @@ async def extract_facts(scenario: str, *, use_cache: bool = True) -> dict[str, A
         FACTS_SCHEMA,
         use_cache=use_cache,
     )
-    return correct_misfiled_age(facts, scenario)
+    return derive_pre_existing(correct_misfiled_age(facts, scenario))
 
 
 # --- 5b: shortlist (no LLM) ----------------------------------------------

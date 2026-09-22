@@ -191,7 +191,20 @@ function Answer({ result }: { result: ScenarioResponse }) {
 
       {result.missing_facts.length > 0 && (
         <div className="mt-5 max-w-[68ch]">
-          <p className="label mb-1.5">To answer this properly, it would need to know</p>
+          {/* The same list carries two different meanings, and saying the wrong
+              one discredits a sound answer. When the verdict IS
+              insufficient_information, these facts are the reason there is no
+              answer, and asking for them is the whole point. When a verdict was
+              reached, they were simply never mentioned - and "to answer this
+              properly, it would need to know" then tells a reader that a
+              correct, decided answer is incomplete. Measured on Star Health: a
+              hernia 14 months into a first policy was ruled out by an unserved
+              waiting period, under a note asking for the claimant's age. */}
+          <p className="label mb-1.5">
+            {result.verdict === 'insufficient_information'
+              ? 'To answer this, it would need to know'
+              : "You didn't mention these, and they can affect a claim"}
+          </p>
           <ul className="space-y-1">
             {result.missing_facts.map((fact) => (
               <li key={fact} className="flex gap-2 text-[13px] leading-relaxed text-muted">

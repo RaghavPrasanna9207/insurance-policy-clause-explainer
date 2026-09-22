@@ -39,7 +39,7 @@ coverage, it just happens to be describing its ceiling.
 from app.grounding import normalize
 from app.taxonomy import ClauseType
 
-PROMPT_VERSION = "v44-picked-clauses-covered-means-in-full"
+PROMPT_VERSION = "v48-condition-known-for"
 
 CLASSIFY_SYSTEM = """\
 You are an expert on Indian (IRDAI-regulated) health insurance policy wordings.
@@ -345,8 +345,33 @@ the same number as time_since_policy_start.
 - "a follow-up after I was discharged" (no number) -> null, null, after_discharge
 - nothing said about expenses before admission or after discharge -> all three null
 
+HOW LONG THE CONDITION HAS BEEN KNOWN: a value and a unit, exactly like the
+durations above. This counts from when the condition was found, diagnosed,
+noticed or first suffered - NOT from when the policy began, and not from a
+hospital stay. Report it whenever the person dates the condition at all, even
+if they say nothing about whether it is pre-existing.
+
+- "a hernia that was found last month"        -> condition_known_for_value: 1, condition_known_for_unit: months
+- "diagnosed with diabetes three years ago"   -> 3, years
+- "I've had this knee trouble for six weeks"  -> 6, weeks
+- "I have had asthma since childhood" (no number) -> null, null
+- nothing said about when the condition began -> null, null
+
+This field never takes a number away from another field, and never creates one.
+Time measured from the POLICY still goes in time_since_policy_start, time
+measured from a HOSPITAL STAY is not this field either, and no field anywhere in
+this schema is ever filled by subtracting one number in the sentence from
+another - if it was not said, it is null:
+
+- "hospitalised for it 5 years after taking the policy out"
+     -> time_since_policy_start_value: 5, unit: years; condition_known_for: null, null
+- "I was admitted with pneumonia last month"
+     -> condition_known_for: null, null (this dates the admission, not the condition)
+
 For pre_existing_condition, answer "unknown" unless the description makes it
-clear either way. "Unknown" is the honest answer far more often than not.
+clear either way. "Unknown" is the honest answer far more often than not, and
+it is the right answer when the only evidence is the two durations above -
+comparing them is done afterwards, in code.
 """
 
 
