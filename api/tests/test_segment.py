@@ -351,3 +351,103 @@ def test_no_regex_contains_a_control_character():
         pattern = getattr(seg, name).pattern
         bad = [hex(ord(c)) for c in pattern if ord(c) < 32]
         assert not bad, f"{name} contains control characters {bad}: {pattern!r}"
+
+
+def test_letter_spaced_headings_read_back_as_words():
+    """Star Health sets all nine of its major headings with the letters held apart.
+
+    "S T A N D A R D  E X C L U S I O N S" is a typesetting effect; extraction
+    returns exactly those characters, so every rule that looks for a word in a
+    heading missed them, and the headings were parsed as clauses instead. One of
+    them - "S T A N D A R D  C O N D I T I O N S" - became a clause of its own,
+    and the rest were swallowed into whichever clause they sat beside.
+
+    Letters are one space apart and words two, so the double space is the only
+    boundary the repair needs, which is also why it survives the irregular
+    extraction of "S P E C I F I C  C O N D ITION S".
+    """
+    from app.pipeline.segment import _despaced
+
+    assert _despaced("S T A N D A R D  E X C L U S I O N S") == "STANDARD EXCLUSIONS"
+    assert _despaced("S P E C I F I C  C O N D ITION S") == "SPECIFIC CONDITIONS"
+    assert _despaced("A N N E X U R E  -  A") == "ANNEXURE - A"
+    # Ordinary text is left exactly as it was: no real sentence is mostly
+    # one-letter words, which is what makes the repair safe to apply to every
+    # line in the document.
+    assert _despaced("The Company shall not be liable") == "The Company shall not be liable"
+    assert _despaced("STANDARD EXCLUSIONS") == "STANDARD EXCLUSIONS"
+
+
+def test_letter_spaced_heading_is_a_section_not_a_clause():
+    from app.pipeline.ingest import Line
+    from app.pipeline.segment import _looks_like_section
+
+    heading = "S T A N D A R D  E X C L U S I O N S"
+    line = Line(text=heading, page=0, size=11.0, bold=False, bbox=(0, 0, 1, 1),
+                char_start=0, char_end=len(heading))
+    assert _looks_like_section(line, 11.0)
+
+
+def _seg(number: str, text: str, start: int) -> Segment:
+    return Segment(
+        order_idx=0, section_path="", number=number, heading="", text=text,
+        page_start=0, page_end=0, char_start=start, char_end=start + len(text),
+    )
+
+
+def test_a_lists_leadin_is_joined_to_the_clause_it_introduces():
+    """An unnumbered fragment ending in ":" or ";" is not a clause on its own.
+
+    Two of the three real wordings measured open their exclusions this way:
+
+        "The Company shall not be liable to make any payments under this Policy
+         in respect of any expenses what so ever incurred by the Insured Person
+         in connection with or in respect of;"
+
+    Read alone it is a sentence with its object missing, and stage 3 has to
+    guess what it excludes. Star's came back as "The policy will never pay for
+    any medical expenses you incur" - false, maximally severe, and ranked second
+    on the dashboard, which is the first thing a user sees.
+    """
+    from app.pipeline.segment import _merge_leadins
+
+    lead = "The Company shall not be liable in respect of;"
+    first = "1. Investigation and evaluation expenses."
+    raw = f"{lead}\n{first}"
+    merged = _merge_leadins([_seg("", lead, 0), _seg("1", first, len(lead) + 1)], raw)
+
+    assert len(merged) == 1
+    assert merged[0].number == "1", "the clause keeps its own identity"
+    assert merged[0].text == raw, "the join is a slice, so the offsets still hold"
+
+
+def test_a_numbered_clause_ending_in_a_colon_is_never_swallowed():
+    """Only unnumbered fragments are lead-ins. A numbered clause that happens to
+    introduce a list of its own keeps its identity and its own entry."""
+    from app.pipeline.segment import _merge_leadins
+
+    a = "4. The following are excluded:"
+    b = "5. Dental treatment."
+    raw = f"{a}\n{b}"
+    merged = _merge_leadins([_seg("4", a, 0), _seg("5", b, len(a) + 1)], raw)
+
+    assert [s.number for s in merged] == ["4", "5"]
+
+
+def test_merging_a_leadin_respects_the_size_cap(golden_pdf: Path):
+    """HDFC's first exclusion already fills 2,997 of the 3,000-character cap, so
+    a merge there overflows it. The overflow moves into a continuation piece
+    rather than the merge being abandoned - abandoning it would have left the
+    one document the rule exists for untouched."""
+    from app.pipeline.segment import _merge_leadins
+
+    lead = "The Company shall not make payment for any claim caused by:"
+    body = "1. " + "x " * (MAX_CLAUSE_CHARS // 2)
+    raw = f"{lead}\n{body}"
+    merged = _merge_leadins([_seg("", lead, 0), _seg("1", body, len(lead) + 1)], raw)
+
+    assert len(merged) > 1, "the oversized merge was split, not skipped"
+    assert merged[0].text.startswith(lead), "the lead-in stays with the first piece"
+    assert all(len(s.text) <= MAX_CLAUSE_CHARS for s in merged)
+    for s in merged:
+        assert raw[s.char_start : s.char_end] == s.text
