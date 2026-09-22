@@ -171,6 +171,7 @@ No real insurer policy wordings are committed to this repository.
 | M15 | Real IRDAI policy wordings — measure what breaks before fixing | ⚠️ measured: reading order, segmentation and context budget fail on real wordings |
 | M16 | Read a real wording correctly: reading order, segmentation, context, misread clauses, two-pass reading | ✅ deciding clause cited 1/10 → 5–7/10 on Star Health |
 | M17 | What a sample is: a shuffled order per sample, and the Ollama version in the cache key | ✅ 76/79 questions unanimous on one runtime |
+| M18 | What the eval never looked at: five wrong things on screen, found by using the app | ✅ segmentation and scoring fixed exactly; fact extraction 18/18 eval |
 
 Evaluation is the point, not an afterthought: model and prompt changes in this project are justified by measured numbers on the golden set, never by impressions. See [Results](#results) and [`evals/REPORT.md`](evals/REPORT.md).
 

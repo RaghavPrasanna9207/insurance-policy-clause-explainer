@@ -242,6 +242,20 @@ Testing M16's explanation of why its samples agreed, and finding a different cau
 - **Failure 71: a cost called small without measuring it** - asking for the version on every call made each cache hit take 0.8 s; a timing test from the first commit caught it.
 - **Failure 72: a test that emptied the evals' cache** - a cache path relative to the working directory, and a test run from the wrong one.
 
+### M18 - The first thing a user sees
+Five things wrong on screen that no eval in the repository could see, found by using the app by hand on a real policy. **If you read one entry about prompts, read Concept 48.**
+
+- **Failure 73: the worst clause in the policy, and the policy never said it** - an unnumbered fragment ending "in respect of;" was cut off from the twenty-two exclusions that complete it, read correctly as excluding everything, and ranked second on the dashboard.
+- **Failure 73b: a guard that switched the fix off where it was needed** - the comment reasoned about the lead-in's length and the code tested the merged length; a guard should re-establish the invariant, not abandon the work.
+- **Failure 74: nine headings the segmenter could not read** - "S T A N D A R D  E X C L U S I O N S" contains no word a word-boundary rule can find.
+- **Concept 46: reading what the page says, not what the file contains** - a PDF stores glyph positions, so letter-spacing shatters words; the typesetter's own word gap is what puts them back.
+- **Failure 75: a reading level that does not exist** - Flesch-Kincaid divides by sentences, a list of 145 item names ends none, and the card reported grade 94. Includes the line-break fix that was measured and rejected first.
+- **Failure 76: an exact quotation, marked unreliable** - a correct answer flagged "Not verified" for quoting parts A, D and E of a clause and skipping B and C.
+- **Concept 47: provenance and meaning are different questions** - loosening the project's core grounding check safely, and why a check that cries wolf degrades into no check at all rather than into a stricter one.
+- **Failure 77: asking for facts about an answer it had already decided** - one list serving the reasoning prompt and the interface, which need opposite things from it; and a pre-existing condition stated twice in the question and read as unknown, because settling it is a subtraction.
+- **Failure 78: four prompts to add one field, and what each one broke** - an example about hernias cost an age; a denial naming two fields caused a subtraction between them. Includes the stale answer key: four "regressions" that were already failing on `main`.
+- **Concept 48: a prompt is not a list of independent rules** - adding an instruction for one field competes for attention with every other field, and the fields it damages are the ones nothing warned you to look at.
+
 ---
 
 ## Related documents
