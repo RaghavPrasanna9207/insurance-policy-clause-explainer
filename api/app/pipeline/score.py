@@ -127,7 +127,16 @@ def flesch_kincaid_grade(text: str) -> float:
     words = _RE_WORD.findall(text)
     if not words:
         return 0.0
-    sentences = max(len([s for s in _RE_SENTENCE.split(text) if s.strip()]), 1)
+    units = [s for s in _RE_SENTENCE.split(text) if s.strip()]
+    # A list of item names ends no sentence, so splitting on full stops makes
+    # the whole block one: Star's annexure of 145 non-payable items came out at
+    # 221 words per "sentence" and reported grade 94, a number that does not
+    # exist. Where a text terminates nothing, the unit a reader takes in at once
+    # is the line. Line breaks are not used otherwise, because in wrapped prose
+    # they fall wherever the measure ran out and mean nothing.
+    if not _RE_SENTENCE.search(text):
+        units = [line for line in text.split("\n") if line.strip()]
+    sentences = max(len(units), 1)
     syllables = sum(_syllables(w) for w in words)
 
     grade = 0.39 * (len(words) / sentences) + 11.8 * (syllables / len(words)) - 15.59
