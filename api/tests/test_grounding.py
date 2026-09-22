@@ -300,3 +300,80 @@ def test_the_code_accepts_exactly_the_words_the_prompt_asks_for():
 
     for marker in EXCEPTION_MARKERS:
         assert f'"{marker}"' in CLASSIFY_SYSTEM
+
+
+# --- quotations that skip over part of the clause ---------------------------
+#
+# Star Health's specified-disease waiting period is lettered A to E. Asked about
+# an inguinal hernia 14 months into a first policy, the model reached the right
+# verdict from this clause and quoted the heading, A, D and E - skipping B
+# (enhancement of sum insured) and C (overlap with the pre-existing waiting
+# period), neither of which bears on the question. Every word it printed was the
+# clause's own, and the answer was shown to the reader marked "Not verified",
+# because the check demanded one unbroken run. This is the text that did it,
+# shortened but with the same shape.
+
+_LETTERED_CLAUSE = (
+    "2. Specified disease / procedure waiting period - Code Excl 02\n"
+    "A. Expenses related to the treatment of the following listed Conditions "
+    "shall be excluded until the expiry of 24/36 months of continuous coverage "
+    "after the date of inception of the first Policy with us.\n"
+    "B. In case of enhancement of Sum Insured the exclusion shall apply afresh "
+    "to the extent of Sum Insured increase.\n"
+    "C. If any of the specified disease falls under the waiting period specified "
+    "for pre-existing diseases, then the longer of the two shall apply.\n"
+    "D. The waiting period for listed conditions shall apply even if contracted "
+    "after the Policy or declared and accepted without a specific exclusion."
+)
+
+
+def test_a_quotation_that_skips_part_of_the_clause_verifies():
+    quote = (
+        "A. Expenses related to the treatment of the following listed Conditions "
+        "shall be excluded until the expiry of 24/36 months of continuous coverage "
+        "after the date of inception of the first Policy with us.\n"
+        "D. The waiting period for listed conditions shall apply even if contracted "
+        "after the Policy or declared and accepted without a specific exclusion."
+    )
+    verified, reason = verify_quote(quote, _LETTERED_CLAUSE)
+    assert verified, reason
+
+
+def test_an_elided_quotation_may_not_reorder_the_clause():
+    """Order is what stops a condition being lifted above the sentence that
+    qualified it, so D before A is a different claim and must not verify."""
+    quote = (
+        "D. The waiting period for listed conditions shall apply even if contracted "
+        "after the Policy or declared and accepted without a specific exclusion.\n"
+        "A. Expenses related to the treatment of the following listed Conditions "
+        "shall be excluded until the expiry of 24/36 months of continuous coverage "
+        "after the date of inception of the first Policy with us."
+    )
+    assert verify_quote(quote, _LETTERED_CLAUSE)[0] is False
+
+
+def test_an_invented_line_is_still_caught_among_true_ones():
+    quote = (
+        "A. Expenses related to the treatment of the following listed Conditions "
+        "shall be excluded until the expiry of 24/36 months of continuous coverage "
+        "after the date of inception of the first Policy with us.\n"
+        "F. This waiting period shall not apply to any surgical procedure "
+        "performed on an in-patient basis."
+    )
+    assert verify_quote(quote, _LETTERED_CLAUSE)[0] is False
+
+
+def test_short_fragments_cannot_be_stitched_into_a_verified_quote():
+    """Every piece must clear MIN_QUOTE_CHARS on its own, so an answer cannot be
+    assembled from scattered phrases too short to mean anything."""
+    quote = "shall be excluded\nshall not apply\nlisted Conditions"
+    assert verify_quote(quote, _LETTERED_CLAUSE)[0] is False
+
+
+def test_the_same_passage_cannot_be_quoted_twice():
+    """Non-overlapping, so a clause cannot be padded out by repeating itself."""
+    line = (
+        "B. In case of enhancement of Sum Insured the exclusion shall apply afresh "
+        "to the extent of Sum Insured increase."
+    )
+    assert verify_quote(f"{line}\n{line}", _LETTERED_CLAUSE)[0] is False

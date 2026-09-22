@@ -93,6 +93,53 @@ class QuoteCheck:
     reason: str = ""
 
 
+def _verify_elided(quote: str, source_text: str) -> bool:
+    """True if the quote is several exact runs of one clause with material skipped.
+
+    WHY. A question about an inguinal hernia 14 months into a first policy got
+    the right verdict off the right clause, and was shown to the reader marked
+    *unverified*. The clause, Star's specified-disease waiting period, is
+    lettered A to E, and the model quoted the heading, A, D and E - skipping B
+    (enhancement of sum insured) and C (overlap with the pre-existing waiting
+    period), neither of which bears on the question. Every word it printed was
+    the clause's own. What failed was only the demand that a quotation be one
+    unbroken run, and telling a reader that an exactly-copied quotation "does
+    not appear in the cited clause" is a false alarm - the one thing a grounding
+    check cannot afford, because a check that cries wolf gets ignored.
+
+    WHAT KEEPS THIS HONEST. Three constraints, and the reason for each:
+
+      split only at the model's own line breaks - so it can elide where it
+          chose to break a line, never mid-sentence, and cannot assemble a new
+          sentence out of scattered phrases
+      every piece at least MIN_QUOTE_CHARS - so an answer cannot be stitched
+          together out of fragments too short to mean anything on their own
+      in document order, and non-overlapping - so the clause's own sequence is
+          preserved. A condition cannot be lifted above the sentence that
+          qualified it, and no passage can be quoted twice to pad the others
+
+    What it deliberately does NOT do is judge whether the skipped material
+    mattered; that is a question about meaning, and this check is about
+    provenance. The elision stays visible in the quotation the reader is shown.
+    """
+    pieces = [p for p in (normalize(line) for line in quote.split("\n")) if p]
+    # One piece would have passed the contiguous check already; reaching here
+    # with one piece means it genuinely is not in the clause.
+    if len(pieces) < 2:
+        return False
+
+    haystack = normalize(source_text)
+    cursor = 0
+    for piece in pieces:
+        if len(piece) < MIN_QUOTE_CHARS:
+            return False
+        found = haystack.find(piece, cursor)
+        if found == -1:
+            return False
+        cursor = found + len(piece)
+    return True
+
+
 def verify_quote(quote: str, source_text: str) -> tuple[bool, str]:
     """Check that `quote` appears within `source_text` after normalisation."""
     if not quote or not quote.strip():
@@ -102,7 +149,11 @@ def verify_quote(quote: str, source_text: str) -> tuple[bool, str]:
     if len(normalized_quote) < MIN_QUOTE_CHARS:
         return False, f"quote too short to verify (<{MIN_QUOTE_CHARS} chars)"
 
+    # The strictest reading first, so an unbroken quotation is still checked
+    # exactly as it always was, and the elision path is only ever a fallback.
     if normalized_quote in normalize(source_text):
+        return True, ""
+    if _verify_elided(quote, source_text):
         return True, ""
     return False, "quote does not appear in the cited clause"
 
