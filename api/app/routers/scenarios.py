@@ -10,7 +10,7 @@ from sqlmodel import Session
 from app.db import get_session
 from app.models import Document, ScenarioRun
 from app.pipeline.run import load_clauses
-from app.pipeline.scenario import run_scenario
+from app.pipeline.scenario import run_scenario, stated
 from app.schemas import CitationOut, ScenarioRequest, ScenarioResponse
 from app.taxonomy import DocStatus
 
@@ -88,7 +88,7 @@ async def create_scenario(
         reasoning=result.reasoning,
         citations=citations,
         missing_facts=result.missing_facts,
-        facts={k: v for k, v in result.facts.items() if v not in (None, "", "unknown")},
+        facts={k: v for k, v in result.facts.items() if stated(v)},
         verified=result.verified,
         clauses_considered=result.clauses_considered,
     )

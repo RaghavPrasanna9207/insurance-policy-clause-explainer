@@ -562,14 +562,14 @@ def render_reasoning_request(
     silently if the two are ever built from different lists - which is why they
     are built from one list, in one place, in `pipeline/scenario.py`.
     """
-    known = {k: v for k, v in facts.items() if v not in (None, "", [], "unknown")}
-    if isinstance(known.get("notes"), str) and _invents_coverage(known["notes"], scenario):
-        del known["notes"]
     # Imported rather than redeclared: the model's list and the user's list are
     # the same list. See DECISIVE_FACTS in pipeline/scenario.py for why.
-    from app.pipeline.scenario import DECISIVE_FACTS, shared_words
+    from app.pipeline.scenario import missing_facts, shared_words, stated
 
-    missing = [k for k in DECISIVE_FACTS if facts.get(k) in (None, "", "unknown")]
+    known = {k: v for k, v in facts.items() if stated(v)}
+    if isinstance(known.get("notes"), str) and _invents_coverage(known["notes"], scenario):
+        del known["notes"]
+    missing = missing_facts(facts)
 
     lines = [
         "SITUATION (in the person's own words):",

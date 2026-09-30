@@ -6,6 +6,8 @@ pinned down exactly. What the model *decides* is measured by
 evals check how well.
 """
 
+from functools import partial
+
 import pytest
 
 from app.pipeline.scenario import (
@@ -226,7 +228,8 @@ def test_policy_age_keeps_its_unit():
     read as 30 months). Fixing one operand of a comparison and leaving the
     other is not fixing the comparison.
     """
-    from app.pipeline.scenario import policy_age_days
+    from app.pipeline.scenario import duration_days
+    policy_age_days = partial(duration_days, name="time_since_policy_start")
 
     assert policy_age_days({"time_since_policy_start_value": 2, "time_since_policy_start_unit": "weeks"}) == 14
     assert policy_age_days({"time_since_policy_start_value": 2, "time_since_policy_start_unit": "months"}) == 60
@@ -243,7 +246,8 @@ def test_unstated_policy_age_stays_none():
     Every waiting period then evaluates to UNKNOWN, which is what allows an
     honest insufficient_information rather than a verdict built on a guess.
     """
-    from app.pipeline.scenario import policy_age_days
+    from app.pipeline.scenario import duration_days
+    policy_age_days = partial(duration_days, name="time_since_policy_start")
 
     assert policy_age_days({}) is None
     assert policy_age_days({"time_since_policy_start_value": None, "time_since_policy_start_unit": None}) is None
