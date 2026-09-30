@@ -865,22 +865,30 @@ def compute(facts: dict[str, Any], clauses: list[ShortlistClause]) -> Computed:
     )
 
 
-async def reason(
+def reasoning_request(
     scenario: str,
     facts: dict[str, Any],
     clauses: list[ShortlistClause],
     computed: Computed,
     *,
     nudge: str | None = None,
-    use_cache: bool = True,
-) -> dict[str, Any]:
-    ids = [c.clause_id for c in clauses]
+) -> tuple[list[dict[str, str]], dict[str, Any]]:
+    """The messages for the reasoning step, and the schema its answer must fit.
+
+    Returned as a pair because they must be built from ONE clause list: the
+    schema's `clause_id` enum is what makes a citation of a clause the model
+    was not shown unrepresentable, and that only holds if the enum and the
+    prompt list the same clauses. Anything that sends a reasoning request -
+    the pipeline, or an eval measuring it - builds it here.
+    """
+    known = {k: v for k, v in facts.items() if stated(v)}
     messages = [
         {"role": "system", "content": REASON_SYSTEM},
         {
             "role": "user",
             "content": render_reasoning_request(
-                scenario, facts, clauses,
+                scenario, known, missing_facts(facts),
+                shared_words(scenario, clauses, facts), clauses,
                 waiting.render(computed.waiting),
                 reduction.render(computed.reductions),
                 window.render(computed.windows),
@@ -892,9 +900,20 @@ async def reason(
         # the retry is a different cache key and cannot be served the very
         # response that failed.
         messages.append({"role": "user", "content": nudge})
-    return await client.complete_json(
-        messages, _reasoning_schema(ids), use_cache=use_cache,
-    )
+    return messages, _reasoning_schema([c.clause_id for c in clauses])
+
+
+async def reason(
+    scenario: str,
+    facts: dict[str, Any],
+    clauses: list[ShortlistClause],
+    computed: Computed,
+    *,
+    nudge: str | None = None,
+    use_cache: bool = True,
+) -> dict[str, Any]:
+    messages, schema = reasoning_request(scenario, facts, clauses, computed, nudge=nudge)
+    return await client.complete_json(messages, schema, use_cache=use_cache)
 
 
 CITATION_NUDGE = """Your previous answer named a clause in its reasoning but left deciding_clauses

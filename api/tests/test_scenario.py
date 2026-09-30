@@ -21,6 +21,14 @@ from app.pipeline.scenario import (
 from app.taxonomy import Verdict
 
 
+def _prompt(scenario: str, facts: dict, clauses: list) -> str:
+    """The reasoning prompt's text, built the way the pipeline builds it."""
+    from app.pipeline.scenario import Computed, reasoning_request
+
+    messages, _ = reasoning_request(scenario, facts, clauses, Computed([], [], []))
+    return messages[1]["content"]
+
+
 def test_repeated_clause_numbers_get_distinct_citation_ids():
     """Real wordings restart numbering per section; ids must still be unique.
 
@@ -208,10 +216,9 @@ def test_only_decisive_facts_are_reported_as_missing():
     assert "time_since_policy_start_value" in DECISIVE_FACTS
 
     # The prompt renderer must use the same source, not a copy of it.
-    from app.llm.prompts import render_reasoning_request
 
     facts = {k: None for k in DECISIVE_FACTS} | {"body_system": None, "notes": ""}
-    rendered = render_reasoning_request("x", facts, [])
+    rendered = _prompt("x", facts, [])
     assert "body_system" not in rendered
     assert "time_since_policy_start_value" in rendered
 
@@ -268,23 +275,21 @@ def test_notes_that_answer_the_question_are_not_shown_to_the_reasoner():
     usually restate the situation in words that help find the right clause. So
     only a note claiming coverage the person never mentioned is dropped.
     """
-    from app.llm.prompts import render_reasoning_request
 
     scenario = "Does this policy cover my car being stolen from the hospital car park?"
     facts = {"notes": "This policy does not cover car theft from the hospital car park."}
-    assert "does not cover car theft" not in render_reasoning_request(scenario, facts, [])
+    assert "does not cover car theft" not in _prompt(scenario, facts, [])
 
 
 def test_notes_repeating_the_persons_own_words_are_kept():
-    from app.llm.prompts import render_reasoning_request
 
     scenario = "The insurer told me the scan is not covered. I have held the policy two years."
     facts = {"notes": "Insurer said the scan is not covered."}
-    assert "Insurer said the scan is not covered." in render_reasoning_request(scenario, facts, [])
+    assert "Insurer said the scan is not covered." in _prompt(scenario, facts, [])
 
     # And a note with no coverage language at all is untouched.
     facts = {"notes": "Stayed in a room costing 9,000 rupees a night for surgery."}
-    assert "9,000 rupees a night" in render_reasoning_request("x", facts, [])
+    assert "9,000 rupees a night" in _prompt("x", facts, [])
 
 
 # --- 5e: the answer checked against the arithmetic --------------------------
@@ -915,10 +920,9 @@ def test_one_shared_word_or_a_common_word_is_not_enough():
 
 
 def test_shared_words_are_listed_above_the_clauses_and_drop_nothing():
-    from app.llm.prompts import render_reasoning_request
 
     question = "Ayurvedic treatment, no Quality Council accreditation."
-    rendered = render_reasoning_request(question, {}, _policy(AYUSH_TEXT, HOSPITAL_TEXT))
+    rendered = _prompt(question, {}, _policy(AYUSH_TEXT, HOSPITAL_TEXT))
     head, clauses = rendered.split("POLICY CLAUSES AVAILABLE TO YOU:")
     assert "clause 2.6" in head
     assert "1.1 Hospital means" in clauses  # every clause is still shown
@@ -1015,7 +1019,6 @@ def test_a_named_condition_word_must_still_be_rare_and_the_clause_must_decide_cl
 
 
 def test_the_named_condition_reaches_the_prompt_and_the_waiting_block():
-    from app.llm.prompts import render_reasoning_request
     from app.pipeline.scenario import ShortlistClause, compute
 
     facts = {"condition": "hernia", "time_since_policy_start_value": 14,
@@ -1024,7 +1027,7 @@ def test_the_named_condition_reaches_the_prompt_and_the_waiting_block():
                              waiting_periods_days=[720])
     clauses = [listed, *_policy(HOSPITAL_TEXT)]
 
-    rendered = render_reasoning_request("A hernia operation.", facts, clauses)
+    rendered = _prompt("A hernia operation.", facts, clauses)
     assert "clause 2.4 uses these words from the question" in rendered
     assert compute(facts, clauses).waiting[0].named == ["hernia"]
 

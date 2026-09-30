@@ -550,26 +550,22 @@ def _invents_coverage(note: str, scenario: str) -> bool:
 
 
 def render_reasoning_request(
-    scenario: str, facts: dict, clauses,
+    scenario: str, known: dict, missing: list[str],
+    shared: dict[str, list[str]], clauses,
     waiting_block: str = "", reduction_block: str = "",
     window_block: str = "",
 ) -> str:
-    """Build the reasoning prompt.
+    """Format the reasoning prompt from what the pipeline has already worked out.
 
-    The clause ids embedded here are the same ids used to build the schema's
-    `clause_id` enum, so the model can only cite something present in this
-    text. That correspondence is the grounding guarantee, and it breaks
-    silently if the two are ever built from different lists - which is why they
-    are built from one list, in one place, in `pipeline/scenario.py`.
+    Formatting only: which facts are known or missing, and which words the
+    question shares with a clause, are decided in `pipeline/scenario.py` and
+    arrive here as data. Call it through `scenario.reasoning_request`, which
+    builds this text and the schema's `clause_id` enum from one clause list -
+    the correspondence the grounding guarantee rests on.
     """
-    # Imported rather than redeclared: the model's list and the user's list are
-    # the same list. See DECISIVE_FACTS in pipeline/scenario.py for why.
-    from app.pipeline.scenario import missing_facts, shared_words, stated
-
-    known = {k: v for k, v in facts.items() if stated(v)}
+    known = dict(known)
     if isinstance(known.get("notes"), str) and _invents_coverage(known["notes"], scenario):
         del known["notes"]
-    missing = missing_facts(facts)
 
     lines = [
         "SITUATION (in the person's own words):",
@@ -603,7 +599,6 @@ def render_reasoning_request(
 
     # Last before the clauses, and silent unless something is shared: most
     # questions share no unusual words with any clause and see nothing here.
-    shared = shared_words(scenario, clauses, facts)
     if shared:
         lines += ["", "WORDS THIS QUESTION SHARES WITH A CLAUSE (a lookup, not a judgement)."]
         lines += [

@@ -45,10 +45,9 @@ sys.path.insert(0, str(REPO_ROOT / "evals"))
 
 from app.config import settings  # noqa: E402
 from app.llm import client  # noqa: E402
-from app.llm.prompts import REASON_SYSTEM, render_reasoning_request  # noqa: E402
 from app.pipeline.analyze import analyze  # noqa: E402
 from app.pipeline.ingest import ingest  # noqa: E402
-from app.pipeline.scenario import _reasoning_schema, shortlist  # noqa: E402
+from app.pipeline.scenario import Computed, reasoning_request, shortlist  # noqa: E402
 from app.pipeline.segment import segment  # noqa: E402
 
 GOLDEN_PDF = REPO_ROOT / "evals" / "golden" / "synthetic-health-policy.pdf"
@@ -69,17 +68,11 @@ def _canonical(payload: dict) -> str:
 async def check_model(clauses, repeats: int) -> bool:
     """Same messages, N times, cache bypassed."""
     considered = shortlist(clauses)
-    ids = [c.clause_id for c in considered]
-    messages = [
-        {"role": "system", "content": REASON_SYSTEM},
-        {
-            "role": "user",
-            # No waiting or reduction block: this layer is testing the decoder,
-            # so the prompt is held as simple as the real path allows.
-            "content": render_reasoning_request(SCENARIO, {}, considered, "", ""),
-        },
-    ]
-    schema = _reasoning_schema(ids)
+    # No facts and nothing computed: this layer is testing the decoder, so the
+    # prompt is held as simple as the real path allows.
+    messages, schema = reasoning_request(
+        SCENARIO, {}, considered, Computed(waiting=[], reductions=[], windows=[])
+    )
 
     outs = []
     for i in range(repeats):
@@ -134,26 +127,25 @@ async def check_sequence(clauses, cases, count: int) -> bool:
     prompt holds that predecessor fixed and hides the whole effect.
 
     This runs the first `count` real eval scenarios in order, twice, with the
-    cache bypassed, and compares pass 1 against pass 2 case by case. That is
-    exactly the operation `run_scenario_eval.py` performs, and exactly the
-    property its numbers depend on.
+    cache bypassed, and compares pass 1 against pass 2 case by case - the
+    ordering `run_scenario_eval.py` asks in.
+
+    NOT THE EVAL'S EXACT PROMPTS. Each request carries the case's words and
+    the clauses, but no extracted facts and no computed waiting-period,
+    window or reduction blocks, so it is shorter than what the eval sends.
+    Kept that way so this check's results stay comparable with its earlier
+    runs; sending the eval's real prompts is a separate, measured change.
     """
     considered = shortlist(clauses)
-    schema = _reasoning_schema([c.clause_id for c in considered])
+    nothing_computed = Computed(waiting=[], reductions=[], windows=[])
     chosen = cases[:count]
 
     async def one_pass(label: str) -> list[str]:
         out = []
         for i, case in enumerate(chosen, 1):
-            messages = [
-                {"role": "system", "content": REASON_SYSTEM},
-                {
-                    "role": "user",
-                    "content": render_reasoning_request(
-                        case["scenario"], {}, considered, "", ""
-                    ),
-                },
-            ]
+            messages, schema = reasoning_request(
+                case["scenario"], {}, considered, nothing_computed
+            )
             payload = await client.complete_json(
                 messages, schema, use_cache=False
             )
