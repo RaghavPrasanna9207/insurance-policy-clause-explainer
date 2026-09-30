@@ -263,6 +263,7 @@ The scenario endpoint and the scenario eval each built the clause list by hand, 
 - **Concept 50: a seam, and when one is real** - a parameter that lets the eval run the real pipeline on an in-memory database; why a parameter beat an environment variable (import order).
 - **Failure 79: an architecture review that overstated its evidence** - "already drifted" turned out to be a dead field and two equivalent filters; the change was still worth making, for a weaker and truer reason.
 - **Failure 80: thirty-six tests broken by a field's position** - a dataclass constructor is positional, so field order is part of its interface.
+- **Part 2: one duration rule, one meaning of "stated"** - three copies of a unit conversion and three of a "was this said" test become one each; why a `Facts` class was rejected, and a pre-existing-condition gap left open until a case shows it costs an answer.
 
 ---
 

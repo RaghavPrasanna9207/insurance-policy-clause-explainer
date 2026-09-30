@@ -9625,3 +9625,158 @@ them without an `ORDER BY`, never reaches the id assignment. That matters
 because the ids are what the model cites: if they depended on storage order,
 the same policy could give the same citation two different meanings.
 </details>
+
+---
+
+## M19, part 2: one duration rule, one meaning of "stated"
+
+### The starting position
+
+The scenario simulator's first step asks the model to read the person's
+question into a flat dictionary of facts (`FACTS_SCHEMA` in
+`api/app/pipeline/scenario.py`). Durations come back as two fields each, a
+number and a unit, because converting units is arithmetic and the project keeps
+arithmetic out of the model:
+
+```
+time_since_policy_start_value: 14      time_since_policy_start_unit: "months"
+expense_timing_value: 120              expense_timing_unit: "days"
+condition_known_for_value: 1           condition_known_for_unit: "months"
+```
+
+Python then turns each pair into days. It did that in **three functions with
+the same four lines**, differing only in which keys they read:
+
+```python
+def policy_age_days(facts):
+    value = facts.get("time_since_policy_start_value")
+    unit = facts.get("time_since_policy_start_unit")
+    if not value or value <= 0 or unit not in _DAYS_PER_UNIT:
+        return None
+    return value * _DAYS_PER_UNIT[unit]
+
+def expense_offset_days(facts): ...     # same, "expense_timing_*"
+def condition_known_days(facts): ...    # same, "condition_known_for_*"
+```
+
+A second rule was copied too: **what counts as a fact the person actually
+gave.** Three places answered it, each with its own tuple:
+
+- `run_scenario` listed the missing decisive facts: `facts.get(k) in (None, "", "unknown")`
+- the reasoning prompt listed them again the same way, and listed the known
+  facts with a *different* tuple: `v not in (None, "", [], "unknown")`
+- the scenario endpoint filtered the facts it shows the reader: `v not in (None, "", "unknown")`
+
+Three copies of a rule are three chances to change one and not the others. A
+wrong duration conversion here changes which waiting periods have been served,
+and a wrong "missing" list tells a reader the system needs information they
+already gave.
+
+### The change
+
+One conversion, parameterised by the name every duration already shares:
+
+```python
+def duration_days(facts: dict[str, Any], name: str) -> int | None:
+    value = facts.get(f"{name}_value")
+    unit = facts.get(f"{name}_unit")
+    if not value or value <= 0 or unit not in _DAYS_PER_UNIT:
+        return None
+    return value * _DAYS_PER_UNIT[unit]
+```
+
+One meaning of "stated", and the missing list built from it:
+
+```python
+def stated(value: Any) -> bool:
+    return value not in (None, "", [], "unknown")
+
+def missing_facts(facts: dict[str, Any]) -> list[str]:
+    return [k for k in DECISIVE_FACTS if not stated(facts.get(k))]
+```
+
+`run_scenario` and the prompt call `missing_facts`; the prompt and the
+endpoint call `stated`. The tuples differed only by `[]`. No extracted fact
+is ever a list (the facts schema contains no arrays), so the merge changes
+nothing, and the byte-for-byte check below confirms it.
+
+### What was considered and rejected
+
+A **`Facts` class** (a value object wrapping the dictionary, with the derived
+numbers as properties) was the first idea. It fails the deletion test
+(Concept 49). Most readers of the facts need raw keys:
+
+- the reduction check reads `sum_insured_value`, `room_is_icu` and `age`
+- the prompt prints every stated fact
+- the endpoint returns the dictionary
+- the eval compares it against an answer key
+
+So each of them would reach through the class to the dictionary inside it. A
+class that its callers have to see through is not hiding anything.
+
+A **typed class with one field per fact** was rejected faster. It would be a
+21-field list maintained by hand beside `FACTS_SCHEMA`, which is exactly the
+kind of parallel list the first half of M19 removed.
+
+### A known gap, deliberately left open
+
+The architecture review that proposed this change also pointed at a
+behaviour. `derive_pre_existing` can settle, by comparing two durations, that
+a condition began *after* the policy did. But the waiting-period check never
+receives that answer. Its line for a pre-existing-diseases clause still says:
+
+```
+concerns ONLY an illness the person already had when the policy began.
+Unless the description says this one had begun by then, it is not the
+reason for this claim.
+```
+
+This is true but hedged, when code already knows the answer. Passing the
+derived fact into `waiting.evaluate` would change the prompt, and a prompt
+change in this project has to be measured, not assumed. Before building it,
+the latest scenario report was checked for a wrong answer this could explain.
+None of the six verdict misses is one. The only pre-existing-condition miss,
+`ped-waiting-served`, is a condition that *was* pre-existing, answered by
+citing the cosmetic-surgery exclusion. So the change was not made. It becomes
+worth making when a case shows the hedge costing an answer.
+
+### How it was verified
+
+A refactor that promises "no behaviour change" should be checked on the
+behaviour, not just the tests:
+
+1. **Before any edit**, the reasoning prompt was rendered for every scenario
+   case: the 40 main cases and both held-out batches, 69 in all. The script
+   used the real facts extracted for each case and the real computed
+   waiting-period, reduction and window blocks. It saved each prompt with its
+   missing-facts list.
+2. **After the edit**, the same script ran again.
+3. The two files were **byte-for-byte identical**. The second run made zero
+   model calls, so the facts were the same stored answers both times.
+
+The whole non-model test suite passes (265). The existing tests of the
+policy-age conversion now call `duration_days` through
+`partial(duration_days, name="time_since_policy_start")`, so their assertions
+did not change.
+
+### Check it yourself
+
+```bash
+cd api
+.venv/Scripts/python -m pytest tests/test_scenario.py -q -k "policy_age or pre_existing or not_stated"
+```
+
+**Predict before you look:** `duration_days({"expense_timing_value": 0,
+"expense_timing_unit": "days"}, "expense_timing")` — is the answer `0` or
+`None`, and why does the difference matter for a waiting period?
+
+<details>
+<summary>Answer</summary>
+
+`None`. A value of zero is treated as unstated (`not value` is true for 0).
+For the policy's age this is deliberate: nobody claims on a policy held for
+zero days, so a 0 is far more likely to be the model filling a slot than the
+person saying it. And a `None` makes every waiting period come back UNKNOWN,
+which can lead to an honest "insufficient information". A 0 would mark every
+waiting period as not served and refuse the claim on a number nobody said.
+</details>
