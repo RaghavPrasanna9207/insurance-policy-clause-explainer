@@ -256,6 +256,14 @@ Five things wrong on screen that no eval in the repository could see, found by u
 - **Failure 78: four prompts to add one field, and what each one broke** - an example about hernias cost an age; a denial naming two fields caused a subtraction between them. Includes the stale answer key: four "regressions" that were already failing on `main`.
 - **Concept 48: a prompt is not a list of independent rules** - adding an instruction for one field competes for attention with every other field, and the fields it damages are the ones nothing warned you to look at.
 
+### M19 - One clause list, built in one place
+The scenario endpoint and the scenario eval each built the clause list by hand, seventeen fields apiece; now one function builds it for both, and the eval goes through the database the way an upload does.
+
+- **Concept 49: a deep module, and the deletion test** - a small interface over a lot of behaviour; imagine deleting the module and see whether complexity vanishes or reappears in every caller.
+- **Concept 50: a seam, and when one is real** - a parameter that lets the eval run the real pipeline on an in-memory database; why a parameter beat an environment variable (import order).
+- **Failure 79: an architecture review that overstated its evidence** - "already drifted" turned out to be a dead field and two equivalent filters; the change was still worth making, for a weaker and truer reason.
+- **Failure 80: thirty-six tests broken by a field's position** - a dataclass constructor is positional, so field order is part of its interface.
+
 ---
 
 ## Related documents

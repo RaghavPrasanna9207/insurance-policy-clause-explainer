@@ -9326,3 +9326,302 @@ be stitched from scattered phrases. The elision remains visible in the quotation
 the reader is shown, which is the honest place for the meaning question to be
 settled.
 </details>
+
+---
+
+# M19 — One clause list, built in one place
+
+## The starting position
+
+Stage 5, the scenario simulator, reasons over a list of `ShortlistClause`
+objects: one per analysed clause, carrying the clause's text, its type, its
+impact score, and the structured numbers extracted at analysis time (waiting
+periods in days, co-pay percentage, room-rent caps, cover windows). Two
+different pieces of code built that list:
+
+- **The scenario endpoint**, `api/app/routers/scenarios.py`, read clauses and
+  their analyses from SQLite and copied them into `ShortlistClause` one field
+  at a time, decoding the JSON columns on the way:
+
+  ```python
+  ShortlistClause(
+      clause_id=citation_id,
+      ref=clause.id,
+      number=clause.number,
+      clause_type=analysis.clause_type,
+      text=clause.text,
+      impact_score=analysis.impact_score,
+      waiting_periods_days=json.loads(analysis.waiting_periods_json or "[]"),
+      exceptions=json.loads(analysis.exceptions_json or "[]"),
+      copay_percent=analysis.copay_percent,
+      # ... eight more fields ...
+  )
+  ```
+
+- **The scenario eval**, `evals/run_scenario_eval.py` (`build_clauses`), ran the
+  four pipeline stages in memory and copied the *in-memory* analysis objects
+  into `ShortlistClause`, field by field, the same seventeen fields again.
+
+Both built the same object from different sources, and nothing checked that
+they agreed. Every time a field was added to the analysis (the co-pay age, the
+ICU caps, the cover window all arrived this way) someone had to remember to add
+it in both places. Forget the eval's copy, and the eval quietly measures a
+system that differs from the one users get: the endpoint would reason with
+the new field and the eval without it, and the eval's numbers would describe
+neither.
+
+This had already gone wrong once in a smaller way. The citation ids (the
+policy's own clause numbers, made unique: `"10"`, `"10#2"`) used to be computed
+separately too, and the two computations disagreed on repeated numbers. That
+was fixed by pulling one function, `citation_ids`, out of both. The rest of
+the constructor was never given the same treatment.
+
+## Concept 49: a deep module, and the deletion test
+
+A **module** here means anything with an interface and an implementation. That
+could be a function, a class or a file. Its **interface** is everything a
+caller has to know to use it correctly: the arguments, and also the ordering
+rules, the error cases and the assumptions it makes.
+
+A module is **deep** when a lot of behaviour sits behind a small interface.
+It is **shallow** when the interface is nearly as complicated as what is
+behind it. A shallow module moves complexity around. A deep one absorbs it.
+
+The seventeen-field constructor calls were the opposite of deep. Each caller
+had to know every field, where it lived in its source, and which ones needed
+JSON decoding. The knowledge was spread across every place that built the list.
+
+The **deletion test** is a quick way to tell the two apart. Imagine deleting
+the module. If complexity disappears, it was a pass-through and the deletion is
+an improvement. If complexity reappears in every caller, the module was earning
+its keep. Apply it to the new function below: delete `load_clauses` and the
+sorting, the filtering, the id assignment and all seventeen fields come back in
+the endpoint *and* in the eval. That is a module worth having.
+
+## The change
+
+One function, `load_clauses`, in `api/app/pipeline/run.py`, next to the query
+it builds on:
+
+```python
+def load_clauses(session: Session, doc_id: str) -> list[ShortlistClause]:
+    """Every analysed clause of a document, as the scenario step receives it."""
+    rows = sorted(
+        ((c, a) for c, a in clause_rows(session, doc_id) if a is not None),
+        key=lambda row: row[0].order_idx,
+    )
+    ids = citation_ids([(clause.number, clause.order_idx) for clause, _ in rows])
+    return [ShortlistClause(clause_id=citation_id, db_id=clause.id, ...)
+            for (clause, analysis), citation_id in zip(rows, ids)]
+```
+
+It owns four jobs that used to be spread across both callers:
+
+1. sorting into document order (the query has no `ORDER BY`)
+2. leaving out clauses the model failed on
+3. assigning citation ids
+4. decoding the JSON columns
+
+The endpoint shrank to one call, plus the HTTP errors that are genuinely its
+own job (404 for no such document, 409 for an unfinished one or one with
+nothing analysed).
+
+**The eval now goes through the database too.** `build_clauses` runs the real
+`process_document`, the same function an upload triggers, against an
+in-memory SQLite database, then reads the clauses back with `load_clauses`:
+
+```python
+engine = create_engine("sqlite://", poolclass=StaticPool)
+SQLModel.metadata.create_all(engine)
+# ... add a Document row ...
+await process_document(doc_id, str(pdf), engine=engine)
+with Session(engine) as session:
+    ...
+    return load_clauses(session, doc_id)
+```
+
+The eval now covers the save-and-read-back as well, which it never did before.
+A field that is saved wrong, or decoded wrong, shows up in the eval's numbers.
+`StaticPool` makes every connection share one in-memory database. Without
+it, each new connection to `sqlite://` would get a fresh, empty database.
+
+`process_document` never raises: in the app it runs as a background task with
+nobody waiting, so it records a failure on the document row instead. In the
+eval somebody *is* waiting, so `build_clauses` checks the row's status and
+raises with the recorded error if the pipeline failed.
+
+**Two smaller changes came with it:**
+
+- **`ref` was dead.** It was a field on `ShortlistClause` that nothing in the
+  repository ever read. The eval filled it with something different from the
+  endpoint (`"synthetic-health-policy:12"` versus a database id), which looked
+  like drift but harmed nothing. It is now `db_id` and is actually used.
+- **The endpoint's `meta` dict went away.** It had built a separate lookup of
+  `(db id, number, heading, page)` per citation id, to map the model's
+  citations back to rows for display. `ShortlistClause` now carries `heading`
+  and a 1-based `page` itself, so the endpoint looks citations up in the list
+  it already has.
+
+## Concept 50: a seam, and when one is real
+
+A **seam** is a place where behaviour can change without editing the code at
+that place. The `engine` parameter on `process_document` is one:
+
+```python
+async def process_document(
+    doc_id: str, pdf_path: str, engine: Engine = engine
+) -> None:
+```
+
+The upload endpoint passes nothing and gets the app's database. The eval
+passes an in-memory one. Nothing inside `process_document` knows which one it
+has.
+
+A useful rule: **one implementation behind a seam is a hypothetical seam; two
+is a real one.** A parameter that only ever receives one value is indirection
+with no payoff. This one has two real callers passing two different
+databases, so it earns its place.
+
+### Why a parameter, and not an environment variable
+
+The test suite already points the app at a throwaway database by setting
+`DB_PATH` in `api/tests/conftest.py` before anything imports the app. The
+same trick was considered for the eval and rejected, because of import order.
+The app reads its settings **once, when `app.config` is first imported**, and
+creates the database engine when `app.db` is first imported. Two of the eval
+scripts, `evals/check_determinism.py` and `evals/real/measure_prompt.py`,
+import app code *before* they import `run_scenario_eval`. By the time
+`build_clauses` could set `DB_PATH`, the setting would already be read, and the
+eval would silently write its test policy into the developer's real
+`data/app.db`. A parameter has no import order.
+
+## A reversed decision
+
+The top of `api/app/pipeline/run.py` used to promise the opposite:
+
+> none of them knows the database exists. That is what lets the eval harness
+> run the identical pipeline with no web server and no database at all.
+
+The first half is still true: `ingest`, `segment`, `analyze` and `score` are
+still pure functions of their inputs, and still usable without a database. The
+second half is deliberately reversed. Running the stages without a database
+meant the eval had to build its clause list by hand, and that hand-built copy
+was exactly the problem. The docstring now says why the eval goes through the
+database on purpose.
+
+## Failure 79: an architecture review that overstated its evidence
+
+This change started from an automated architecture review of the repository.
+The review reported that the endpoint and the eval had **"already drifted"**,
+citing two differences:
+
+- the `ref` values differed
+- the endpoint kept clauses where `analysis is not None`, while the eval
+  kept clauses present in both `analyses` and `scored`
+
+Reading the code before changing it showed that neither was a live bug:
+
+- **`ref` was never read**, so its two values could not disagree about anything.
+- **The filters are equivalent.** The pipeline only saves an analysis row
+  when the clause has *both* an analysis and a score:
+
+  ```python
+  analysis = analyses.get(key)
+  sc = scored.get(key)
+  if analysis is None or sc is None:
+      continue
+  ```
+
+  So "has an analysis row" in the database means exactly "in `analyses` and in
+  `scored`" in memory.
+
+The honest case for the change was weaker and still sufficient. There was no
+bug yet. There was a structure that made the next bug easy, and one fix of the
+same shape (`citation_ids`) already on record. **A refactor's justification
+should be checked against the code before it is acted on**, including when the
+justification comes from a tool.
+
+## Failure 80: thirty-six tests broken by a field's position
+
+The first version put the new fields (`db_id`, `heading`, `page`) together
+where `ref` had been, all three required. The loader's own test passed, and
+the full suite then failed 36 tests with one error:
+
+```
+TypeError: ShortlistClause.__init__() missing 2 required positional arguments: 'text' and 'impact_score'
+```
+
+Many tests in `api/tests/test_scenario.py` build clauses positionally:
+
+```python
+ShortlistClause("2.4", "t:1", "2.4", "coverage", DAY_CARE_TEXT, 1.0)
+```
+
+That is `clause_id, ref, number, clause_type, text, impact_score`. Inserting
+two required fields after the second position shifted every argument after it
+by two, so `"coverage"` landed in `heading` and the call ran out of
+arguments. A dataclass's constructor is positional by default, so **field
+order is part of its interface**.
+
+The fix kept the interface where callers already stood. `db_id` took `ref`'s
+place as the second field, so the positional `"t:1"` now means a database id,
+which is what it had always stood for. `heading` and `page` moved to the end,
+with defaults (`""` and `0`), alongside the other optional fields.
+
+## How it was verified
+
+The test suite only covers pieces of this change. So the change was also
+checked end to end, against the real golden policy:
+
+1. **Before touching any code**, the old `build_clauses` was run and its output
+   saved as JSON. The fields that were being renamed or added were left out.
+2. **After the change**, the new `build_clauses` was run the same way.
+3. The two files were compared **byte for byte: identical**. All 40 clauses
+   had the same values in the same order. The second run made zero model calls
+   (every analysis came from the cache), so any difference would have been the
+   code's, not the model's.
+
+Also checked: no `data/app.db` was created by the eval run, and the whole
+non-model test suite passes (265 tests).
+
+A new test, `api/tests/test_load_clauses.py`, seeds an in-memory database and
+pins what the loader promises:
+
+- clauses come back in document order even when inserted out of order
+- a repeated clause number becomes `"10#2"`
+- a clause the model failed on is left out
+- the JSON columns come back as lists
+- pages are 1-based
+
+## What is still not covered
+
+The endpoint's success path (calling `run_scenario`, then mapping citations
+back to rows and saving the `ScenarioRun`) still only runs under the live
+model test. That test is skipped by `-m "not llm"`. The loader made that path
+much smaller, but testing it without a model would need a way to substitute
+the model in `run_scenario`, which is separate work.
+
+## Check it yourself
+
+```bash
+cd api
+.venv/Scripts/python -m pytest tests/test_load_clauses.py -v
+.venv/Scripts/python -m pytest -q -m "not llm"
+```
+
+**Predict before you look:** in `tests/test_load_clauses.py`, the clauses are
+added to the database in the order 2, 1, 0, and clause 2 has no analysis.
+Clauses 0 and 1 are both numbered `"10"`. Which clause gets `"10"` and which
+gets `"10#2"`, and why can't the answer depend on the insert order?
+
+<details>
+<summary>Answer</summary>
+
+Clause 0 gets `"10"` and clause 1 gets `"10#2"`. `load_clauses` sorts by
+`order_idx`, the clause's position in the document, before assigning ids, and
+`citation_ids` gives the unsuffixed number to the first occurrence in document
+order. The order rows were inserted in, or the order SQLite happens to return
+them without an `ORDER BY`, never reaches the id assignment. That matters
+because the ids are what the model cites: if they depended on storage order,
+the same policy could give the same citation two different meanings.
+</details>
