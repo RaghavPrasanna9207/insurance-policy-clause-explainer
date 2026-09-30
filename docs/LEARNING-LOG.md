@@ -9780,3 +9780,174 @@ person saying it. And a `None` makes every waiting period come back UNKNOWN,
 which can lead to an honest "insufficient information". A 0 would mark every
 waiting period as not served and refuse the claim on a number nobody said.
 </details>
+
+---
+
+# M20 — The reasoning request, built in one place
+
+## The starting position
+
+The scenario simulator's reasoning step sends the model two things:
+
+- **the messages**: a system prompt, then a user prompt listing the
+  situation, the facts, the computed blocks and every clause under its id
+  (`### clause_id=4.1 ...`)
+- **the schema** the answer must fit, where the `clause_id` field is an
+  `enum` of exactly those ids
+
+That pairing is the project's central grounding mechanism. Ollama enforces
+the enum while decoding, so a citation of a clause that is not in the prompt
+cannot be generated at all (see the entries on constrained decoding). **But
+this only holds if the prompt and the enum are built from the same clause
+list.** Build them from two lists and the guarantee quietly lapses.
+
+Inside the app they were built together, in `reason()` in
+`api/app/pipeline/scenario.py`. Two problems sat around it:
+
+1. **Code outside `reason()` rebuilt the pair by hand.** `evals/check_determinism.py`
+   imported the private `_reasoning_schema` and the prompt renderer
+   separately, in two places, and assembled its own messages.
+2. **The prompt module imported from the pipeline that imports it.**
+   `render_reasoning_request` in `api/app/llm/prompts.py` did its own lookups
+   (which facts are stated, which are missing, which words the question
+   shares with a clause) by importing them from `scenario.py`, inside the
+   function body:
+
+   ```python
+   from app.pipeline.scenario import missing_facts, shared_words, stated
+   ```
+
+## Concept 51: a circular import, and why it was hidden inside a function
+
+Python runs a module's top-level code the first time it is imported, and
+the module's names only exist once that run finishes. `scenario.py` imports
+`prompts.py` at the top. If `prompts.py` also imported `scenario.py` at the
+top, loading either one would start loading the other before the first had
+finished. One of them would then look for a name that doesn't exist yet,
+and fail with `ImportError: cannot import name ... (most likely due to a
+circular import)`.
+
+Putting the import **inside the function** avoids the crash, because it only
+runs when the function is called, and by then both modules have finished
+loading. So it works. But it is a sign of a design problem rather than a
+fix. The two modules depend on each other, so neither can be understood,
+changed or tested on its own. Here the cause was that the prompt module was
+doing two jobs: formatting text, and deciding things (what counts as
+stated, which clauses share words) that belong to the pipeline.
+
+## The change
+
+**One public function returns the pair.** It lives in `scenario.py`:
+
+```python
+def reasoning_request(scenario, facts, clauses, computed, *, nudge=None):
+    """The messages for the reasoning step, and the schema its answer must fit."""
+    known = {k: v for k, v in facts.items() if stated(v)}
+    messages = [
+        {"role": "system", "content": REASON_SYSTEM},
+        {"role": "user", "content": render_reasoning_request(
+            scenario, known, missing_facts(facts),
+            shared_words(scenario, clauses, facts), clauses,
+            waiting.render(computed.waiting), ...)},
+    ]
+    if nudge:
+        messages.append({"role": "user", "content": nudge})
+    return messages, _reasoning_schema([c.clause_id for c in clauses])
+```
+
+`reason()` shrank to building that pair and sending it:
+
+```python
+messages, schema = reasoning_request(scenario, facts, clauses, computed, nudge=nudge)
+return await client.complete_json(messages, schema, use_cache=use_cache)
+```
+
+**The prompt module only formats.** `render_reasoning_request` now takes the
+known facts, the missing list and the shared words as arguments. The
+decisions are made in `scenario.py` and arrive as data. `prompts.py` imports
+nothing from the pipeline, so the cycle is gone rather than hidden.
+
+**The evals and tests call the same function.** `check_determinism.py`
+builds its requests through `reasoning_request` and no longer imports the
+private `_reasoning_schema`. Six tests that checked the prompt text by
+calling the renderer directly now go through a small helper that calls
+`reasoning_request`, which is the interface the pipeline uses.
+
+## Failure 81: a docstring that said the check measured what the eval sends
+
+While moving `check_determinism.py` onto the new function, one of its
+docstrings turned out to be wrong. The **sequence check** runs the first few
+eval questions in order, twice, and compares the answers. Its docstring
+said:
+
+> That is exactly the operation `run_scenario_eval.py` performs, and exactly
+> the property its numbers depend on.
+
+The requests it built looked like this:
+
+```python
+render_reasoning_request(case["scenario"], {}, considered, "", "")
+```
+
+Empty facts and empty computed blocks: no waiting-period, window or
+reduction lines, and no list of what the person did not state. The eval's
+real prompts carry all of those. So the check measured whether *shorter*
+prompts were stable, and the docstring claimed it measured the eval's.
+
+This is the same kind of problem as the rest of M19 and M20: a second copy
+that drifted from the first while its description stayed the same. Nothing
+tested it, because a docstring cannot fail.
+
+**What was done, and what was not.** The check now builds its requests with
+`reasoning_request`, passing empty facts and an empty `Computed`. That
+reproduces the old prompts exactly, and the docstring now says plainly that
+these are not the eval's prompts. Making the check send the eval's real
+prompts was deliberately left for later. It changes *what is measured*, so
+its results would stop being comparable with earlier runs, and it needs a
+live run to set a new baseline. Changing how code is built and changing
+what an eval measures belong in separate steps, so that each can be checked
+on its own.
+
+## How it was verified
+
+The model call was intercepted, so nothing was sent to Ollama, and every
+request the code *would* send was recorded:
+
+- for each of the 69 scenario cases (the main set and both held-out
+  batches): the reasoning request, with and without a retry nudge (138
+  requests)
+- both determinism checks: the single-prompt model check and the sequence
+  check over three cases, two passes (7 requests)
+
+That recording was made once before the change and once after. The two
+were **byte-for-byte identical**: every system prompt, user prompt and schema.
+The whole non-model test suite passes (265).
+
+## Check it yourself
+
+```bash
+grep -n "app.pipeline" api/app/llm/prompts.py     # prints nothing: no cycle
+cd api && .venv/Scripts/python -m pytest tests/test_scenario.py -q
+```
+
+**Predict before you look:** suppose someone later adds a clause filter
+*after* the prompt is rendered but *before* the schema is built. For
+example, dropping definitions from the enum because "nobody cites a
+definition". What becomes possible that was impossible before, and which
+check would still catch it?
+
+<details>
+<summary>Answer</summary>
+
+The prompt would show clauses the enum no longer allows. The model could
+still *read* a definition, but could no longer cite it, so an answer that
+rests on one would be pushed to cite something else. The reverse filter is
+worse. An enum listing clauses the prompt doesn't show lets the model cite
+a clause it was never given, which is the exact failure the enum exists to
+prevent. In that case the verbatim quote check (`app/grounding.py`) is the
+remaining defence: a quote from a clause the model never saw will almost
+never match its stored text, so the answer is flagged unverified rather
+than shown as fact. That is why the pair is built in one function. The
+second check should not have to catch what the first was supposed to make
+impossible.
+</details>

@@ -265,6 +265,12 @@ The scenario endpoint and the scenario eval each built the clause list by hand, 
 - **Failure 80: thirty-six tests broken by a field's position** - a dataclass constructor is positional, so field order is part of its interface.
 - **Part 2: one duration rule, one meaning of "stated"** - three copies of a unit conversion and three of a "was this said" test become one each; why a `Facts` class was rejected, and a pre-existing-condition gap left open until a case shows it costs an answer.
 
+### M20 - The reasoning request, built in one place
+The prompt and the schema's clause-id enum must be built from one clause list or the grounding guarantee lapses; one function now returns both, for the pipeline, the evals and the tests.
+
+- **Concept 51: a circular import, and why it was hidden inside a function** - how Python loads modules, why an import inside a function avoids the crash, and why that is a design problem rather than a fix.
+- **Failure 81: a docstring that said the check measured what the eval sends** - the determinism check's "exactly the operation the eval performs" sent prompts with no facts and no computed blocks; corrected, with the real-prompt version left as its own measured change.
+
 ---
 
 ## Related documents
