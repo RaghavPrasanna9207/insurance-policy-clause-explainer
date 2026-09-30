@@ -35,7 +35,7 @@ def _clause(number: str, impact: float, text: str = "x" * 200,
             clause_type: str = "exclusion") -> ShortlistClause:
     return ShortlistClause(
         clause_id=number,
-        ref=f"doc:{number}",
+        db_id=f"doc:{number}",
         number=number,
         clause_type=clause_type,
         text=text,

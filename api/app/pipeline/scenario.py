@@ -158,7 +158,7 @@ class ShortlistClause:
     """
 
     clause_id: str  # the policy's clause number where it has one
-    ref: str  # the database id, for mapping the answer back
+    db_id: str  # the database row a citation of this clause maps back to
     number: str
     clause_type: str
     text: str
@@ -184,6 +184,9 @@ class ShortlistClause:
     # The section this clause was segmented under. Used to tell whether an
     # annexure another clause refers to is part of the document at all.
     section_path: str = ""
+    # What the reader is shown for a citation of this clause.
+    heading: str = ""
+    page: int = 0  # 1-based; 0 only where no page is known
 
 
 def citation_ids(numbered: list[tuple[str, int]]) -> list[str]:
