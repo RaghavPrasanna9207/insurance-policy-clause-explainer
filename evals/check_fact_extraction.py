@@ -110,6 +110,21 @@ SENTENCES = [
     ("heldout", "migraines-new", "The migraines are new - I never suffered from them until last year. I have held the policy for six years.", expect(6, "years", pre_existing_condition="no")),
     ("tuned", "ho-knee-replacement", "I needed a knee replacement thirty months after my policy began. The knee trouble only started after I took the policy out.", expect(30, "months", pre_existing_condition="no")),
     ("tuned", "ho-kidney-stone", "I am 66 and have held this policy for two years. I was admitted for a kidney stone, which I never had before taking the policy.", expect(2, "years", age=66, pre_existing_condition="no")),
+    # WHEN THE CONDITION WAS FOUND, as a duration. These need no judgement from
+    # the model at all: it reports two durations and code compares them. The
+    # first is the sentence that exposed the gap - asked on Star Health, it came
+    # back "unknown" and the interface then said it would need to know whether
+    # the condition was pre-existing, about a description that dates it twice.
+    ("heldout", "hernia-found-last-month", "I need surgery for an inguinal hernia that was found last month. I bought this policy 14 months ago and it is my first health insurance.", expect(14, "months", condition_known_for_value=1, condition_known_for_unit="months", pre_existing_condition="no")),
+    ("heldout", "diabetes-longer-than-policy", "I was diagnosed with diabetes three years ago and have held this policy for eight months.", expect(8, "months", condition_known_for_value=3, condition_known_for_unit="years", pre_existing_condition="yes")),
+    ("heldout", "lump-six-weeks", "A lump was found six weeks ago. My cover started two years ago.", expect(2, "years", condition_known_for_value=6, condition_known_for_unit="weeks", pre_existing_condition="no")),
+    # Only one duration, so there is nothing to compare and the answer must stay
+    # unknown. A comparison that fires on one number is inventing the other.
+    ("heldout", "condition-dated-policy-not", "I have had this shoulder pain for four months and now need surgery.", expect(condition_known_for_value=4, condition_known_for_unit="months", pre_existing_condition="unknown")),
+    ("heldout", "policy-dated-condition-not", "I have held this policy for three years and I need gallbladder surgery.", expect(3, "years", condition_known_for_value=None, condition_known_for_unit=None, pre_existing_condition="unknown")),
+    # A condition dated from the HOSPITAL STAY, not from its own onset: the new
+    # field must not swallow the expense-timing one.
+    ("heldout", "scan-after-discharge", "I had a scan 120 days after I was discharged.", expect(condition_known_for_value=None, condition_known_for_unit=None)),
 ]
 
 

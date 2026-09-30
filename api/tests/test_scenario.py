@@ -6,6 +6,8 @@ pinned down exactly. What the model *decides* is measured by
 evals check how well.
 """
 
+from functools import partial
+
 import pytest
 
 from app.pipeline.scenario import (
@@ -35,7 +37,7 @@ def _clause(number: str, impact: float, text: str = "x" * 200,
             clause_type: str = "exclusion") -> ShortlistClause:
     return ShortlistClause(
         clause_id=number,
-        ref=f"doc:{number}",
+        db_id=f"doc:{number}",
         number=number,
         clause_type=clause_type,
         text=text,
@@ -226,7 +228,8 @@ def test_policy_age_keeps_its_unit():
     read as 30 months). Fixing one operand of a comparison and leaving the
     other is not fixing the comparison.
     """
-    from app.pipeline.scenario import policy_age_days
+    from app.pipeline.scenario import duration_days
+    policy_age_days = partial(duration_days, name="time_since_policy_start")
 
     assert policy_age_days({"time_since_policy_start_value": 2, "time_since_policy_start_unit": "weeks"}) == 14
     assert policy_age_days({"time_since_policy_start_value": 2, "time_since_policy_start_unit": "months"}) == 60
@@ -243,7 +246,8 @@ def test_unstated_policy_age_stays_none():
     Every waiting period then evaluates to UNKNOWN, which is what allows an
     honest insufficient_information rather than a verdict built on a guess.
     """
-    from app.pipeline.scenario import policy_age_days
+    from app.pipeline.scenario import duration_days
+    policy_age_days = partial(duration_days, name="time_since_policy_start")
 
     assert policy_age_days({}) is None
     assert policy_age_days({"time_since_policy_start_value": None, "time_since_policy_start_unit": None}) is None
@@ -1023,3 +1027,60 @@ def test_the_named_condition_reaches_the_prompt_and_the_waiting_block():
     rendered = render_reasoning_request("A hernia operation.", facts, clauses)
     assert "clause 2.4 uses these words from the question" in rendered
     assert compute(facts, clauses).waiting[0].named == ["hernia"]
+
+
+# --- whether a condition predates the policy -------------------------------
+
+
+def _timed(known=None, known_unit=None, held=None, held_unit=None, ped="unknown"):
+    return {
+        "condition_known_for_value": known, "condition_known_for_unit": known_unit,
+        "time_since_policy_start_value": held, "time_since_policy_start_unit": held_unit,
+        "pre_existing_condition": ped,
+    }
+
+
+def test_a_condition_found_after_cover_began_is_not_pre_existing():
+    """Star Health, asked about an inguinal hernia: "found last month ... I bought
+    this policy 14 months ago" came back "unknown", and the interface then told
+    the reader it would need to know whether the condition was pre-existing -
+    about a description that dates it twice. One month against fourteen is a
+    subtraction, and subtraction is not the model's job anywhere in this
+    pipeline."""
+    from app.pipeline.scenario import derive_pre_existing
+
+    facts = derive_pre_existing(_timed(1, "months", 14, "months"))
+    assert facts["pre_existing_condition"] == "no"
+
+
+def test_a_condition_older_than_the_policy_is_pre_existing():
+    from app.pipeline.scenario import derive_pre_existing
+
+    facts = derive_pre_existing(_timed(3, "years", 8, "months"))
+    assert facts["pre_existing_condition"] == "yes"
+
+
+def test_units_are_compared_in_days_not_as_numbers():
+    """3 weeks against 2 months: the larger number is the shorter time."""
+    from app.pipeline.scenario import derive_pre_existing
+
+    assert derive_pre_existing(_timed(3, "weeks", 2, "months"))["pre_existing_condition"] == "no"
+
+
+def test_one_duration_alone_decides_nothing():
+    """A comparison needs both sides. Filling in the missing one is exactly the
+    invention the extraction prompt spends its length forbidding."""
+    from app.pipeline.scenario import derive_pre_existing
+
+    assert derive_pre_existing(_timed(4, "months"))["pre_existing_condition"] == "unknown"
+    assert derive_pre_existing(_timed(held=3, held_unit="years"))["pre_existing_condition"] == "unknown"
+    assert derive_pre_existing(_timed())["pre_existing_condition"] == "unknown"
+
+
+def test_what_the_person_said_outright_is_never_overruled():
+    """A wrong "yes" denies a claim that should be paid and a wrong "no" pays one
+    that should not, so the comparison only ever fills in a declined answer."""
+    from app.pipeline.scenario import derive_pre_existing
+
+    assert derive_pre_existing(_timed(1, "months", 14, "months", ped="yes"))["pre_existing_condition"] == "yes"
+    assert derive_pre_existing(_timed(3, "years", 8, "months", ped="no"))["pre_existing_condition"] == "no"

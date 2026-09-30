@@ -39,7 +39,7 @@ coverage, it just happens to be describing its ceiling.
 from app.grounding import normalize
 from app.taxonomy import ClauseType
 
-PROMPT_VERSION = "v44-picked-clauses-covered-means-in-full"
+PROMPT_VERSION = "v49-condition-known-for"
 
 CLASSIFY_SYSTEM = """\
 You are an expert on Indian (IRDAI-regulated) health insurance policy wordings.
@@ -310,6 +310,29 @@ of time with a unit, it is null.
 NEVER convert between units. "Two weeks" is 2 + weeks, not 2 + months and
 not 14 + days. Report the number and the word the person actually used;
 converting is done afterwards, in code.
+
+HOW LONG THE CONDITION HAS BEEN KNOWN: a value and a unit, exactly like the
+durations above. This counts from when the condition was found, diagnosed,
+noticed or first suffered - NOT from when the policy began, and not from a
+hospital stay. Report it whenever the person dates the condition at all, even
+if they say nothing about whether it is pre-existing.
+
+- "a hernia that was found last month"        -> condition_known_for_value: 1, condition_known_for_unit: months
+- "diagnosed with diabetes three years ago"   -> 3, years
+- "I've had this knee trouble for six weeks"  -> 6, weeks
+- "I have had asthma since childhood" (no number) -> null, null
+- nothing said about when the condition began -> null, null
+
+This field never takes a number away from another field, and never creates one.
+Time measured from the POLICY still goes in time_since_policy_start, time
+measured from a HOSPITAL STAY is not this field either, and no field anywhere in
+this schema is ever filled by subtracting one number in the sentence from
+another - if it was not said, it is null:
+
+- "hospitalised for it 5 years after taking the policy out"
+     -> time_since_policy_start_value: 5, unit: years; condition_known_for: null, null
+- "I was admitted with pneumonia last month"
+     -> condition_known_for: null, null (this dates the admission, not the condition)
 TWO DIFFERENT AGES, AND THEY ARE NOT INTERCHANGEABLE.
 `age` is how old the person is NOW. `age_at_policy_start` is how old they were
 when the policy began. A senior-citizen co-payment keys on the second one, so
@@ -539,14 +562,14 @@ def render_reasoning_request(
     silently if the two are ever built from different lists - which is why they
     are built from one list, in one place, in `pipeline/scenario.py`.
     """
-    known = {k: v for k, v in facts.items() if v not in (None, "", [], "unknown")}
-    if isinstance(known.get("notes"), str) and _invents_coverage(known["notes"], scenario):
-        del known["notes"]
     # Imported rather than redeclared: the model's list and the user's list are
     # the same list. See DECISIVE_FACTS in pipeline/scenario.py for why.
-    from app.pipeline.scenario import DECISIVE_FACTS, shared_words
+    from app.pipeline.scenario import missing_facts, shared_words, stated
 
-    missing = [k for k in DECISIVE_FACTS if facts.get(k) in (None, "", "unknown")]
+    known = {k: v for k, v in facts.items() if stated(v)}
+    if isinstance(known.get("notes"), str) and _invents_coverage(known["notes"], scenario):
+        del known["notes"]
+    missing = missing_facts(facts)
 
     lines = [
         "SITUATION (in the person's own words):",

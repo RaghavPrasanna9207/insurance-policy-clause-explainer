@@ -8214,3 +8214,1569 @@ An honest report either regenerates everything, which is what the key forces,
 or says which runtime answered each case. The note printed when a comparison
 spans two versions is the second half of that.
 </details>
+
+---
+
+# M18 — The first thing a user sees
+
+## The starting position
+
+Every milestone up to this point was measured through an eval harness: a JSON
+answer key, a score, a report. That is the right way to know whether a change
+helped, and it has one blind spot. **A number in a report is not the thing the
+user looks at.** The eval scores verdicts and citations; it never renders the
+dashboard, never reads a clause card, and never sees the sentence printed under
+an answer.
+
+So the app was opened and driven end to end, by hand, on a real wording: Star
+Health's Arogya Sanjeevani, uploaded through the interface the way a user would,
+then asked real questions. The pipeline worked — 80 clauses analysed, an answer
+in about forty seconds. Four things on the screen were wrong, and no eval in the
+repository could have seen any of them:
+
+1. The **second-highest-ranked clause in the whole policy** said *"The policy
+   will never pay for any medical expenses you incur."* The policy does not say
+   that, and nothing in it means that.
+2. A clause card reported that the policy's annexure of non-payable items was
+   *"written at grade 94 reading level"*. There is no grade 94.
+3. A correct answer about a hernia, citing the right clause and quoting it
+   exactly, was shown under a red banner reading **"Not verified. Treat this
+   answer as unreliable."**
+4. A settled answer — *not covered*, on a waiting period with ten months left to
+   run — was printed under the heading **"To answer this properly, it would need
+   to know"**, followed by the claimant's age.
+
+These four share a shape worth naming before the detail. Each is a place where
+the system **said something false while every component worked exactly as
+designed**. No exception was raised, no test failed, no metric moved. That is
+what makes them a category: they are not bugs in the sense of code doing
+something other than what it says, they are bugs in what the code was told to
+say.
+
+---
+
+## Failure 73: the worst clause in the policy, and the policy never said it
+
+### What was on the screen
+
+The dashboard ranks clauses by impact — how likely a clause is to decide a claim
+against you. Rank 2 on Star Health's wording, above every real exclusion in the
+document, was a card whose plain-English rewrite read:
+
+> The policy will never pay for any medical expenses you incur.
+
+That is a repudiation of the entire contract. It is also not in the policy. Here
+is the clause the card was built from, exactly as the segmenter produced it:
+
+```
+The Company shall not be liable to make any payments under this Policy
+in respect of any expenses what so ever incurred by the Insured Person
+in connection with or in respect of;
+S T A N D A R D  E X C L U S I O N S
+```
+
+Read the ending again: **"in connection with or in respect of;"**. The sentence
+stops there. It has a subject, a verb, and no object. On the page, its object is
+the numbered list that follows — twenty-two exclusions, 1 through 22, each one a
+thing the company will not pay for.
+
+The segmenter cut the fragment off from its list and handed it to the analysis
+stage as a clause in its own right. The model was asked, in effect, "what does
+this clause exclude?" — and the only faithful answer to a sentence whose object
+has been removed is "everything it names", which here is *any expenses what so
+ever incurred by the Insured Person*.
+
+**The model read the fragment correctly. The fragment was the lie.**
+
+Then the scorer did its job on that reading. An exclusion carries the heaviest
+type weight in the impact formula (`TYPE_WEIGHT[EXCLUSION] = 0.95` in
+`api/app/pipeline/score.py`), and the model rated an exclusion of all medical
+expenses as maximally severe and maximally likely to bite. The product put it
+second in the document. Every stage after the bad boundary behaved correctly,
+and **correctness downstream of a bad boundary does not repair the error, it
+gives it authority.**
+
+### First question: is this one document's quirk?
+
+Before writing a rule, the obvious thing to establish is whether this is Star's
+typesetting or how IRDAI wordings are written. Every unnumbered clause in every
+available wording — three real, three synthetic — was printed with its ending
+character:
+
+```
+star-arogya-sanjeevani.pdf    80 segments,  12 unnumbered
+hdfc-optima-secure.pdf       101 segments,   2 unnumbered
+niva-reassure-2.pdf          143 segments,   0 unnumbered
+synthetic-health-policy.pdf   40 segments,   1 unnumbered
+synthetic-hostile-policy.pdf  40 segments,   1 unnumbered
+synthetic-mini-policy.pdf      4 segments,   0 unnumbered
+```
+
+Two of the three real wordings open their exclusions with exactly this
+construction, and nothing else among the 408 segments looks like it:
+
+```
+Star:  "...incurred by the Insured Person in connection with or in respect of;"
+
+HDFC:  "The Company shall not make payment for any claim in respect of any
+        Insured Person caused by, arising from or attributable to any of the
+        following unless expressly stated to the contrary in the Policy:"
+```
+
+Both are unnumbered. Both end on a colon or a semicolon. Both are completed by
+the numbered list beneath them. That is a **drafting pattern**, not a quirk, and
+it has a signature a rule can read: *no clause number of its own, and a sentence
+that does not end.*
+
+### The fix
+
+In `api/app/pipeline/segment.py`, a pass that runs after boundaries are found:
+
+```python
+    merged: list[Segment] = []
+    for seg in reversed(segments):
+        if merged and not seg.number and seg.text.rstrip().endswith((":", ";")):
+            follower = merged[0]
+            follower.text = raw_text[seg.char_start : follower.char_end]
+            follower.char_start = seg.char_start
+            follower.page_start = seg.page_start
+            follower.bboxes = seg.bboxes + follower.bboxes
+            merged[0:1] = _split_oversized(follower, raw_text)
+            continue
+        merged.insert(0, seg)
+    return merged
+```
+
+The list is walked **backwards** because a lead-in attaches to what comes *after*
+it, so the follower has to already be in hand by the time the fragment is
+reached. Walking forwards would mean carrying a pending fragment through the
+loop, which is the same logic with an extra variable.
+
+Requiring the fragment to be unnumbered is what stops the rule eating real
+clauses. A numbered clause that happens to introduce a list of its own —
+"4. The following are excluded:" — keeps its number, its identity and its own
+entry.
+
+### Three alternatives, and why each was rejected
+
+- **Delete the fragment.** It is real text from the document. Deleting text
+  because the pipeline finds it awkward is how a tool starts lying by omission,
+  and this one is the operative verb phrase of twenty-two exclusions.
+
+- **Attach it to all twenty-two exclusions.** It does govern all of them. But
+  every one of those clauses would then carry a duplicated preamble, inflating
+  its length, its measured reading difficulty and its share of the context
+  window — for no gain, because exclusions 2 through 22 already read correctly
+  alone ("21. Any expenses incurred on Domiciliary Hospitalization and OPD
+  treatment", filed under a section headed EXCLUSIONS).
+
+- **Ask the model to notice fragments.** This is stage 2, which contains no LLM
+  on purpose. Clause boundaries must be reproducible run to run, and a model
+  asked the same question twice does not answer identically twice. Rejected on
+  the architecture, not on the result.
+
+### Why the join is a slice and not a concatenation
+
+`follower.text = raw_text[seg.char_start : follower.char_end]` looks like a long
+way to write `seg.text + follower.text`. It is not the same thing.
+
+Every clause in this system carries `char_start` and `char_end` into the original
+document, and one invariant holds throughout the pipeline:
+
+```python
+raw_text[seg.char_start : seg.char_end] == seg.text
+```
+
+That invariant is what makes a citation **provable** — it is how a quoted span is
+traced back to a position in the PDF the user uploaded. A concatenation of two
+strings produces text that appears nowhere in the document at those offsets, and
+the invariant would break silently, taking the grounding guarantee with it.
+
+Taking the slice keeps it exact, and has a useful side effect: anything sitting
+*between* the two pieces — such as the section heading in the middle — comes back
+along with it, which is what the page shows anyway.
+`api/tests/test_segment.py` asserts this invariant over every clause of every
+test document, and it still holds after the merge.
+
+### Failure 73b: a guard that switched the fix off exactly where it was needed
+
+The first version of the merge refused to join when the result would exceed
+`MAX_CLAUSE_CHARS` (3,000), with this reasoning written in the comment:
+
+> Skip rather than re-split: a lead-in long enough to breach the cap is not a
+> lead-in.
+
+Measured, the fix then worked on Star and did **nothing at all** on HDFC:
+
+```
+idx=48 num=''  chars=200   <- the lead-in
+idx=49 num='1' chars=2997  <- the clause it introduces
+merged length would be: 3198
+```
+
+HDFC's first exclusion had **already been split** by `_split_oversized` to sit
+just under the cap. Adding a 200-character lead-in to a 2,997-character clause
+overflows by 198, the guard fired, and the merge was skipped — on one of only two
+documents the rule exists for.
+
+Notice what the comment claims and what the code tested. The comment reasons
+about the **lead-in's** length; the code tested the **merged** length. They are
+different claims, and the fragment is 200 characters either way. Writing the
+comment before the condition would have caught it.
+
+The repair reuses the splitting the pipeline already does:
+
+```python
+            # HDFC's first exclusion already fills 2,997 of the 3,000-character
+            # cap, so refusing to merge over the cap would have left that
+            # document's lead-in stranded - the exact case this exists for.
+            # Re-splitting keeps the lead-in on the first piece and moves the
+            # overflow into a continuation, which is what the cap is for.
+            merged[0:1] = _split_oversized(follower, raw_text)
+```
+
+The lead-in stays with the first piece; the overflow becomes a continuation.
+**A guard that protects an invariant should re-establish the invariant, not
+abandon the work it was guarding.** Skipping was the cheaper branch to write;
+splitting was two more lines and actually did the job.
+
+---
+
+## Failure 74: nine headings the segmenter could not read
+
+### The setup
+
+While measuring Failure 73, one other Star segment stood out — 36 characters, no
+clause number, and its entire content was:
+
+```
+S T A N D A R D  C O N D I T I O N S
+```
+
+That is a section heading set with its letters held apart. It is a typesetting
+effect; a reader sees the words STANDARD CONDITIONS. PDF extraction returns the
+characters where they sit, spaces and all.
+
+`segment.py` decides whether a line is a section heading partly by looking for
+known policy vocabulary inside it:
+
+```python
+    stripped = line.text.strip()
+    if len(stripped) <= 70 and stripped.isupper():
+        if _RE_SECTION_HEAD.match(stripped):
+            return True
+        if _RE_SECTION_WORD.search(stripped.lower()):
+            return True
+```
+
+`_RE_SECTION_WORD` looks for whole words — `\bconditions?\b`, `\bexclusions?\b`
+— and "s t a n d a r d  c o n d i t i o n s" contains no such word. The test
+failed, and every letter-spaced heading in the document was treated as ordinary
+text.
+
+Searching all three real wordings for lines whose tokens are mostly single
+characters showed the scale of it:
+
+```
+star-arogya-sanjeevani.pdf
+  'S T A N D A R D  D E F I N I T I O N S'
+  'P O L I C Y  W O R D I N G S'
+  'S P E C I F I C  D E F I N I T I O N S'
+  'S T A N D A R D  E X C L U S I O N S'
+  'S P E C I F I C  E X C L U S I O N S'
+  'S T A N D A R D  C O N D I T I O N S'
+  'S P E C I F I C  C O N D ITION S'
+  'A N N E X U R E  -  A'
+  'L I S T  O F  I N S U R A N C E  O M B U D S M A N'
+hdfc-optima-secure.pdf   (none)
+niva-reassure-2.pdf      (none)
+```
+
+**All nine of Star's major headings**, and not one in the other two documents.
+One of the nine became a clause of its own; the rest were swallowed into
+whichever clause they sat beside — which is why the fragment in Failure 73 ended
+in `S` rather than in `;`.
+
+### Concept 46: reading what the page says, not what the file contains
+
+A PDF does not store words. It stores glyphs and the positions they are painted
+at. The gap between two letters and the gap between two words are the same kind
+of thing — a distance — and text extraction turns distances into spaces by
+comparing them against a threshold derived from the font.
+
+Letter-spaced display type defeats that threshold, because its letter gaps are
+deliberately wider than the threshold expects. Every letter gap becomes a space,
+and the word is shattered.
+
+The information is not lost, though, and this is the part worth keeping. **The
+typesetter faced the same problem and solved it the only way available: by making
+the word gaps bigger still.** Star's headings use one space between letters and
+two between words. That second gap survives extraction, and recovering the words
+is simply reading it:
+
+```python
+def _despaced(text: str) -> str:
+    tokens = text.split()
+    if len(tokens) < 4 or sum(len(t) == 1 for t in tokens) / len(tokens) <= 0.6:
+        return text
+    return " ".join("".join(word.split()) for word in re.split(r"\s{2,}", text.strip()))
+```
+
+The guard on the first line is what makes this safe to run over every line of
+every document: **no real sentence is mostly one-letter words.** Ordinary text
+fails the test and is returned untouched, so this cannot corrupt a clause.
+
+Splitting on the *word* gap rather than trying to detect runs of single letters
+has an unplanned benefit. One of Star's headings extracts irregularly:
+
+```
+'S P E C I F I C  C O N D ITION S'  ->  'SPECIFIC CONDITIONS'
+```
+
+`C O N D ITION S` is a mess — three differently-spaced pieces. But the double
+space before it is intact, so the word boundary is found, and everything inside
+that boundary is joined regardless of how it was spaced internally. A rule built
+on the letter gaps would have failed here. **The boundary carried the
+information; the letters were noise.**
+
+### What it changed
+
+Star's section list, before and after:
+
+```
+before:  ['Policy Wordings', '3 - DEFINITIONS', 'STAR HEALTH AND ALLIED
+          INSURANCE COMPANY LIMITED', '4 - COVERAGE', '5 - EXCLUSIONS',
+          '6 - CONDITIONS', 'TABLE OF BENEFITS']
+
+after:   [..., 'STANDARD DEFINITIONS', 'SPECIFIC DEFINITIONS',
+          'STANDARD EXCLUSIONS', 'SPECIFIC EXCLUSIONS', 'STANDARD CONDITIONS',
+          'SPECIFIC CONDITIONS', 'ANNEXURE - A', ...]
+```
+
+Six headings recovered, one junk clause removed, and every clause now files under
+a more precise section than "5 - EXCLUSIONS". Star went from 80 segments to 79.
+
+**Niva's wording and all three synthetic policies changed by not one segment.**
+That was the check that mattered: none of them is letter-spaced, so a correct fix
+had to leave them completely alone. It did.
+
+---
+
+## Failure 75: a reading level that does not exist
+
+### What was on the screen
+
+A clause card for Star's annexure of non-payable items carried the note:
+
+> written at grade 94 reading level
+
+**Flesch–Kincaid, from scratch.** It estimates the US school grade needed to read
+a text on one pass, from two measurements: how long the sentences are, and how
+many syllables the words have. Long sentences are hard to hold in your head at
+once; long words tend to be the Latinate ones. Grade 8 is ordinary newspaper
+prose; grade 20 is dense legal drafting. The formula, in
+`api/app/pipeline/score.py`:
+
+```python
+    grade = 0.39 * (len(words) / sentences) + 11.8 * (syllables / len(words)) - 15.59
+```
+
+It is used here because legal writing scores high on both terms at once — long
+subordinate sentences built from Latinate vocabulary — and that is precisely the
+obscuring this project exists to measure.
+
+### The cause
+
+The annexure is 145 lines of item names — BABY FOOD, BELTS/BRACES, OXYGEN
+CYLINDER (FOR USAGE OUTSIDE THE HOSPITAL) — and **not one of them ends in a full
+stop.** Sentences were counted by splitting on `[.!?]`, which on a text
+containing no terminator returns exactly one piece. So:
+
+```
+words=221  sentences=1  ->  0.39 * 221 = 86.2  ->  grade 93.7
+```
+
+The formula was applied to something that is not prose. A list has no sentences,
+so "words per sentence" is not a property it possesses, and dividing by one
+invented sentence produces a number from a scale that tops out near 20.
+
+It is worth being precise about what did *not* go wrong. The ranking was
+unaffected, because the buriedness signal was already clamped:
+
+```python
+        grade = flesch_kincaid_grade(seg.text)
+        reading = min(max((grade - 8.0) / 12.0, 0.0), 1.0)
+```
+
+Grade 94 and grade 20 both yield `reading = 1.0`. **The score was right and the
+displayed number was nonsense** — which is exactly why no eval caught it. The
+harness scores verdicts and rankings; this number only ever reached a human eye.
+
+### A wrong fix, measured before it was written
+
+The obvious repair is to count line breaks as sentence ends. It was checked
+against the data first, and abandoned. PDF extraction preserves the document's
+visual line wrapping, so ordinary prose is full of line breaks that mean nothing:
+
+```
+grade=12.4  words=125  sentences=10  lines=31   "1. Hospitalization: The Company..."
+```
+
+Ten sentences, thirty-one lines. Counting lines there would cut a real clause's
+measured difficulty by roughly a third for a typesetting reason. **That fix trades
+a wrong number on 2 segments for a wrong number on 400.**
+
+What separates the two cases is not the presence of line breaks — both have them
+— but the **complete absence of any sentence**:
+
+```python
+    units = [s for s in _RE_SENTENCE.split(text) if s.strip()]
+    # A list of item names ends no sentence, so splitting on full stops makes
+    # the whole block one: Star's annexure of 145 non-payable items came out at
+    # 221 words per "sentence" and reported grade 94, a number that does not
+    # exist. Where a text terminates nothing, the unit a reader takes in at once
+    # is the line. Line breaks are not used otherwise, because in wrapped prose
+    # they fall wherever the measure ran out and mean nothing.
+    if not _RE_SENTENCE.search(text):
+        units = [line for line in text.split("\n") if line.strip()]
+    sentences = max(len(units), 1)
+```
+
+Where a text ends sentences, they are the unit and line breaks are ignored
+entirely. Where it ends none, it is not prose, and the line is the unit.
+
+### What it changed, measured across all 408 segments
+
+Eight segments in the six documents have no sentence terminator at all:
+
+```
+LIST I (Star, 221 words on 145 lines)     93.7 -> 8.1    the bug
+HDFC 2.8 (a 41-word list on 29 lines)     34.4 -> 18.9   also absurd, also fixed
+HDFC (a), 45 words on 3 lines             21.9 -> 10.2   a regression, kept
+Star / HDFC exclusion lead-ins            21.0 -> 4.4    no longer exist (Failure 73)
+Niva List II / III (one line each)        unchanged      one line either way
+```
+
+**The regression is real and is being kept deliberately.** HDFC's definition of
+"acute condition" is genuine prose that happens to omit its final full stop. It
+is now measured as three short lines rather than one long sentence — grade 10,
+where 22 is nearer the truth. It is one segment in 408; its effect is one input
+to a buriedness signal weighted 0.35 which is then clamped; and the alternative
+fix damaged 400 segments to rescue it.
+
+Writing the regression down here, with its size, is the point. A fix recorded as
+"fixed the grade bug" would leave the next person to rediscover this by accident.
+
+---
+
+## Failure 76: an exact quotation, marked unreliable
+
+### What was on the screen
+
+Asked *"I need surgery for an inguinal hernia that was found last month. I bought
+this policy 14 months ago and it is my first health insurance."*, the system
+answered **not_covered**, citing Star's specified-disease waiting period — the
+right verdict, from the right clause. Above it sat a red banner:
+
+> **Not verified.** Some wording quoted below could not be found in your policy.
+> Treat this answer as unreliable and check the clauses yourself.
+
+### Why the check said that
+
+Star's clause 2 is lettered A to E. The model quoted the heading, A, D and E, and
+skipped B and C. B is about enhancement of the sum insured; C is about overlap
+with the pre-existing waiting period. Neither bears on the question asked.
+
+`api/app/grounding.py` required a quotation to appear in the clause as **one
+unbroken substring**. Every word the model printed was the clause's own, in the
+clause's own order, but the run was broken twice. Checked piece by piece against
+the stored clause text with a cursor that only moves forward:
+
+```
+found=0    len=61   | 2. specified disease / procedure waiting period -code excl 02
+found=62   len=301  | a. expenses related to the treatment of the following listed...
+found=645  len=145  | d. the waiting period for listed conditions shall apply even...
+found=791  len=222  | e. if the insured person is continuously covered without any...
+```
+
+All four present, ascending, never overlapping. The quotation was honest. The
+check had no way to express what it was.
+
+### Concept 47: provenance and meaning are different questions
+
+This is the most delicate change in the milestone, because it **loosens the one
+mechanism the whole project rests on.** The project's rule is that a fabricated
+citation must be *impossible*, not merely unlikely, and two layers make that
+true: clause ids are `enum`-constrained during decoding, so a made-up address
+cannot be sampled at all; and quoted text must be found in the clause it is
+attributed to. It is layer two being relaxed here, so the reasoning needs to be
+exact.
+
+The distinction that makes it safe is between two questions a checker might be
+asked:
+
+- **Provenance** — did these words come from this clause? Decidable by looking.
+  It is the only question this check has ever answered.
+- **Meaning** — does the quotation fairly represent the clause? That requires
+  judging whether the skipped material mattered, which is a reading, not a
+  lookup. No substring test has ever been able to do it.
+
+A contiguous-substring check was never verifying meaning, and it is worth being
+blunt about why. A model could already quote one true sentence and omit the
+qualifying sentence immediately after it. **Truncation is elision with only one
+gap**, and truncation always passed. What contiguity actually bought was a limit
+on how far apart the kept pieces could sit — a weaker guarantee than it appears
+to be, and not the guarantee anyone thought they were relying on.
+
+So the replacement keeps provenance exact and adds three constraints that
+preserve the parts of contiguity worth keeping:
+
+```python
+    pieces = [p for p in (normalize(line) for line in quote.split("\n")) if p]
+    # One piece would have passed the contiguous check already; reaching here
+    # with one piece means it genuinely is not in the clause.
+    if len(pieces) < 2:
+        return False
+
+    haystack = normalize(source_text)
+    cursor = 0
+    for piece in pieces:
+        if len(piece) < MIN_QUOTE_CHARS:
+            return False
+        found = haystack.find(piece, cursor)
+        if found == -1:
+            return False
+        cursor = found + len(piece)
+    return True
+```
+
+- **Split only at the model's own line breaks.** It may elide where it chose to
+  break a line, never mid-sentence, so it cannot assemble a new sentence out of
+  phrases gathered from across the clause.
+- **Every piece at least `MIN_QUOTE_CHARS` (25).** An answer cannot be stitched
+  from fragments too short to mean anything alone. This is the bar the
+  whole-quote check has always applied, now applied to each piece.
+- **A forward-only cursor.** Pieces must appear in document order and may not
+  overlap, so a condition cannot be lifted above the sentence that qualified it,
+  and no passage can be quoted twice to pad out the others.
+
+The strict contiguous test still runs **first**, and the elision path is reached
+only after it fails. An unbroken quotation is checked exactly as it always was:
+
+```python
+    # The strictest reading first, so an unbroken quotation is still checked
+    # exactly as it always was, and the elision path is only ever a fallback.
+    if normalized_quote in normalize(source_text):
+        return True, ""
+    if _verify_elided(quote, source_text):
+        return True, ""
+    return False, "quote does not appear in the cited clause"
+```
+
+Run against the real failing citation and three attacks on it:
+
+```
+real elided quote      -> (True, '')
+reordered (D before A) -> (False, 'quote does not appear in the cited clause')
+one line invented      -> (False, 'quote does not appear in the cited clause')
+short stitched frags   -> (False, 'quote does not appear in the cited clause')
+```
+
+### Why a false alarm is not a safe failure
+
+It is tempting to file this under "the check was being conservative", and treat
+conservative as harmless. It is not harmless, and the reason generalises well
+beyond this project.
+
+A warning is only useful for as long as people believe it. This banner tells a
+reader to distrust the answer and go and read the clauses themselves. If it
+fires on answers that are exactly right, readers learn within a handful of uses
+that it means nothing — and then it is still there, still firing, on the day the
+model **does** fabricate a quotation.
+
+**A check that cries wolf does not degrade into a stricter check. It degrades
+into no check at all**, while continuing to look like a check in the code and in
+the interface. That same argument already appears in this file as the reason a
+trailing reference tag is stripped before comparison, and it is why this one was
+worth doing carefully rather than leaving alone.
+
+---
+
+## Failure 77: asking for facts about an answer it had already decided
+
+### What was on the screen
+
+Under the same hernia answer — a settled *not covered*, decided by a waiting
+period with ten months still to run — the interface printed:
+
+> **To answer this properly, it would need to know**
+> — your age
+> — whether this condition existed before you bought the policy
+> — whether you were admitted overnight
+> — how soon you told the insurer
+
+Two separate things are wrong there, with two different causes.
+
+### Part one: one list, two audiences, opposite meanings
+
+The list comes from `DECISIVE_FACTS` — the facts that *can* decide an outcome
+under an Indian health policy — filtered to those the person did not state:
+
+```python
+    missing = [k for k in DECISIVE_FACTS if facts.get(k) in (None, "", "unknown")]
+```
+
+That single list has two consumers, and they want opposite things from it.
+
+**In the reasoning prompt** it appears under the heading *"NOT STATED by the
+person (do not assume values for these)"*, and listing every unstated decisive
+fact there is exactly right. It is what lets the model tell "the policy is
+silent on this" apart from "the person didn't mention it" — two situations that
+lead to different verdicts, and the reason `insufficient_information` can be a
+first-class answer at all.
+
+**In the interface** the same list ran under a heading asserting that the answer
+above it was not proper.
+
+When the verdict genuinely is `insufficient_information`, that heading is the
+entire point: those facts are the reason there is no answer, and asking for them
+is the useful thing to do. When a verdict *was* reached, the same words tell the
+reader that a correct, decided answer is incomplete — and nothing on the screen
+distinguishes the two situations.
+
+There is a documented reason the two lists are built from one source: they were
+once two lists that drifted apart, and the interface ended up offering "body
+system" and "estimated cost inr" as information it needed. So the fix is not to
+split the list again. It is to let the **heading** depend on the verdict, since
+the verdict is the thing that actually differs:
+
+```tsx
+          <p className="label mb-1.5">
+            {result.verdict === 'insufficient_information'
+              ? 'To answer this, it would need to know'
+              : "You didn't mention these, and they can affect a claim"}
+          </p>
+```
+
+Nothing is hidden from the reader — the same facts are still listed. The claim
+attached to them is now one the system can support.
+
+### Part two: a fact stated twice and read as unknown
+
+`pre_existing_condition` should never have been on that list at all. The question
+says the hernia was **found last month**, and that the policy was **bought 14
+months ago**. A condition found one month ago, under cover held for fourteen,
+began thirteen months *into* the policy. It is not pre-existing, and the
+description says so — just not in those words.
+
+The extractor returned `"unknown"`, and this sentence in the fact prompt is why:
+
+```
+For pre_existing_condition, answer "unknown" unless the description makes it
+clear either way. "Unknown" is the honest answer far more often than not.
+```
+
+**This project has been here before.** An earlier milestone rewrote that exact
+sentence to make the extractor read harder. It worked on the pre-existing
+sentences and cost **six unrelated main-set cases** — an ICU rate, a breach of
+law, pre-hospitalisation expenses — because the fact prompt feeds every reasoning
+prompt, so changing what it says about one field changes answers everywhere. It
+was reverted and recorded as open.
+
+The reason it kept going wrong is that it was being treated as a **reading**
+problem. It is not. *"Found last month"* against *"bought 14 months ago"* is a
+**subtraction**, and this pipeline's governing principle is that the model never
+does arithmetic: stages 2 and 4 contain no LLM at all, unit conversion is done in
+Python, waiting periods are compared in Python, and `age_at_policy_start` is
+already derived rather than inferred for exactly this reason.
+
+So the condition's age becomes a duration like every other duration in the
+schema — a value and a unit, reported, not judged:
+
+```python
+        # HOW LONG THE CONDITION HAS BEEN KNOWN, as a value and a unit, like
+        # every other duration here. Whether a condition is pre-existing is
+        # often not stated at all - it is the comparison between this and
+        # `time_since_policy_start`. "Found last month" on a policy bought 14
+        # months ago is a condition that arose 13 months INTO cover, and the
+        # model was answering "unknown" to it, because working that out is
+        # subtraction. The model reports the sentence; `derive_pre_existing`
+        # below does the comparison.
+        "condition_known_for_value": {"type": ["integer", "null"]},
+        "condition_known_for_unit": {
+            "type": ["string", "null"],
+            "enum": ["days", "weeks", "months", "years", None],
+        },
+```
+
+and the comparison happens in code, in `api/app/pipeline/scenario.py`:
+
+```python
+def derive_pre_existing(facts: dict[str, Any]) -> dict[str, Any]:
+    if facts.get("pre_existing_condition") != "unknown":
+        return facts
+    known = condition_known_days(facts)
+    policy = policy_age_days(facts)
+    if known is None or policy is None or known == policy:
+        return facts
+    return facts | {"pre_existing_condition": "yes" if known > policy else "no"}
+```
+
+Two deliberate narrowings, both following a principle this project arrived at
+earlier — that a check which overrides a model must act only on positive evidence
+for the other reading, because its two kinds of mistake do not cost the same:
+
+- **It only fills an `"unknown"`.** Someone who states outright that a condition
+  is long-standing has given evidence no arithmetic should overrule. A wrong
+  `"yes"` denies a claim that should be paid; a wrong `"no"` pays one that should
+  not. Neither is cheap, so the correction acts only where the model declined to
+  answer at all.
+- **It only fires when both durations were stated.** One duration is not a
+  comparison, and supplying the missing one would be exactly the invention the
+  extraction prompt spends its whole length forbidding.
+
+The "unknown is honest" sentence is **left standing**. That is the difference
+from the attempt that was reverted: this change does not ask the model to judge
+harder, it gives it one more thing to copy down.
+
+---
+
+## Failure 78: four prompts to add one field, and what each one broke
+
+The schema field and the Python comparison were right on the first attempt and
+never changed. **The prompt took four versions**, and each version broke
+something that had nothing to do with pre-existing conditions. That sequence is
+the most transferable thing in this milestone, so it is recorded in full.
+
+Throughout, the rule for deciding whether something is real: **three fresh
+samples on the new prompt and three on committed `main`.** A single sample of
+this model proves nothing — one case in this very set, `seven-years-at-59`,
+flipped between runs with no code change at all.
+
+### v45 — the example that stole an age
+
+The first version taught the new field with this example, among others:
+
+```
+- "a hernia that was found last month"  -> condition_known_for_value: 1, condition_known_for_unit: months
+```
+
+The check then failed a case with nothing to do with pre-existing conditions:
+
+```
+BAD eval  copay-applies-emergency  age=None
+```
+
+The sentence is *"I took this policy out when I was 70 and I am 72 now. I was
+admitted with pneumonia last month."*
+
+```
+v45 (new field):  age=None  age=None  age=None
+v44 (baseline):   age=72    age=72    age=72
+```
+
+Unanimous both ways, so not noise. The phrase "last month" appears in both
+sentences doing different work: in the example it dates the *condition*, in the
+eval sentence it dates the *admission*. Teaching the model to reach for a new
+field on "last month" pulled its attention onto that phrase, and `age: 72` —
+which nothing in the new block mentions — was dropped on the floor.
+
+### v46 — a fix that named too many fields
+
+The repair spelled out what the field is not:
+
+```
+This field never takes a value away from another one. It is not an age, it is
+not how long the policy has been held, and it is not when a hospital stay
+happened. ...
+```
+
+`copay-applies-emergency` recovered, 3/3. Two other cases broke, 3/3 each:
+
+```
+63-held-eleven      age_at_policy_start=52          (63 - 11, computed)
+ped-waiting-served  time_since_policy_start=None    (the stated 5 years, lost)
+```
+
+Checked against baseline: `ped-waiting-served` and `63-held-eleven` both pass
+3/3 on `main`, so both were genuine regressions. A third case in the same run,
+`70-bought-at-55`, failed on **both** prompts 3/3 — a pre-existing failure, not
+a regression, and worth separating out before drawing any conclusion.
+
+The cause is visible in the wording. Naming `age` and `how long the policy has
+been held` in one breath, as things the new field is *not*, put those two fields
+side by side in the model's attention — and it responded by relating them. That
+is how `63 - 11 = 52` appears in a field the prompt has always said to leave null
+when unstated.
+
+### v47 — concrete examples instead of abstract prohibitions
+
+The abstract denial was replaced with the thing the rest of this prompt already
+does everywhere: worked examples on the exact collision.
+
+```
+Time measured from the POLICY still goes in time_since_policy_start, and time
+measured from a HOSPITAL STAY is not this field either:
+
+- "hospitalised for it 5 years after taking the policy out"
+     -> time_since_policy_start_value: 5, unit: years; condition_known_for: null, null
+- "I was admitted with pneumonia last month"
+     -> condition_known_for: null, null (this dates the admission, not the condition)
+```
+
+`ped-waiting-served` recovered 3/3. `63-held-eleven` still returned 52, 3/3.
+
+### v48 — restating a rule the prompt already had
+
+The age subtraction is not a new problem; the prompt has always said so, in the
+ages section: *"Fill in only what was actually said; the arithmetic linking them
+is done afterwards, in code."* The new block had quietly weakened it by
+introducing one more duration to relate. So the closing line restates the
+existing rule rather than inventing one for this field:
+
+```
+This field never takes a number away from another field, and never creates one.
+Time measured from the POLICY still goes in time_since_policy_start, time
+measured from a HOSPITAL STAY is not this field either, and no field anywhere in
+this schema is ever filled by subtracting one number in the sentence from
+another - if it was not said, it is null:
+```
+
+All six watched cases clean, 3/3 each:
+
+```
+v48-condition-known-for
+  ped-waiting-served           ['ok', 'ok', 'ok']
+  63-held-eleven               ['ok', 'ok', 'ok']
+  copay-applies-emergency      ['ok', 'ok', 'ok']
+  hernia-found-last-month      ['ok', 'ok', 'ok']
+  diabetes-longer-than-policy  ['ok', 'ok', 'ok']
+  scan-after-discharge         ['ok', 'ok', 'ok']
+```
+
+### Concept 48: a prompt is not a list of independent rules
+
+The pattern across those four versions is one thing, seen four times: **adding an
+instruction for one field competes for attention with every other field, and the
+fields it damages are the ones nothing warned you to look at.** An example about
+hernias cost an age. A denial mentioning two other fields caused a subtraction
+between them.
+
+It is the same mechanism as the earlier reversion recorded in this log, where a
+change aimed at pre-existing conditions broke an ICU rate — and it is why that
+attempt was abandoned rather than debugged. What made this one survivable was
+not better prompt wording. It was:
+
+1. **A check that covers the fields you are not changing.** The collisions were
+   found in `copay-applies-emergency` and `63-held-eleven`, cases about ages and
+   policy durations, because the harness scores every field on every sentence
+   rather than the one being worked on.
+2. **Three samples, and a baseline run of the same three.** Of the four
+   suspicious failures, two were real regressions, one was noise, and one was a
+   pre-existing failure. Acting on the single-sample list would have meant
+   chasing two phantoms.
+3. **Restating an existing rule rather than writing a new one.** Three of the
+   four versions added new prohibitions and each added a new interaction. The
+   version that worked pointed back at a rule the prompt already contained.
+
+Two honest notes about what this evidence supports. `copay-applies-emergency`
+and `ped-waiting-served` are **eval** sentences, not held-out ones, and the v46
+and v47 wordings were written while looking at their failures — they are evidence
+the collisions were closed, not that the fix generalises. The v48 line was
+written from the prompt's own existing rule rather than from
+`63-held-eleven`'s output, and `63-held-eleven` is held out; but having watched
+it fail, the cleanest reading is that the held-out group as a whole carries the
+generalisation claim, not that one case.
+
+### The stale answer key
+
+Four pre-existing sentences in the answer key came back `"unknown"`:
+
+```
+BAD heldout  back-pain-began-later   pre_existing_condition=unknown
+BAD heldout  asthma-before           pre_existing_condition=unknown
+BAD tuned    ho-knee-replacement     pre_existing_condition=unknown
+BAD tuned    ho-kidney-stone         pre_existing_condition=unknown
+```
+
+The obvious reading is that this milestone broke them. Before accepting it, the
+same six sentences were run against committed `main` with every change stashed:
+
+```
+prompt version: v44-picked-clauses-covered-means-in-full
+
+  BAD back-pain-began-later    want=no       got=unknown
+  BAD asthma-before            want=yes      got=unknown
+  ok  fever-no-history         want=unknown  got=unknown
+  BAD migraines-new            want=no       got=unknown
+  BAD ho-knee-replacement      want=no       got=unknown
+  BAD ho-kidney-stone          want=no       got=unknown
+
+  1/6
+```
+
+**One out of six on the baseline.** Five of those cases were already failing on
+committed `main`, before this milestone touched anything.
+
+Two things follow, and both matter more than the six cases.
+
+**The answer key had gone stale, and nothing was watching.** Those expectations
+were recorded when they passed; they have since stopped passing; and because
+this check is run by hand rather than from the test suite, nobody was told. A
+stale expectation is worse than a missing one — it reads as a guarantee, and it
+mislabels a pre-existing failure as a regression, which is exactly what it did
+here until the baseline was run.
+
+**This is the runtime lesson arriving from a different direction.** An earlier
+milestone established that the program doing the arithmetic is part of the model,
+and that stored answers must be re-measured when it changes. These expectations
+were written under an earlier Ollama and are being read under 0.34.2. **A
+committed answer key carries a runtime with it whether or not anyone wrote that
+down.**
+
+Those four cases are **not fixed by this milestone and remain open**: the
+extractor still will not answer "no" or "yes" to a sentence that states the
+relationship in words rather than in two durations. What this milestone fixed is
+the case that can be settled by arithmetic — which is the case that should never
+have been put to the model in the first place.
+
+---
+
+## Closing out M18
+
+### How it connects to what was already there
+
+Everything before this milestone was measured through the eval harness, and the
+harness is good at what it measures: verdicts, citations, clause rankings,
+fact extraction. What it has never done is *look at the product*. It does not
+render a dashboard, does not read a clause card, and does not see the sentence
+printed beneath an answer.
+
+All five failures here were found in about twenty minutes of using the app by
+hand, and every one of them had been shipping for milestones. That is not a
+criticism of the harness — it is a statement about coverage. **An eval measures
+the thing you pointed it at. Everything else is unmeasured, and unmeasured is
+not the same as working.**
+
+Three of the five were failures of the *boundary between stages*, which is the
+structural lesson worth carrying forward:
+
+- **Failure 73** — the segmenter handed the analyzer a sentence fragment, and the
+  analyzer did a faithful job on it. Neither stage was wrong. The contract
+  between them was: stage 2 promises "this is a clause", and it delivered
+  something that was not one.
+- **Failure 75** — the scorer handed the interface a number from a formula that
+  did not apply, and clamped it internally so the ranking stayed correct. The
+  clamp hid the problem from every consumer except the one that printed it raw.
+- **Failure 77** — one list served the reasoning prompt and the interface, which
+  needed opposite things from it. The data was right for both; the heading was
+  right for only one.
+
+The two that were not boundary failures were failures of a check being **wrong
+about its own job**: the quote verifier answering a question about meaning when
+it could only answer one about provenance (Failure 76), and the fact extractor
+being asked to do arithmetic it had been told everywhere else not to do
+(Failure 77, part two).
+
+### What it made possible
+
+The lead-in merge and the heading recovery are the first segmentation rules in
+this project derived from a **pattern measured across documents** rather than
+from one document's failure. Both were checked against all six available
+wordings before being written, and both were required to leave the other
+documents untouched — which they did, to the segment.
+
+That is the shape a rule needs to have here. Star's wording is one insurer's
+house style; a rule tuned to it that moves Niva's or HDFC's boundaries is not a
+fix, it is a second bug waiting for a different upload.
+
+### Where this leaves the numbers
+
+**Segmentation and scoring** (no model involved, so these are exact):
+
+```
+                              segments   offset drift   oversize
+star-arogya-sanjeevani.pdf     80 -> 79        0            0
+hdfc-optima-secure.pdf        101 -> 101       0            0
+niva-reassure-2.pdf           143 -> 143       0            0
+synthetic-health-policy.pdf    40 -> 40        0            0
+synthetic-hostile-policy.pdf   40 -> 40        0            0
+synthetic-mini-policy.pdf        4 -> 4        0            0
+```
+
+Star loses the letter-spaced heading that had become a clause, and its exclusion
+lead-in merges into exclusion 1. HDFC's lead-in merges the same way without
+changing the segment count, because the overflow moves into a continuation.
+**Every other document is untouched**, and the offset invariant holds on all
+408 segments.
+
+Highest reported reading grade in each document, before and after:
+
+```
+star-arogya-sanjeevani.pdf   93.7 -> 28.8
+hdfc-optima-secure.pdf       34.4 -> 21.0
+```
+
+**Fact extraction**, `evals/check_fact_extraction.py`, Ollama 0.34.2, one fresh
+uncached sample per sentence:
+
+```
+                v44 (main)   v48 (this milestone)
+eval               18/18            18/18
+```
+
+The held-out comparison is **partial and is reported as such**. The full
+baseline run was interrupted by the machine running out of memory after 36 of
+its 44 sentences, so four third-person age sentences (`son-9-tonsils`,
+`wife-58`, `grandmother-90`, `mother-took-it-at-61`) have a v48 result and no
+v44 result. All four pass on v48 and none is related to anything this milestone
+changed.
+
+Every case with a result on both prompts:
+
+```
+  70-bought-at-55          v44 BAD    v48 ok     fixed
+  63-held-eleven           v44 ok     v48 ok
+  back-pain-began-later    v44 BAD    v48 BAD    open, see below
+  asthma-before            v44 BAD    v48 BAD    open
+  migraines-new            v44 BAD    v48 BAD    open
+  ho-knee-replacement      v44 BAD    v48 BAD    open
+  ho-kidney-stone          v44 BAD    v48 BAD    open
+  fever-no-history         v44 ok     v48 ok
+  seven-years-at-59        v44 ok     v48 BAD    noise, see below
+  all other held-out       v44 ok     v48 ok
+```
+
+Plus the six sentences written for the new field, which have no v44 result
+because the field does not exist there. All six pass, and the three watched most
+closely pass three samples out of three.
+
+`seven-years-at-59` is recorded as noise rather than a regression on direct
+evidence: **the same prompt, v45, produced both outcomes on two different runs**
+of the same sentence. It has since flickered on v46 and v48 as well. This is the
+reason single-sample results in this project are never acted on alone.
+
+The five "open" rows are the pre-existing-condition sentences whose relationship
+is stated in words rather than in two durations. **Four of the five were already
+failing on committed `main`** before this milestone started, which is the finding
+written up under Failure 78 as the stale answer key.
+
+### What is deliberately not fixed
+
+Three things measured here are being left alone, with reasons, so that finding
+them again does not read as a discovery:
+
+1. **HDFC's "acute condition" definition now reports grade 10 where 22 is nearer
+   the truth.** It is prose that omits its final full stop, so the new rule
+   treats it as a list. One segment in 408; the alternative fix damaged 400.
+2. **The extractor still will not read a stated pre-existing relationship**
+   ("diagnosed long before I bought this policy"). It was failing before this
+   milestone and it fails now. The arithmetic case is fixed; the reading case is
+   not, and two previous attempts at the reading case cost unrelated answers.
+3. **`age` is still offered as a fact the reader did not mention, on policies
+   with no age-dependent term in them.** Deciding which unstated facts could
+   actually have changed a given verdict needs a link from each fact to the
+   clauses that turn on it, which nothing in the pipeline currently produces.
+   The false claim attached to the list is fixed; the list is not filtered.
+
+### Check it yourself
+
+Segmentation and scoring, no model needed:
+
+```bash
+cd api && python -m pytest -m "not llm" -q     # 264 tests
+```
+
+To see Failure 73 directly, segment a real wording and look for an unnumbered
+clause whose text ends in a semicolon. There should not be one — it should have
+become the opening of the clause below it.
+
+The fact extractor, about twenty-five minutes and one fresh model call per
+sentence:
+
+```bash
+python evals/check_fact_extraction.py
+```
+
+**A question to sit with before reading on.** The elided-quote check (Failure 76)
+accepts a quotation assembled from several exact runs of one clause, in order,
+each at least 25 characters, with material skipped between them. A reader might
+reasonably object: *surely skipping material can change what a clause means, so
+this check now passes quotations that mislead?*
+
+<details>
+<summary>Answer</summary>
+
+It can, and it did before the change too. A contiguous quotation can stop
+immediately before the sentence that qualifies it — truncation is elision with
+the gap at the end — and truncation always passed. So the objection is really an
+objection to what a substring check is, not to this change.
+
+The useful move is to be precise about the question the check answers.
+**Provenance** — did these words come from this clause? — is decidable by
+looking, and is what the check has always done. **Meaning** — is the quotation
+fair? — requires judging whether the skipped material mattered, which is a
+reading. No substring test has ever been able to answer it, and one that appears
+to is more dangerous than one that admits it cannot.
+
+What the three constraints preserve is the part of contiguity that was doing
+real work: pieces must be substantial, in document order, and non-overlapping,
+so a condition cannot be lifted above the sentence qualifying it and nothing can
+be stitched from scattered phrases. The elision remains visible in the quotation
+the reader is shown, which is the honest place for the meaning question to be
+settled.
+</details>
+
+---
+
+# M19 — One clause list, built in one place
+
+## The starting position
+
+Stage 5, the scenario simulator, reasons over a list of `ShortlistClause`
+objects: one per analysed clause, carrying the clause's text, its type, its
+impact score, and the structured numbers extracted at analysis time (waiting
+periods in days, co-pay percentage, room-rent caps, cover windows). Two
+different pieces of code built that list:
+
+- **The scenario endpoint**, `api/app/routers/scenarios.py`, read clauses and
+  their analyses from SQLite and copied them into `ShortlistClause` one field
+  at a time, decoding the JSON columns on the way:
+
+  ```python
+  ShortlistClause(
+      clause_id=citation_id,
+      ref=clause.id,
+      number=clause.number,
+      clause_type=analysis.clause_type,
+      text=clause.text,
+      impact_score=analysis.impact_score,
+      waiting_periods_days=json.loads(analysis.waiting_periods_json or "[]"),
+      exceptions=json.loads(analysis.exceptions_json or "[]"),
+      copay_percent=analysis.copay_percent,
+      # ... eight more fields ...
+  )
+  ```
+
+- **The scenario eval**, `evals/run_scenario_eval.py` (`build_clauses`), ran the
+  four pipeline stages in memory and copied the *in-memory* analysis objects
+  into `ShortlistClause`, field by field, the same seventeen fields again.
+
+Both built the same object from different sources, and nothing checked that
+they agreed. Every time a field was added to the analysis (the co-pay age, the
+ICU caps, the cover window all arrived this way) someone had to remember to add
+it in both places. Forget the eval's copy, and the eval quietly measures a
+system that differs from the one users get: the endpoint would reason with
+the new field and the eval without it, and the eval's numbers would describe
+neither.
+
+This had already gone wrong once in a smaller way. The citation ids (the
+policy's own clause numbers, made unique: `"10"`, `"10#2"`) used to be computed
+separately too, and the two computations disagreed on repeated numbers. That
+was fixed by pulling one function, `citation_ids`, out of both. The rest of
+the constructor was never given the same treatment.
+
+## Concept 49: a deep module, and the deletion test
+
+A **module** here means anything with an interface and an implementation. That
+could be a function, a class or a file. Its **interface** is everything a
+caller has to know to use it correctly: the arguments, and also the ordering
+rules, the error cases and the assumptions it makes.
+
+A module is **deep** when a lot of behaviour sits behind a small interface.
+It is **shallow** when the interface is nearly as complicated as what is
+behind it. A shallow module moves complexity around. A deep one absorbs it.
+
+The seventeen-field constructor calls were the opposite of deep. Each caller
+had to know every field, where it lived in its source, and which ones needed
+JSON decoding. The knowledge was spread across every place that built the list.
+
+The **deletion test** is a quick way to tell the two apart. Imagine deleting
+the module. If complexity disappears, it was a pass-through and the deletion is
+an improvement. If complexity reappears in every caller, the module was earning
+its keep. Apply it to the new function below: delete `load_clauses` and the
+sorting, the filtering, the id assignment and all seventeen fields come back in
+the endpoint *and* in the eval. That is a module worth having.
+
+## The change
+
+One function, `load_clauses`, in `api/app/pipeline/run.py`, next to the query
+it builds on:
+
+```python
+def load_clauses(session: Session, doc_id: str) -> list[ShortlistClause]:
+    """Every analysed clause of a document, as the scenario step receives it."""
+    rows = sorted(
+        ((c, a) for c, a in clause_rows(session, doc_id) if a is not None),
+        key=lambda row: row[0].order_idx,
+    )
+    ids = citation_ids([(clause.number, clause.order_idx) for clause, _ in rows])
+    return [ShortlistClause(clause_id=citation_id, db_id=clause.id, ...)
+            for (clause, analysis), citation_id in zip(rows, ids)]
+```
+
+It owns four jobs that used to be spread across both callers:
+
+1. sorting into document order (the query has no `ORDER BY`)
+2. leaving out clauses the model failed on
+3. assigning citation ids
+4. decoding the JSON columns
+
+The endpoint shrank to one call, plus the HTTP errors that are genuinely its
+own job (404 for no such document, 409 for an unfinished one or one with
+nothing analysed).
+
+**The eval now goes through the database too.** `build_clauses` runs the real
+`process_document`, the same function an upload triggers, against an
+in-memory SQLite database, then reads the clauses back with `load_clauses`:
+
+```python
+engine = create_engine("sqlite://", poolclass=StaticPool)
+SQLModel.metadata.create_all(engine)
+# ... add a Document row ...
+await process_document(doc_id, str(pdf), engine=engine)
+with Session(engine) as session:
+    ...
+    return load_clauses(session, doc_id)
+```
+
+The eval now covers the save-and-read-back as well, which it never did before.
+A field that is saved wrong, or decoded wrong, shows up in the eval's numbers.
+`StaticPool` makes every connection share one in-memory database. Without
+it, each new connection to `sqlite://` would get a fresh, empty database.
+
+`process_document` never raises: in the app it runs as a background task with
+nobody waiting, so it records a failure on the document row instead. In the
+eval somebody *is* waiting, so `build_clauses` checks the row's status and
+raises with the recorded error if the pipeline failed.
+
+**Two smaller changes came with it:**
+
+- **`ref` was dead.** It was a field on `ShortlistClause` that nothing in the
+  repository ever read. The eval filled it with something different from the
+  endpoint (`"synthetic-health-policy:12"` versus a database id), which looked
+  like drift but harmed nothing. It is now `db_id` and is actually used.
+- **The endpoint's `meta` dict went away.** It had built a separate lookup of
+  `(db id, number, heading, page)` per citation id, to map the model's
+  citations back to rows for display. `ShortlistClause` now carries `heading`
+  and a 1-based `page` itself, so the endpoint looks citations up in the list
+  it already has.
+
+## Concept 50: a seam, and when one is real
+
+A **seam** is a place where behaviour can change without editing the code at
+that place. The `engine` parameter on `process_document` is one:
+
+```python
+async def process_document(
+    doc_id: str, pdf_path: str, engine: Engine = engine
+) -> None:
+```
+
+The upload endpoint passes nothing and gets the app's database. The eval
+passes an in-memory one. Nothing inside `process_document` knows which one it
+has.
+
+A useful rule: **one implementation behind a seam is a hypothetical seam; two
+is a real one.** A parameter that only ever receives one value is indirection
+with no payoff. This one has two real callers passing two different
+databases, so it earns its place.
+
+### Why a parameter, and not an environment variable
+
+The test suite already points the app at a throwaway database by setting
+`DB_PATH` in `api/tests/conftest.py` before anything imports the app. The
+same trick was considered for the eval and rejected, because of import order.
+The app reads its settings **once, when `app.config` is first imported**, and
+creates the database engine when `app.db` is first imported. Two of the eval
+scripts, `evals/check_determinism.py` and `evals/real/measure_prompt.py`,
+import app code *before* they import `run_scenario_eval`. By the time
+`build_clauses` could set `DB_PATH`, the setting would already be read, and the
+eval would silently write its test policy into the developer's real
+`data/app.db`. A parameter has no import order.
+
+## A reversed decision
+
+The top of `api/app/pipeline/run.py` used to promise the opposite:
+
+> none of them knows the database exists. That is what lets the eval harness
+> run the identical pipeline with no web server and no database at all.
+
+The first half is still true: `ingest`, `segment`, `analyze` and `score` are
+still pure functions of their inputs, and still usable without a database. The
+second half is deliberately reversed. Running the stages without a database
+meant the eval had to build its clause list by hand, and that hand-built copy
+was exactly the problem. The docstring now says why the eval goes through the
+database on purpose.
+
+## Failure 79: an architecture review that overstated its evidence
+
+This change started from an automated architecture review of the repository.
+The review reported that the endpoint and the eval had **"already drifted"**,
+citing two differences:
+
+- the `ref` values differed
+- the endpoint kept clauses where `analysis is not None`, while the eval
+  kept clauses present in both `analyses` and `scored`
+
+Reading the code before changing it showed that neither was a live bug:
+
+- **`ref` was never read**, so its two values could not disagree about anything.
+- **The filters are equivalent.** The pipeline only saves an analysis row
+  when the clause has *both* an analysis and a score:
+
+  ```python
+  analysis = analyses.get(key)
+  sc = scored.get(key)
+  if analysis is None or sc is None:
+      continue
+  ```
+
+  So "has an analysis row" in the database means exactly "in `analyses` and in
+  `scored`" in memory.
+
+The honest case for the change was weaker and still sufficient. There was no
+bug yet. There was a structure that made the next bug easy, and one fix of the
+same shape (`citation_ids`) already on record. **A refactor's justification
+should be checked against the code before it is acted on**, including when the
+justification comes from a tool.
+
+## Failure 80: thirty-six tests broken by a field's position
+
+The first version put the new fields (`db_id`, `heading`, `page`) together
+where `ref` had been, all three required. The loader's own test passed, and
+the full suite then failed 36 tests with one error:
+
+```
+TypeError: ShortlistClause.__init__() missing 2 required positional arguments: 'text' and 'impact_score'
+```
+
+Many tests in `api/tests/test_scenario.py` build clauses positionally:
+
+```python
+ShortlistClause("2.4", "t:1", "2.4", "coverage", DAY_CARE_TEXT, 1.0)
+```
+
+That is `clause_id, ref, number, clause_type, text, impact_score`. Inserting
+two required fields after the second position shifted every argument after it
+by two, so `"coverage"` landed in `heading` and the call ran out of
+arguments. A dataclass's constructor is positional by default, so **field
+order is part of its interface**.
+
+The fix kept the interface where callers already stood. `db_id` took `ref`'s
+place as the second field, so the positional `"t:1"` now means a database id,
+which is what it had always stood for. `heading` and `page` moved to the end,
+with defaults (`""` and `0`), alongside the other optional fields.
+
+## How it was verified
+
+The test suite only covers pieces of this change. So the change was also
+checked end to end, against the real golden policy:
+
+1. **Before touching any code**, the old `build_clauses` was run and its output
+   saved as JSON. The fields that were being renamed or added were left out.
+2. **After the change**, the new `build_clauses` was run the same way.
+3. The two files were compared **byte for byte: identical**. All 40 clauses
+   had the same values in the same order. The second run made zero model calls
+   (every analysis came from the cache), so any difference would have been the
+   code's, not the model's.
+
+Also checked: no `data/app.db` was created by the eval run, and the whole
+non-model test suite passes (265 tests).
+
+A new test, `api/tests/test_load_clauses.py`, seeds an in-memory database and
+pins what the loader promises:
+
+- clauses come back in document order even when inserted out of order
+- a repeated clause number becomes `"10#2"`
+- a clause the model failed on is left out
+- the JSON columns come back as lists
+- pages are 1-based
+
+## What is still not covered
+
+The endpoint's success path (calling `run_scenario`, then mapping citations
+back to rows and saving the `ScenarioRun`) still only runs under the live
+model test. That test is skipped by `-m "not llm"`. The loader made that path
+much smaller, but testing it without a model would need a way to substitute
+the model in `run_scenario`, which is separate work.
+
+## Check it yourself
+
+```bash
+cd api
+.venv/Scripts/python -m pytest tests/test_load_clauses.py -v
+.venv/Scripts/python -m pytest -q -m "not llm"
+```
+
+**Predict before you look:** in `tests/test_load_clauses.py`, the clauses are
+added to the database in the order 2, 1, 0, and clause 2 has no analysis.
+Clauses 0 and 1 are both numbered `"10"`. Which clause gets `"10"` and which
+gets `"10#2"`, and why can't the answer depend on the insert order?
+
+<details>
+<summary>Answer</summary>
+
+Clause 0 gets `"10"` and clause 1 gets `"10#2"`. `load_clauses` sorts by
+`order_idx`, the clause's position in the document, before assigning ids, and
+`citation_ids` gives the unsuffixed number to the first occurrence in document
+order. The order rows were inserted in, or the order SQLite happens to return
+them without an `ORDER BY`, never reaches the id assignment. That matters
+because the ids are what the model cites: if they depended on storage order,
+the same policy could give the same citation two different meanings.
+</details>
+
+---
+
+## M19, part 2: one duration rule, one meaning of "stated"
+
+### The starting position
+
+The scenario simulator's first step asks the model to read the person's
+question into a flat dictionary of facts (`FACTS_SCHEMA` in
+`api/app/pipeline/scenario.py`). Durations come back as two fields each, a
+number and a unit, because converting units is arithmetic and the project keeps
+arithmetic out of the model:
+
+```
+time_since_policy_start_value: 14      time_since_policy_start_unit: "months"
+expense_timing_value: 120              expense_timing_unit: "days"
+condition_known_for_value: 1           condition_known_for_unit: "months"
+```
+
+Python then turns each pair into days. It did that in **three functions with
+the same four lines**, differing only in which keys they read:
+
+```python
+def policy_age_days(facts):
+    value = facts.get("time_since_policy_start_value")
+    unit = facts.get("time_since_policy_start_unit")
+    if not value or value <= 0 or unit not in _DAYS_PER_UNIT:
+        return None
+    return value * _DAYS_PER_UNIT[unit]
+
+def expense_offset_days(facts): ...     # same, "expense_timing_*"
+def condition_known_days(facts): ...    # same, "condition_known_for_*"
+```
+
+A second rule was copied too: **what counts as a fact the person actually
+gave.** Three places answered it, each with its own tuple:
+
+- `run_scenario` listed the missing decisive facts: `facts.get(k) in (None, "", "unknown")`
+- the reasoning prompt listed them again the same way, and listed the known
+  facts with a *different* tuple: `v not in (None, "", [], "unknown")`
+- the scenario endpoint filtered the facts it shows the reader: `v not in (None, "", "unknown")`
+
+Three copies of a rule are three chances to change one and not the others. A
+wrong duration conversion here changes which waiting periods have been served,
+and a wrong "missing" list tells a reader the system needs information they
+already gave.
+
+### The change
+
+One conversion, parameterised by the name every duration already shares:
+
+```python
+def duration_days(facts: dict[str, Any], name: str) -> int | None:
+    value = facts.get(f"{name}_value")
+    unit = facts.get(f"{name}_unit")
+    if not value or value <= 0 or unit not in _DAYS_PER_UNIT:
+        return None
+    return value * _DAYS_PER_UNIT[unit]
+```
+
+One meaning of "stated", and the missing list built from it:
+
+```python
+def stated(value: Any) -> bool:
+    return value not in (None, "", [], "unknown")
+
+def missing_facts(facts: dict[str, Any]) -> list[str]:
+    return [k for k in DECISIVE_FACTS if not stated(facts.get(k))]
+```
+
+`run_scenario` and the prompt call `missing_facts`; the prompt and the
+endpoint call `stated`. The tuples differed only by `[]`. No extracted fact
+is ever a list (the facts schema contains no arrays), so the merge changes
+nothing, and the byte-for-byte check below confirms it.
+
+### What was considered and rejected
+
+A **`Facts` class** (a value object wrapping the dictionary, with the derived
+numbers as properties) was the first idea. It fails the deletion test
+(Concept 49). Most readers of the facts need raw keys:
+
+- the reduction check reads `sum_insured_value`, `room_is_icu` and `age`
+- the prompt prints every stated fact
+- the endpoint returns the dictionary
+- the eval compares it against an answer key
+
+So each of them would reach through the class to the dictionary inside it. A
+class that its callers have to see through is not hiding anything.
+
+A **typed class with one field per fact** was rejected faster. It would be a
+21-field list maintained by hand beside `FACTS_SCHEMA`, which is exactly the
+kind of parallel list the first half of M19 removed.
+
+### A known gap, deliberately left open
+
+The architecture review that proposed this change also pointed at a
+behaviour. `derive_pre_existing` can settle, by comparing two durations, that
+a condition began *after* the policy did. But the waiting-period check never
+receives that answer. Its line for a pre-existing-diseases clause still says:
+
+```
+concerns ONLY an illness the person already had when the policy began.
+Unless the description says this one had begun by then, it is not the
+reason for this claim.
+```
+
+This is true but hedged, when code already knows the answer. Passing the
+derived fact into `waiting.evaluate` would change the prompt, and a prompt
+change in this project has to be measured, not assumed. Before building it,
+the latest scenario report was checked for a wrong answer this could explain.
+None of the six verdict misses is one. The only pre-existing-condition miss,
+`ped-waiting-served`, is a condition that *was* pre-existing, answered by
+citing the cosmetic-surgery exclusion. So the change was not made. It becomes
+worth making when a case shows the hedge costing an answer.
+
+### How it was verified
+
+A refactor that promises "no behaviour change" should be checked on the
+behaviour, not just the tests:
+
+1. **Before any edit**, the reasoning prompt was rendered for every scenario
+   case: the 40 main cases and both held-out batches, 69 in all. The script
+   used the real facts extracted for each case and the real computed
+   waiting-period, reduction and window blocks. It saved each prompt with its
+   missing-facts list.
+2. **After the edit**, the same script ran again.
+3. The two files were **byte-for-byte identical**. The second run made zero
+   model calls, so the facts were the same stored answers both times.
+
+The whole non-model test suite passes (265). The existing tests of the
+policy-age conversion now call `duration_days` through
+`partial(duration_days, name="time_since_policy_start")`, so their assertions
+did not change.
+
+### Check it yourself
+
+```bash
+cd api
+.venv/Scripts/python -m pytest tests/test_scenario.py -q -k "policy_age or pre_existing or not_stated"
+```
+
+**Predict before you look:** `duration_days({"expense_timing_value": 0,
+"expense_timing_unit": "days"}, "expense_timing")` — is the answer `0` or
+`None`, and why does the difference matter for a waiting period?
+
+<details>
+<summary>Answer</summary>
+
+`None`. A value of zero is treated as unstated (`not value` is true for 0).
+For the policy's age this is deliberate: nobody claims on a policy held for
+zero days, so a 0 is far more likely to be the model filling a slot than the
+person saying it. And a `None` makes every waiting period come back UNKNOWN,
+which can lead to an honest "insufficient information". A 0 would mark every
+waiting period as not served and refuse the claim on a number nobody said.
+</details>

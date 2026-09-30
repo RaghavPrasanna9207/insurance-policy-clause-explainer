@@ -216,3 +216,36 @@ def test_buriedness_boost_is_bounded():
     """Buriedness can lift a score by at most BURIEDNESS_BOOST, never invert
     the type hierarchy on its own."""
     assert 0 < BURIEDNESS_BOOST <= 0.5
+
+
+def test_a_list_of_item_names_does_not_report_an_impossible_grade():
+    """Flesch-Kincaid divides by sentences, and a list terminates none.
+
+    Star Health's annexure "LIST I - Items for which coverage is not available"
+    is 145 lines of item names - "BABY FOOD", "OXYGEN CYLINDER (FOR USAGE
+    OUTSIDE THE HOSPITAL)" - with not one full stop among them. Splitting on
+    full stops made the whole annexure a single 221-word sentence, and the UI
+    told the user it was "written at grade 94 reading level". There is no grade
+    94. Where a text terminates nothing, the unit a reader takes in at once is
+    the line.
+
+    Line breaks are deliberately not used for text that DOES end sentences: in
+    wrapped prose they fall wherever the measure ran out and mean nothing.
+    """
+    listing = "\n".join([
+        "LIST I - Items for which coverage is not available",
+        "BABY FOOD", "BABY UTILITIES CHARGES", "BEAUTY SERVICES",
+        "BELTS/ BRACES", "BUDS", "COLD PACK/HOT PACK", "CARRY BAGS",
+        "EMAIL / INTERNET CHARGES", "LEGGINGS", "TELEPHONE CHARGES",
+    ])
+    assert flesch_kincaid_grade(listing) < 20
+
+    prose = (
+        "The Company shall indemnify medical expenses incurred for hospitalisation "
+        "of the Insured Person during the Policy period. The expenses shall be "
+        "reimbursed subject to the Sum Insured specified in the Schedule."
+    )
+    wrapped = prose.replace(" during", "\nduring").replace(" subject", "\nsubject")
+    assert flesch_kincaid_grade(prose) == flesch_kincaid_grade(wrapped), (
+        "where sentences exist, where the lines happen to break must not matter"
+    )

@@ -93,32 +93,33 @@ CHARS_PER_TOKEN = 3.5
 _DAYS_PER_UNIT = {"days": 1, "weeks": 7, "months": 30, "years": 365}
 
 
-def policy_age_days(facts: dict[str, Any]) -> int | None:
-    """How long the policy has been held, in days, or None if unstated.
+def duration_days(facts: dict[str, Any], name: str) -> int | None:
+    """A duration the person stated, in days, or None if unstated.
 
-    None is a real answer and must not be replaced with a default. Every
-    waiting period then comes back UNKNOWN, which is what lets the verdict
-    be insufficient_information rather than a guess.
+    Every duration is extracted as a `<name>_value` and a `<name>_unit`:
+    `time_since_policy_start` (how long the policy has been held),
+    `expense_timing` (how far an expense fell from a hospital stay) and
+    `condition_known_for`. The model reports the sentence; this converts.
+
+    None is a real answer and must not be replaced with a default. With the
+    policy's age unstated, every waiting period comes back UNKNOWN, which is
+    what lets the verdict be insufficient_information rather than a guess.
     """
-    value = facts.get("time_since_policy_start_value")
-    unit = facts.get("time_since_policy_start_unit")
+    value = facts.get(f"{name}_value")
+    unit = facts.get(f"{name}_unit")
     if not value or value <= 0 or unit not in _DAYS_PER_UNIT:
         return None
     return value * _DAYS_PER_UNIT[unit]
 
 
-def expense_offset_days(facts: dict[str, Any]) -> int | None:
-    """How many days before admission or after discharge an expense fell.
+def stated(value: Any) -> bool:
+    """Whether the person actually gave this fact.
 
-    The same conversion as `policy_age_days`, applied to a different
-    measurement: this one counts from a hospital stay, not from the day the
-    policy began. None when unstated, never a default.
+    Null, empty and "unknown" all mean they did not. One definition, because
+    the reasoning prompt, the list of missing facts and the facts shown back
+    to the reader must agree on what counts as said.
     """
-    value = facts.get("expense_timing_value")
-    unit = facts.get("expense_timing_unit")
-    if not value or value <= 0 or unit not in _DAYS_PER_UNIT:
-        return None
-    return value * _DAYS_PER_UNIT[unit]
+    return value not in (None, "", [], "unknown")
 
 # Facts that can actually decide an outcome under an Indian health policy.
 #
@@ -135,6 +136,11 @@ DECISIVE_FACTS = (
     "hospitalised",
     "hours_since_admission",
 )
+
+
+def missing_facts(facts: dict[str, Any]) -> list[str]:
+    """The decisive facts the person did not state, in DECISIVE_FACTS order."""
+    return [k for k in DECISIVE_FACTS if not stated(facts.get(k))]
 
 
 @dataclass
@@ -158,7 +164,7 @@ class ShortlistClause:
     """
 
     clause_id: str  # the policy's clause number where it has one
-    ref: str  # the database id, for mapping the answer back
+    db_id: str  # the database row a citation of this clause maps back to
     number: str
     clause_type: str
     text: str
@@ -184,6 +190,9 @@ class ShortlistClause:
     # The section this clause was segmented under. Used to tell whether an
     # annexure another clause refers to is part of the document at all.
     section_path: str = ""
+    # What the reader is shown for a citation of this clause.
+    heading: str = ""
+    page: int = 0  # 1-based; 0 only where no page is known
 
 
 def citation_ids(numbered: list[tuple[str, int]]) -> list[str]:
@@ -314,6 +323,19 @@ FACTS_SCHEMA: dict[str, Any] = {
             "type": ["string", "null"],
             "enum": ["before_admission", "after_discharge", None],
         },
+        # HOW LONG THE CONDITION HAS BEEN KNOWN, as a value and a unit, like
+        # every other duration here. Whether a condition is pre-existing is
+        # often not stated at all - it is the comparison between this and
+        # `time_since_policy_start`. "Found last month" on a policy bought 14
+        # months ago is a condition that arose 13 months INTO cover, and the
+        # model was answering "unknown" to it, because working that out is
+        # subtraction. The model reports the sentence; `derive_pre_existing`
+        # below does the comparison.
+        "condition_known_for_value": {"type": ["integer", "null"]},
+        "condition_known_for_unit": {
+            "type": ["string", "null"],
+            "enum": ["days", "weeks", "months", "years", None],
+        },
         "pre_existing_condition": {
             "type": "string",
             "enum": ["yes", "no", "unknown"],
@@ -327,6 +349,7 @@ FACTS_SCHEMA: dict[str, Any] = {
         "estimated_cost_inr", "sum_insured_value", "sum_insured_unit",
         "room_rent_per_day_inr", "room_is_icu",
         "expense_timing_value", "expense_timing_unit", "expense_timing_anchor",
+        "condition_known_for_value", "condition_known_for_unit",
         "pre_existing_condition", "notes",
     ],
 }
@@ -362,6 +385,39 @@ def correct_misfiled_age(facts: dict[str, Any], scenario: str) -> dict[str, Any]
     return facts
 
 
+def derive_pre_existing(facts: dict[str, Any]) -> dict[str, Any]:
+    """Settle whether a condition predates the policy, by comparing two durations.
+
+    Measured on Star Health: "I need surgery for an inguinal hernia that was
+    found last month. I bought this policy 14 months ago and it is my first
+    health insurance." came back `pre_existing_condition: "unknown"`, and the
+    interface then told the reader it would need to know whether the condition
+    was pre-existing - about a description that says so twice over. A condition
+    found one month ago, under a policy held for fourteen, began thirteen months
+    INTO cover. Nothing about that is a judgement; it is one subtraction, and
+    this project's whole design keeps arithmetic out of the model.
+
+    TWO RULES, AND WHY EACH IS NARROW.
+
+    Only fills an "unknown". A person who says outright that a condition is
+    long-standing has given evidence no comparison should overrule - and a
+    wrong "yes" here denies a claim that should be paid, while a wrong "no"
+    pays one that should not. Neither mistake is cheap, so the correction acts
+    only where the model declined to answer.
+
+    Only fires when BOTH durations were stated. One duration is not a
+    comparison, and guessing the other is exactly the invention the extraction
+    prompt spends its length forbidding.
+    """
+    if facts.get("pre_existing_condition") != "unknown":
+        return facts
+    known = duration_days(facts, "condition_known_for")
+    policy = duration_days(facts, "time_since_policy_start")
+    if known is None or policy is None or known == policy:
+        return facts
+    return facts | {"pre_existing_condition": "yes" if known > policy else "no"}
+
+
 async def extract_facts(scenario: str, *, use_cache: bool = True) -> dict[str, Any]:
     facts = await client.complete_json(
         [
@@ -371,7 +427,7 @@ async def extract_facts(scenario: str, *, use_cache: bool = True) -> dict[str, A
         FACTS_SCHEMA,
         use_cache=use_cache,
     )
-    return correct_misfiled_age(facts, scenario)
+    return derive_pre_existing(correct_misfiled_age(facts, scenario))
 
 
 # --- 5b: shortlist (no LLM) ----------------------------------------------
@@ -786,7 +842,7 @@ class Computed:
 
 
 def compute(facts: dict[str, Any], clauses: list[ShortlistClause]) -> Computed:
-    held = policy_age_days(facts)
+    held = duration_days(facts, "time_since_policy_start")
     return Computed(
         absent=absent_annexures(clauses),
         # Every waiting period compared against the stated policy age, in
@@ -803,7 +859,8 @@ def compute(facts: dict[str, Any], clauses: list[ShortlistClause]) -> Computed:
         # The third family: whether an expense before admission or after
         # discharge fell inside the policy's window. Silent unless raised.
         windows=window.evaluate(
-            clauses, facts.get("expense_timing_anchor"), expense_offset_days(facts)
+            clauses, facts.get("expense_timing_anchor"),
+            duration_days(facts, "expense_timing"),
         ),
     )
 
@@ -1083,7 +1140,7 @@ async def run_scenario(
     resampled is written back, so the stored answer remains the baseline.
     """
     facts = await extract_facts(scenario)
-    missing = [k for k in DECISIVE_FACTS if facts.get(k) in (None, "", "unknown")]
+    missing = missing_facts(facts)
 
     considered = shortlist(clauses)
     if not considered:

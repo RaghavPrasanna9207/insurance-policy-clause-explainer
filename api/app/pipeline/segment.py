@@ -184,13 +184,34 @@ def _numbering(text: str) -> tuple[str, bool] | None:
     return None
 
 
+def _despaced(text: str) -> str:
+    """Letter-spaced display type read back as words.
+
+    Star sets all nine of its major headings with the letters held apart -
+    "S T A N D A R D  E X C L U S I O N S" - which is a typesetting effect, not
+    the words on the page. Extraction returns exactly those characters, so every
+    rule that looks for a word inside a heading misses it, and the heading is
+    parsed as a clause instead. Letters are one space apart and words two, so
+    splitting on the double space recovers the words.
+
+    Left alone unless most of the line's tokens are single characters, which is
+    what makes this safe on ordinary text: no real sentence is mostly one-letter
+    words. It also repairs a line extraction spaced irregularly,
+    "C O N D ITION S", because the word break is the only boundary it uses.
+    """
+    tokens = text.split()
+    if len(tokens) < 4 or sum(len(t) == 1 for t in tokens) / len(tokens) <= 0.6:
+        return text
+    return " ".join("".join(word.split()) for word in re.split(r"\s{2,}", text.strip()))
+
+
 def _looks_like_section(line: Line, body_size: float) -> bool:
     """A section heading: big and bold, or an unmistakable named heading."""
     if line.size >= body_size * SECTION_SIZE_RATIO and line.bold:
         return True
     # Fallbacks for unstyled documents. Length-capped so a shouty sentence in
     # the body cannot masquerade as a heading.
-    stripped = line.text.strip()
+    stripped = _despaced(line.text.strip())
     if len(stripped) <= 70 and stripped.isupper():
         if _RE_SECTION_HEAD.match(stripped):
             return True
@@ -266,6 +287,51 @@ def _split_oversized(seg: Segment, raw_text: str) -> list[Segment]:
     return pieces
 
 
+def _merge_leadins(segments: list[Segment], raw_text: str) -> list[Segment]:
+    """Attach a list's lead-in sentence to the clause it introduces.
+
+    Two of the three real wordings measured open their exclusions with an
+    unnumbered fragment that the numbered items below it complete:
+
+        "The Company shall not be liable to make any payments under this Policy
+         in respect of any expenses what so ever incurred by the Insured Person
+         in connection with or in respect of;"          - Star Arogya Sanjeevani
+        "The Company shall not make payment for any claim ... attributable to
+         any of the following unless ..."               - HDFC Optima Secure
+
+    On its own that is not a clause, it is a sentence with its object missing,
+    and stage 3 has to guess what it excludes. Star's came back as "The policy
+    will never pay for any medical expenses you incur" - false, maximally
+    severe, and ranked second on the dashboard, which is the first thing a user
+    sees. Joining it to the clause below restores the object it was written
+    with, and nothing is dropped from the document.
+
+    The join is a slice of `raw_text`, not a concatenation, so
+    `raw_text[char_start:char_end] == text` still holds; a heading sitting
+    between the two comes back with it, which is what the page shows anyway.
+
+    Only unnumbered fragments are eligible, so a numbered clause that happens to
+    end on a colon keeps its own identity and is never swallowed.
+    """
+    merged: list[Segment] = []
+    for seg in reversed(segments):
+        if merged and not seg.number and seg.text.rstrip().endswith((":", ";")):
+            follower = merged[0]
+            follower.text = raw_text[seg.char_start : follower.char_end]
+            follower.char_start = seg.char_start
+            follower.page_start = seg.page_start
+            follower.bboxes = seg.bboxes + follower.bboxes
+            # HDFC's first exclusion already fills 2,997 of the 3,000-character
+            # cap, so refusing to merge over the cap would have left that
+            # document's lead-in stranded - the exact case this exists for.
+            # Re-splitting keeps the lead-in on the first piece and moves the
+            # overflow into a continuation, which is what the cap is for.
+            merged[0:1] = _split_oversized(follower, raw_text)
+            continue
+        merged.insert(0, seg)
+    return merged
+
+
 def segment(result: IngestResult) -> list[Segment]:
     """Split an ingested document into clauses."""
     body_size = result.body_size()
@@ -311,7 +377,7 @@ def segment(result: IngestResult) -> list[Segment]:
         # pattern. Size is what tells them apart.
         if _looks_like_section(line, body_size):
             flush()
-            section = line.text.strip()
+            section = _despaced(line.text.strip())
             continue
 
         text = _as_read(lines, i)
@@ -347,6 +413,7 @@ def segment(result: IngestResult) -> list[Segment]:
 
     flush()
 
+    segments = _merge_leadins(segments, result.raw_text)
     for idx, seg in enumerate(segments):
         seg.order_idx = idx
     return segments

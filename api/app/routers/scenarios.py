@@ -9,8 +9,8 @@ from sqlmodel import Session
 
 from app.db import get_session
 from app.models import Document, ScenarioRun
-from app.pipeline.run import clause_rows
-from app.pipeline.scenario import ShortlistClause, citation_ids, run_scenario
+from app.pipeline.run import load_clauses
+from app.pipeline.scenario import run_scenario, stated
 from app.schemas import CitationOut, ScenarioRequest, ScenarioResponse
 from app.taxonomy import DocStatus
 
@@ -39,64 +39,24 @@ async def create_scenario(
         # subset of the clauses while appearing to consider all of them.
         raise HTTPException(409, "This policy has not finished being analysed")
 
-    # Sorted here, not trusted from the query, which has no ORDER BY. Two things
-    # depend on document order: which repeat of a number becomes "10#2" - the
-    # eval must assign the same ids - and the order the shortlist keeps.
-    rows = sorted(
-        ((c, a) for c, a in clause_rows(session, doc_id) if a is not None),
-        key=lambda row: row[0].order_idx,
-    )
-    if not rows:
+    # The same list the scenario eval measures, from the same function.
+    clauses = load_clauses(session, doc_id)
+    if not clauses:
         raise HTTPException(409, "This policy has no analysed clauses")
 
-    # The citation id the model sees is the policy's OWN clause number, so the
-    # id it cites and the number printed inside the clause text are the same
-    # string. `ref` carries the database id so the answer can be mapped back to
-    # a real row for the page number and heading.
-    #
-    # Numbers are made unique: real wordings repeat them, and a duplicate id
-    # would make a citation ambiguous.
-    ids = citation_ids([(clause.number, clause.order_idx) for clause, _ in rows])
-    shortlist_clauses: list[ShortlistClause] = []
-    meta: dict[str, tuple] = {}
-    for (clause, analysis), citation_id in zip(rows, ids):
-        shortlist_clauses.append(
-            ShortlistClause(
-                clause_id=citation_id,
-                ref=clause.id,
-                number=clause.number,
-                clause_type=analysis.clause_type,
-                text=clause.text,
-                impact_score=analysis.impact_score,
-                waiting_periods_days=json.loads(analysis.waiting_periods_json or "[]"),
-                exceptions=json.loads(analysis.exceptions_json or "[]"),
-                copay_percent=analysis.copay_percent,
-                copay_min_age_at_inception=analysis.copay_min_age_at_inception,
-                cap_percent_of_sum_insured=analysis.cap_percent_of_sum_insured,
-                icu_cap_percent_of_sum_insured=(
-                    analysis.icu_cap_percent_of_sum_insured
-                ),
-                cap_max_inr_per_day=analysis.cap_max_inr_per_day,
-                icu_cap_max_inr_per_day=analysis.icu_cap_max_inr_per_day,
-                cover_window_days=analysis.cover_window_days,
-                cover_window_anchor=analysis.cover_window_anchor,
-                section_path=clause.section_path,
-            )
-        )
-        meta[citation_id] = (clause.id, clause.number, clause.heading, clause.page_start + 1)
+    result = await run_scenario(request.scenario, clauses)
 
-    result = await run_scenario(request.scenario, shortlist_clauses)
-
+    by_id = {clause.clause_id: clause for clause in clauses}
     citations = []
     for citation in result.citations:
-        db_id, number, heading, page = meta.get(citation.clause_id, (None, "", "", 0))
+        cited = by_id.get(citation.clause_id)
         citations.append(
             CitationOut(
                 clause_id=citation.clause_id,
-                clause_db_id=db_id,
-                number=number,
-                heading=heading,
-                page=page,
+                clause_db_id=cited.db_id if cited else None,
+                number=cited.number if cited else "",
+                heading=cited.heading if cited else "",
+                page=cited.page if cited else 0,
                 effect=citation.effect,
                 quote=citation.quote,
                 verified=citation.verified,
@@ -128,7 +88,7 @@ async def create_scenario(
         reasoning=result.reasoning,
         citations=citations,
         missing_facts=result.missing_facts,
-        facts={k: v for k, v in result.facts.items() if v not in (None, "", "unknown")},
+        facts={k: v for k, v in result.facts.items() if stated(v)},
         verified=result.verified,
         clauses_considered=result.clauses_considered,
     )

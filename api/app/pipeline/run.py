@@ -3,8 +3,13 @@
 This is the only place the four stages are wired together. Each stage stays a
 pure function of its input - `ingest(path)`, `segment(result)`,
 `analyze(segments)`, `score(segments, analyses)` - and none of them knows the
-database exists. That is what lets the eval harness run the identical pipeline
-with no web server and no database at all.
+database exists.
+
+The scenario eval nonetheless goes through the database on purpose: it runs
+`process_document` against a throwaway in-memory database (the `engine`
+parameter) and reads the clauses back with `load_clauses`, the same function
+the scenario endpoint uses. An eval that built its clause list its own way
+would be measuring an input the endpoint never sends.
 
 STATUS REPORTING
 ----------------
@@ -23,12 +28,14 @@ import json
 import logging
 import traceback
 
+from sqlalchemy import Engine
 from sqlmodel import Session, delete, select
 
 from app.db import engine
 from app.models import Clause, ClauseAnalysis, Document
 from app.pipeline.analyze import analyze
 from app.pipeline.ingest import ingest
+from app.pipeline.scenario import ShortlistClause, citation_ids
 from app.pipeline.score import score
 from app.pipeline.segment import segment
 from app.taxonomy import DocStatus
@@ -41,7 +48,7 @@ _PROGRESS_ANALYSIS_START = 0.10
 _PROGRESS_ANALYSIS_END = 0.95
 
 
-def _update(doc_id: str, **fields) -> None:
+def _update(engine: Engine, doc_id: str, **fields) -> None:
     """Write status fields in their own short-lived session.
 
     Deliberately not reusing a long-lived session held across the whole run:
@@ -58,7 +65,9 @@ def _update(doc_id: str, **fields) -> None:
         session.commit()
 
 
-async def process_document(doc_id: str, pdf_path: str) -> None:
+async def process_document(
+    doc_id: str, pdf_path: str, engine: Engine = engine
+) -> None:
     """Run the full pipeline for one document, recording progress as it goes.
 
     Never raises. This runs as a background task with nobody waiting on it, so
@@ -67,19 +76,19 @@ async def process_document(doc_id: str, pdf_path: str) -> None:
     row instead, where the polling UI can surface them.
     """
     try:
-        _update(doc_id, status=DocStatus.INGESTING,
+        _update(engine, doc_id, status=DocStatus.INGESTING,
                 stage_detail="Reading the PDF", progress=0.01)
         ingested = ingest(pdf_path)
 
-        _update(doc_id, status=DocStatus.SEGMENTING,
+        _update(engine, doc_id, status=DocStatus.SEGMENTING,
                 stage_detail="Finding clause boundaries",
                 progress=_PROGRESS_SEGMENTED,
                 page_count=ingested.page_count,
                 raw_text=ingested.raw_text)
         segments = segment(ingested)
 
-        _persist_clauses(doc_id, segments)
-        _update(doc_id, status=DocStatus.ANALYZING,
+        _persist_clauses(engine, doc_id, segments)
+        _update(engine, doc_id, status=DocStatus.ANALYZING,
                 stage_detail=f"Reading {len(segments)} clauses",
                 progress=_PROGRESS_ANALYSIS_START,
                 clause_count=len(segments))
@@ -87,19 +96,19 @@ async def process_document(doc_id: str, pdf_path: str) -> None:
         def on_progress(done: int, total: int) -> None:
             span = _PROGRESS_ANALYSIS_END - _PROGRESS_ANALYSIS_START
             _update(
-                doc_id,
+                engine, doc_id,
                 stage_detail=f"Read {done} of {total} clauses",
                 progress=_PROGRESS_ANALYSIS_START + span * (done / max(total, 1)),
             )
 
         analyses = await analyze(segments, progress=on_progress)
 
-        _update(doc_id, status=DocStatus.SCORING,
+        _update(engine, doc_id, status=DocStatus.SCORING,
                 stage_detail="Ranking by claim-denial impact",
                 progress=_PROGRESS_ANALYSIS_END)
         scored = score(segments, analyses)
 
-        _persist_analyses(doc_id, segments, analyses, scored)
+        _persist_analyses(engine, doc_id, segments, analyses, scored)
 
         analysed = len(analyses)
         detail = f"Analysed {analysed} of {len(segments)} clauses"
@@ -107,12 +116,12 @@ async def process_document(doc_id: str, pdf_path: str) -> None:
             # Stated plainly rather than hidden. An incomplete analysis means
             # the user is looking at a policy that may be riskier than shown.
             detail += " - some could not be read"
-        _update(doc_id, status=DocStatus.READY, stage_detail=detail, progress=1.0)
+        _update(engine, doc_id, status=DocStatus.READY, stage_detail=detail, progress=1.0)
 
     except Exception as exc:
         log.exception("pipeline failed for %s", doc_id)
         _update(
-            doc_id,
+            engine, doc_id,
             status=DocStatus.FAILED,
             stage_detail="Processing failed",
             error=f"{type(exc).__name__}: {exc}",
@@ -121,7 +130,7 @@ async def process_document(doc_id: str, pdf_path: str) -> None:
         log.debug(traceback.format_exc())
 
 
-def _persist_clauses(doc_id: str, segments) -> None:
+def _persist_clauses(engine: Engine, doc_id: str, segments) -> None:
     """Store clause structure. Written before analysis begins.
 
     Splitting the write means a run that dies mid-analysis still leaves the
@@ -152,7 +161,7 @@ def _persist_clauses(doc_id: str, segments) -> None:
         session.commit()
 
 
-def _persist_analyses(doc_id: str, segments, analyses, scored) -> None:
+def _persist_analyses(engine: Engine, doc_id: str, segments, analyses, scored) -> None:
     from app.config import settings
     from app.llm.prompts import PROMPT_VERSION
 
@@ -216,3 +225,46 @@ def clause_rows(session: Session, doc_id: str):
         .where(Clause.doc_id == doc_id)
     )
     return session.exec(statement).all()
+
+
+def load_clauses(session: Session, doc_id: str) -> list[ShortlistClause]:
+    """Every analysed clause of a document, as the scenario step receives it.
+
+    The scenario endpoint and the scenario eval both build their clause list
+    here. They used to build it separately, one field at a time, 17 fields
+    each; a field added to one and forgotten in the other would have left the
+    eval measuring a different input from the one the endpoint ships.
+
+    Clauses the model failed on are left out: there is nothing to reason with.
+    """
+    # Sorted here: the query has no ORDER BY, and document order decides which
+    # repeat of a number becomes "10#2" and the order the shortlist keeps.
+    rows = sorted(
+        ((c, a) for c, a in clause_rows(session, doc_id) if a is not None),
+        key=lambda row: row[0].order_idx,
+    )
+    ids = citation_ids([(clause.number, clause.order_idx) for clause, _ in rows])
+    return [
+        ShortlistClause(
+            clause_id=citation_id,
+            db_id=clause.id,
+            heading=clause.heading,
+            page=clause.page_start + 1,
+            number=clause.number,
+            clause_type=analysis.clause_type,
+            text=clause.text,
+            impact_score=analysis.impact_score,
+            waiting_periods_days=json.loads(analysis.waiting_periods_json or "[]"),
+            exceptions=json.loads(analysis.exceptions_json or "[]"),
+            copay_percent=analysis.copay_percent,
+            copay_min_age_at_inception=analysis.copay_min_age_at_inception,
+            cap_percent_of_sum_insured=analysis.cap_percent_of_sum_insured,
+            icu_cap_percent_of_sum_insured=analysis.icu_cap_percent_of_sum_insured,
+            cap_max_inr_per_day=analysis.cap_max_inr_per_day,
+            icu_cap_max_inr_per_day=analysis.icu_cap_max_inr_per_day,
+            cover_window_days=analysis.cover_window_days,
+            cover_window_anchor=analysis.cover_window_anchor,
+            section_path=clause.section_path,
+        )
+        for (clause, analysis), citation_id in zip(rows, ids)
+    ]

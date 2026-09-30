@@ -49,16 +49,16 @@ from app.config import settings  # noqa: E402
 from app.grounding import verify_quote  # noqa: E402
 from app.llm.prompts import PROMPT_VERSION  # noqa: E402
 from app.llm import cache, client  # noqa: E402
-from app.pipeline.analyze import analyze  # noqa: E402
-from app.pipeline.ingest import ingest  # noqa: E402
+from app.models import Document  # noqa: E402
+from app.pipeline.run import load_clauses, process_document  # noqa: E402
 from app.pipeline.scenario import (  # noqa: E402
     ShortlistClause,
-    citation_ids,
     extract_facts,
     run_scenario,
 )
-from app.pipeline.score import score  # noqa: E402
-from app.pipeline.segment import segment  # noqa: E402
+from app.taxonomy import DocStatus  # noqa: E402
+from sqlalchemy.pool import StaticPool  # noqa: E402
+from sqlmodel import Session, SQLModel, create_engine  # noqa: E402
 
 GOLDEN_DIR = REPO_ROOT / "evals" / "golden"
 GOLDEN_PDF = GOLDEN_DIR / "synthetic-health-policy.pdf"
@@ -73,45 +73,29 @@ REPORT_PATH = REPO_ROOT / "evals" / "scenario-report.md"
 
 
 async def build_clauses(pdf: Path = GOLDEN_PDF) -> list[ShortlistClause]:
-    """Run the map pipeline once; every scenario reuses the result."""
-    result = ingest(pdf)
-    segments = segment(result)
-    analyses = await analyze(segments)
-    scored = score(segments, analyses)
+    """Run the map pipeline once; every scenario reuses the result.
 
-    analysed = [
-        seg for seg in segments
-        if str(seg.order_idx) in analyses and str(seg.order_idx) in scored
-    ]
-    # The same ids the scenario endpoint gives the model, from the same function.
-    ids = citation_ids([(seg.number, seg.order_idx) for seg in analysed])
+    Through the same path as an upload - `process_document`, then
+    `load_clauses` - so the eval reasons over exactly the list the scenario
+    endpoint would send. The database is in memory and thrown away: the eval
+    never touches the app's real one.
+    """
+    engine = create_engine("sqlite://", poolclass=StaticPool)
+    SQLModel.metadata.create_all(engine)
+    doc_id = pdf.stem
+    with Session(engine) as session:
+        session.add(Document(id=doc_id, filename=pdf.name, stored_path=str(pdf)))
+        session.commit()
 
-    clauses = []
-    for seg, clause_id in zip(analysed, ids):
-        analysis = analyses[str(seg.order_idx)]
-        sc = scored[str(seg.order_idx)]
-        clauses.append(
-            ShortlistClause(
-                clause_id=clause_id,
-                ref=f"{pdf.stem}:{seg.order_idx}",
-                number=seg.number,
-                clause_type=analysis.clause_type,
-                text=seg.text,
-                impact_score=sc.impact_score,
-                waiting_periods_days=analysis.waiting_periods_days,
-                exceptions=analysis.exceptions,
-                copay_percent=analysis.copay_percent,
-                copay_min_age_at_inception=analysis.copay_min_age_at_inception,
-                cap_percent_of_sum_insured=analysis.cap_percent_of_sum_insured,
-                icu_cap_percent_of_sum_insured=analysis.icu_cap_percent_of_sum_insured,
-                cap_max_inr_per_day=analysis.cap_max_inr_per_day,
-                icu_cap_max_inr_per_day=analysis.icu_cap_max_inr_per_day,
-                cover_window_days=analysis.cover_window_days,
-                cover_window_anchor=analysis.cover_window_anchor,
-                section_path=seg.section_path,
-            )
-        )
-    return clauses
+    await process_document(doc_id, str(pdf), engine=engine)
+
+    with Session(engine) as session:
+        document = session.get(Document, doc_id)
+        # process_document records a failure on the row instead of raising,
+        # because in the app nobody is waiting on it. Here somebody is.
+        if document.status != DocStatus.READY:
+            raise RuntimeError(f"pipeline failed on {pdf.name}: {document.error}")
+        return load_clauses(session, doc_id)
 
 
 NO_ANSWER = "no_answer"
