@@ -362,6 +362,64 @@ def test_scenario_rejects_an_empty_question(api_client, seeded_document):
     assert response.status_code == 422
 
 
+def test_scenario_answer_is_mapped_back_to_the_policy_and_stored(
+    api_client, seeded_document, monkeypatch
+):
+    """The endpoint's own work, with the model's part replaced by a fixed answer.
+
+    Everything the endpoint does around `run_scenario` - loading the clauses,
+    turning each citation back into a page and heading, saving the run, and
+    hiding unstated facts - used to run only under the live-model test, so a
+    mapping bug would pass the default suite. Faking `run_scenario` itself, not
+    the model under it, keeps this a test of the endpoint and nothing else.
+    """
+    import json
+
+    from sqlmodel import Session, select
+
+    from app.db import engine
+    from app.models import ScenarioRun
+    from app.pipeline.scenario import Citation, ScenarioResult
+    from app.routers import scenarios
+
+    received = []
+
+    async def fixed_answer(question, clauses):
+        received.extend(clauses)
+        return ScenarioResult(
+            verdict="not_covered",
+            reasoning="Cosmetic surgery is excluded.",
+            citations=[Citation("4.1", "shall not be liable", "denies")],
+            facts={"procedure": "nose job", "age": None, "pre_existing_condition": "unknown"},
+            missing_facts=["age"],
+            clauses_considered=len(clauses),
+        )
+
+    monkeypatch.setattr(scenarios, "run_scenario", fixed_answer)
+
+    response = api_client.post(
+        f"/documents/{seeded_document}/scenarios",
+        json={"scenario": "Will you pay for a nose job?"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    # The model saw every analysed clause, in document order.
+    assert [c.clause_id for c in received] == ["2.1", "3.2", "4.1", "5.1"]
+    # Its citation came back as the reader sees it: a real row, heading, page.
+    cited = body["citations"][0]
+    assert cited["clause_db_id"] == f"{seeded_document}:2"
+    assert cited["heading"] == "4.1 Cosmetic Surgery"
+    assert cited["page"] == 1  # stored 0-based
+    # Facts the person never gave are not shown back as if they had.
+    assert body["facts"] == {"procedure": "nose job"}
+
+    with Session(engine) as session:
+        run = session.exec(select(ScenarioRun).where(ScenarioRun.id == body["id"])).one()
+    assert run.verdict == "not_covered"
+    assert json.loads(run.citations_json)[0]["heading"] == "4.1 Cosmetic Surgery"
+
+
 @pytest.mark.llm
 def test_scenario_end_to_end_is_grounded(api_client, mini_pdf: Path):
     """One real question, all the way through, on the 4-clause policy.
