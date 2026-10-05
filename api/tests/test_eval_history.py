@@ -15,6 +15,7 @@ from run_scenario_eval import (  # noqa: E402
     citation_problems,
     compare_with_previous,
     majority,
+    relied_on,
     render_comparison,
     stability_section,
     unstable_cases,
@@ -280,3 +281,12 @@ def test_a_sample_number_always_asks_in_the_same_order(monkeypatch, tmp_path):
     repeats(2)
 
     assert asked[12:24] == once
+
+
+def test_a_forbidden_clause_counts_only_when_used_against_the_claim():
+    """Naming 5.3 as unsettled is not applying it; reducing the claim with it is."""
+    from app.pipeline.scenario import Citation
+
+    assert relied_on([Citation("5.3", "q", "requires")], {"5.3"}) == []
+    assert relied_on([Citation("5.3", "q", "reduces")], {"5.3"}) == ["5.3"]
+    assert relied_on([Citation("2.1", "q", "denies")], {"5.3"}) == []

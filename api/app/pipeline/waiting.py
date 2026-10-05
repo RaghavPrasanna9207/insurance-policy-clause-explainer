@@ -41,6 +41,11 @@ from enum import StrEnum
 # wins, and is not about them.
 _PRE_EXISTING = re.compile(r"pre[\s-]?existing", re.IGNORECASE)
 _OPENING_CHARS = 60
+# A period that bars only the treatments its clause lists (IRDAI's "Specified
+# disease/procedure waiting period", maternity), recognised the same way. Only
+# these get the narrower line; anything not recognised keeps the firm one,
+# because calling an all-illness period list-only would pay claims it bars.
+_LISTED = re.compile(r"specified|maternity", re.IGNORECASE)
 
 
 class WaitingStatus(StrEnum):
@@ -72,10 +77,26 @@ class WaitingCheck:
     # A pre-existing diseases waiting period, which bars only an illness the
     # person already had.
     pre_existing: bool = False
+    # Whether the person's condition predates the policy - the scenario fact,
+    # after code has settled it where it can ("yes", "no" or "unknown").
+    condition_predates_policy: str = "unknown"
+    # What the period is for, from the clause heading ("Maternity Waiting
+    # Period"). M22: a line saying only "blocks treatment covered by THIS
+    # clause" was read as blocking everything - a 36-month maternity wait was
+    # given as the reason to refuse unrelated claims on a new policy.
+    subject: str = ""
+    # Bars only the treatments its clause lists.
+    listed: bool = False
+
+    def concerns_nothing_here(self) -> bool:
+        """A pre-existing diseases bar, for a condition settled as beginning after the policy."""
+        return self.pre_existing and self.condition_predates_policy == "no"
 
     def describe(self) -> str:
         """A sentence for the reasoning prompt, stating the arithmetic done."""
         who = f"clause {self.clause_id}"
+        if self.subject:
+            who += f" ({self.subject})"
         if self.named:
             words = ", ".join(f'"{w}"' for w in self.named)
             who += f" (it names {words}, from the question)"
@@ -96,6 +117,20 @@ class WaitingCheck:
                 f"decides whether it still blocks the claim: read the clause"
             )
 
+        if self.concerns_nothing_here():
+            # M22: settled in code - the person said so plainly, or two stated
+            # durations decided it. Hedging here ("unless the description
+            # says...") was measured to lose: told nothing firmer, the model
+            # refused a kidney stone "never had before taking the policy" under
+            # this bar.
+            return (
+                f"{who}: concerns ONLY an illness the person already had when the "
+                f"policy began. This one began after the policy did, so this "
+                f"waiting period does not concern this claim"
+            )
+        # No firm line for "yes": measured in M22, a claim whose pre-existing
+        # wait was already served, told the condition was pre-existing, was
+        # refused under the cosmetic exclusion 5 times in 5.
         if self.pre_existing and self.status is not WaitingStatus.SERVED:
             # Regression: on the Star policy, "this waiting period still
             # applies and blocks treatment" for the pre-existing diseases bar
@@ -146,6 +181,20 @@ class WaitingCheck:
                 f"policy held {_human(self.held_days)} -> this waiting period no "
                 f"longer applies (it says nothing about any other clause)"
             )
+        if self.listed and not self.named and not self.exceptions:
+            # M22: told "still applies and blocks treatment covered by THIS
+            # clause", the model refused a thyroid problem, malaria and
+            # appendicitis under the specified-disease period, copying the
+            # line into its reasoning; none is on the clause's list. The
+            # pre-existing lesson again: open with whom the bar concerns.
+            # Not when the question's words appear in the clause - then it
+            # probably is listed, and the firm line stays.
+            return (
+                f"{who}: bars ONLY the treatments this clause lists. If this "
+                f"treatment is not one of them, this period is not the reason "
+                f"for this claim. (Requires {requires}; policy held "
+                f"{_human(self.held_days)}, so not yet served.)"
+            )
         blocked = (
             f"{who}: requires {requires}, "
             f"policy held {_human(self.held_days)} -> this waiting period still "
@@ -191,7 +240,8 @@ def _either(days: list[int]) -> str:
 
 
 def evaluate(
-    clauses, days_held: int | None, named: dict[str, list[str]] | None = None
+    clauses, days_held: int | None, named: dict[str, list[str]] | None = None,
+    condition_predates_policy: str = "unknown",
 ) -> list[WaitingCheck]:
     """Compare every waiting period against how long the policy has been held.
 
@@ -230,6 +280,11 @@ def evaluate(
                 named=list(named.get(clause.clause_id, [])),
                 pre_existing=bool(_PRE_EXISTING.search(
                     getattr(clause, "text", "")[:_OPENING_CHARS])),
+                condition_predates_policy=condition_predates_policy,
+                # The heading repeats the clause number; the line already has it.
+                listed=bool(_LISTED.search(
+                    f"{getattr(clause, 'heading', '')} {getattr(clause, 'text', '')[:_OPENING_CHARS]}")),
+                subject=re.sub(r"^[\d.]+\s*", "", getattr(clause, "heading", "") or ""),
             )
         )
     return checks
@@ -254,6 +309,12 @@ def render(checks: list[WaitingCheck]) -> str:
     """
     if not checks:
         return ""
+
+    # A pre-existing diseases bar for a condition settled as new is not a bar
+    # at all, served or not: it gets its own line saying so, and is kept out of
+    # the blocking and unknown lists that would otherwise count it.
+    not_concerned = [c for c in checks if c.concerns_nothing_here()]
+    checks = [c for c in checks if not c.concerns_nothing_here()]
 
     # The model tends to cite the first bar it reads. A period naming what the
     # person described goes first; a pre-existing diseases period, which may
@@ -294,7 +355,7 @@ def render(checks: list[WaitingCheck]) -> str:
             f"- Already satisfied, so IRRELEVANT here and not worth citing: {ids}"
         )
 
-    for check in [*served_named, *blocking, *unknown]:
+    for check in [*not_concerned, *served_named, *blocking, *unknown]:
         lines.append(f"- {check.describe()}")
 
     if not blocking and not unknown:

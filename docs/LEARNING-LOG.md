@@ -10470,3 +10470,552 @@ appear in the prompt. The model tends to cite the first relevant clause it
 reads, so the same policy could produce different answers if the order
 drifted.
 </details>
+
+
+---
+
+# M22 — Whether an illness began before the policy
+
+## The starting position
+
+Indian health policies carry a **pre-existing disease waiting period**. In the
+synthetic policy it is clause 3.2: an illness the person already had when the
+policy began is not covered until the policy has been held for 36 months. An
+illness that began *after* the policy started is not touched by it at all.
+
+So whether the condition predates the policy decides many claims, and the
+scenario pipeline has a fact for it: `pre_existing_condition`, one of `"yes"`,
+`"no"` or `"unknown"`, filled in by the fact-extraction step (stage 5a, an LLM
+call with a schema). Two eval cases showed that fact going wrong while the
+person had said the answer plainly:
+
+> `ho-copay-derived-age`: "I am 66 and have held this policy for two years. I
+> was admitted for a kidney stone, **which I never had before taking the
+> policy**."
+
+> `ho-knee-replacement-served`: "I needed a knee replacement thirty months
+> after my policy began. **The knee trouble only started after I took the
+> policy out.**"
+
+Both came back `pre_existing_condition: "unknown"`. Both claims were then
+refused under clause 3.2, which had not been served (two years, and thirty
+months, are both short of 36).
+
+The obvious fix was to make the extraction prompt better at this field. Two
+earlier milestones (M18 and M21) had shown why that is expensive: the
+extraction prompt also writes a free-text `notes` field for every question,
+and any change to the prompt rewords those notes for questions that have
+nothing to do with the change. In M21 that cost four unrelated answers
+(Concept 52, *a free-text field is a side channel*). M21's answer was to leave
+the prompt alone and read the person's words with a fixed pattern instead.
+M22 does the same.
+
+## A held-out batch, written before the code
+
+Before any code, a fourth held-out batch was written:
+`evals/golden/scenarios-heldout-4.json`, six cases that say the same kinds of
+thing in other words, plus traps:
+
+| Case | Says | Expected |
+|---|---|---|
+| `ho4-thyroid-after-cover` | "diagnosed with a thyroid problem after I took out this cover", 20 months held | covered |
+| `ho4-asthma-since-childhood` | asthma "well before this policy", two years held | not_covered (3.2) |
+| `ho4-gallstones-found-last-year` | found last year, policy held two years | covered |
+| `ho4-back-trouble-on-and-off` | history, no dates | insufficient_information |
+| `ho4-before-buying-checked-cover` | "Before I bought this policy I checked..." (a trap: no illness) | covered |
+| `ho4-acute-no-history` | appendicitis, nothing about history | covered |
+
+The last case measures a problem M22 deliberately does not try to fix: an
+illness with no history mentioned, refused under 3.2 anyway. On the code
+before M22 (prompt version v51), majority of three samples, this batch scored
+**1 of 6**; only the asthma case was right.
+
+## The lookup
+
+In `api/app/pipeline/scenario.py`:
+
+```python
+# The start of the policy, as people say it: "I took it out", "buying",
+# "my cover started", "this policy".
+_START = (
+    r"(?:I\s+(?:took(?:\s+(?:it|this|the\s+policy|this\s+policy|this\s+cover|the\s+cover))?\s+out"
+    r"|took\s+out\s+(?:this|the|my)\s+(?:policy|cover)|bought|got|started|joined|took)"
+    r"|(?:taking|buying|getting|starting)\b"
+    r"|(?:my|the|this)\s+(?:policy|cover)\s+(?:started|began)"
+    r"|(?:this|the|my)\s+(?:policy|cover)\b)"
+)
+_STATED_NOT_PRE_EXISTING = re.compile(
+    r"\b(?:never|not)\s+(?:had|suffered\s+from)\b[^.;]{0,30}?\bbefore\s+" + _START
+    + r"|\b(?:started|began|begun|developed|appeared|arose|diagnosed|found|noticed)\b"
+    r"[^.;]{0,40}?\bafter\s+" + _START,
+    re.IGNORECASE,
+)
+
+
+def stated_not_pre_existing(scenario: str) -> bool:
+    return bool(_STATED_NOT_PRE_EXISTING.search(scenario))
+```
+
+Two shapes are recognised: "never had ... before taking the policy" and
+"started / was diagnosed ... after I took the policy out". `[^.;]{0,40}?`
+means "up to 40 characters that are not the end of a sentence", so the two
+halves must be in the same sentence and close together. The pattern was run
+against all 78 eval questions and the fact-check sentences before it was used,
+to see every question it matches.
+
+It is used at the end of `extract_facts`, and only to fill in a gap:
+
+```python
+facts = derive_pre_existing(correct_misfiled_age(facts, scenario))
+# After the arithmetic, which is the stronger evidence, and like it, only
+# ever filling in an answer the model declined to give.
+if facts.get("pre_existing_condition") == "unknown" and stated_not_pre_existing(scenario):
+    facts = facts | {"pre_existing_condition": "no"}
+```
+
+`derive_pre_existing` (from M18) is the arithmetic route: if the person said
+both how long they have had the condition and how long they have held the
+policy, the comparison settles it. The lookup runs after it and never
+overrides an answer the model or the arithmetic already gave.
+
+## Telling the waiting-period check
+
+Settling the fact was not enough on its own. The waiting-period block of the
+reasoning prompt (`api/app/pipeline/waiting.py`, the code that does the date
+arithmetic so the model doesn't) did not look at the fact at all. For clause
+3.2 it always wrote a hedged line:
+
+```
+- clause 3.2: concerns ONLY an illness the person already had when the policy
+  began. Unless the description says this one had begun by then, it is not the
+  reason for this claim. (Requires 36 months; policy held 2 years, so not yet
+  served.)
+```
+
+So `evaluate` now takes the settled fact, and each `WaitingCheck` carries it:
+
+```python
+def concerns_nothing_here(self) -> bool:
+    """A pre-existing diseases bar, for a condition settled as beginning after the policy."""
+    return self.pre_existing and self.condition_predates_policy == "no"
+```
+
+When that is true, the line becomes firm, and it is listed first:
+
+```
+- clause 3.2 (Pre-existing Disease Waiting Period): concerns ONLY an illness
+  the person already had when the policy began. This one began after the
+  policy did, so this waiting period does not concern this claim
+```
+
+## Failure 84: the "yes" direction broke a case that was already right
+
+**What was tried.** The first version read the person's words in both
+directions. Besides "began after the policy" → `"no"`, it read "since before
+I bought the policy" → `"yes"`. That needed a guard: "Before I bought this
+policy I checked that it covered hospital stays" says "before I bought" but
+names no illness, so a "yes" only counted in a sentence that also had a verb
+like *had*, *diagnosed* or *since*. When the fact was settled as "yes" and the
+period not served, the waiting-period line said so plainly: "the person's
+condition began before the policy, so this pre-existing disease waiting period
+applies to it ... and blocks this claim".
+
+**What happened.** The request comparison (below) showed six of 78 questions
+changed. Each was asked five times. The knee case was fixed, five of five. But
+`ped-waiting-served`, which had been right, broke five times in five:
+
+> "I have had high blood pressure since before I bought the policy. I was
+> hospitalised for it 5 years after taking the policy out."
+
+Expected `covered`: the condition is pre-existing, but five years is past the
+36-month wait. The lookup correctly set the fact to "yes". The model then
+answered `not_covered`, citing **clause 4.1, the cosmetic surgery exclusion**,
+which has nothing to do with high blood pressure.
+
+**Why.** The waiting-period line for this case had not changed: the period was
+served, so it still said "no longer applies". What changed was the facts block,
+which now showed `pre_existing_condition: yes` instead of `unknown`. A 7B model
+seeing "pre-existing: yes" leaned towards refusing, and reached for a clause to
+refuse under. Which clause it reached for looks arbitrary. That is the
+dangerous part: a true fact made the answer worse, and nothing in the prompt
+pointed at the clause it cited.
+
+**The fix.** Drop the "yes" direction entirely. The lookup now only ever says
+"this began after the policy". "Yes" stays a judgement for the model, as
+before, under the old hedged line. With that change the request comparison
+showed 4 of 78 questions changed (the two "yes" cases dropped out), and none
+of them was a fact-extraction request.
+
+## Concept 53: a fix that acts in one direction only
+
+A rule that can set a fact either way looks more complete than one that can
+only set it one way. Here the two directions had very different costs:
+
+- Saying "no" when the person said "it started after I took the policy out"
+  removes a bar the model was wrongly applying. If the lookup misfires, the
+  model still sees every clause and the person's own words.
+- Saying "yes" adds weight towards refusing, and a 7B model already leans that
+  way on this policy. A refusal is the expensive mistake in this domain: a
+  person told "not covered" may never file a valid claim.
+
+So the fix covers only the direction that was measured to help, and the other
+direction is left as it was. This is the same reasoning as
+`derive_pre_existing`, which "only ever fills in an answer the model declined
+to give": correct where the evidence is plain, and otherwise don't move.
+
+## Measuring part 1
+
+**Isolation first, by request comparison** (introduced in M21). Every request
+the pipeline would send the model is recorded on the old code and on the new,
+for all 78 questions, with the model call itself replaced by a recorder (the
+fact-extraction answers come from the cache, so this needs no model time).
+Comparing the two recordings shows exactly which questions the change can
+affect:
+
+- 4 of 78 questions changed: `ho-knee-replacement-served`,
+  `ho-copay-derived-age`, `ho4-thyroid-after-cover`,
+  `ho4-gallstones-found-last-year`.
+- 0 fact-extraction requests changed.
+
+The other 74 questions send byte-identical requests, so they cannot have been
+affected and keep their old measurements.
+
+**Then five samples of each changed question** (Ollama 0.35.1):
+
+| Case | Expected | Before | After, 5 samples |
+|---|---|---|---|
+| `ho-knee-replacement-served` | covered | not_covered | **covered 5/5** |
+| `ho-copay-derived-age` | conditional | not_covered | not_covered 5/5 |
+| `ho4-thyroid-after-cover` | covered | not_covered | not_covered 5/5 |
+| `ho4-gallstones-found-last-year` | covered | not_covered | not_covered 5/5 |
+
+One fixed, nothing broken, three still wrong. The three were the interesting
+part.
+
+## Part 2: a line that did not say what it bars
+
+Here is the waiting-period block the thyroid question got after part 1
+(policy held 20 months):
+
+```
+- Already satisfied, so IRRELEVANT here and not worth citing: 3.1
+- clause 3.2 (...): ... This one began after the policy did, so this waiting
+  period does not concern this claim
+- clause 3.3: requires 24 months, policy held 20 months -> this waiting period
+  still applies and blocks treatment covered by THIS clause
+- clause 3.4: requires 36 months, policy held 20 months -> this waiting period
+  still applies and blocks treatment covered by THIS clause
+```
+
+Clause 3.3 is the specified-disease waiting period (cataract, hernia, joint
+replacement and others). Clause 3.4 is maternity. Neither concerns a thyroid
+problem. But the lines say only "blocks treatment covered by THIS clause",
+and the model had to go and read each clause to learn what that treatment is.
+With 3.2 settled, it fell back on the next unserved bar in the list. For the
+kidney stone it was the same: a 36-month maternity wait was effectively being
+read as a bar on everything.
+
+**The change.** Each waiting-period line now names its subject, taken from
+the clause heading. In `waiting.py`:
+
+```python
+# What the period is for, from the clause heading ("Maternity Waiting
+# Period"). M22: a line saying only "blocks treatment covered by THIS
+# clause" was read as blocking everything - a 36-month maternity wait was
+# given as the reason to refuse unrelated claims on a new policy.
+subject: str = ""
+```
+
+filled in by `evaluate`:
+
+```python
+# The heading repeats the clause number; the line already has it.
+subject=re.sub(r"^[\d.]+\s*", "", getattr(clause, "heading", "") or ""),
+```
+
+so the line reads `clause 3.4 (Maternity Waiting Period): requires 36
+months...`. A policy whose clauses have no headings gets the old line
+unchanged.
+
+This one is wide. Every question whose prompt has a waiting-period line
+changes. The request comparison showed **29 of 78** questions changed (still
+0 fact requests), so it needed a full measurement: majority of three samples
+on every set, run as separate jobs because a background command is stopped
+after 30 minutes.
+
+## The result
+
+Majority of three samples, Ollama 0.35.1, `PROMPT_VERSION =
+"v53-waiting-subject"`:
+
+| Set | v51 (before M22) | M22 |
+|---|---:|---:|
+| main set | 35/40 | **36/40** |
+| held-out batch 1 | 12/16 | **13/16** |
+| held-out batch 2 | 12/13 | 12/13 |
+| held-out batch 3 | 0/3 | 0/3 |
+| held-out batch 4 (written for M22) | 1/6 | 1/6 |
+| total | 60/78 | **62/78** |
+
+Every one of the 29 changed questions that is now wrong was already wrong
+before M22. The main set's four misses (`initial-waiting-period`,
+`copay-applies-emergency`, `intoxication-injury`, `day-care-not-listed`) are
+the same misses as before. One held-out-1 miss, `ho-short-procedure` (2 of 3
+`conditional`), is not among the changed questions: its request is
+byte-identical to v51, so that is sampling noise, not this change.
+
+**One cost, in citations rather than verdicts.** The regenerated report's
+false-citation rate went from 0.000 to 0.200. The cause is one changed
+question:
+
+> `copay-unknown-inception-age`: "I am 68 and I was hospitalised for a stroke.
+> I don't remember when I took the policy out."
+
+Expected `insufficient_information`, and it still gets that, three times in
+three. But its answer key forbids citing clause 5.3, the co-payment for people
+aged 60 or more *when the policy began*. The person's age at the start is
+unknown, so the co-payment can't be applied. Before M22 the answer cited 3.2,
+3.3 and 3.4. Now it cites 3.2, 3.3 and 5.3, with this reasoning:
+
+> "...the age at the time of policy inception is not stated, which is relevant
+> for the 20% co-payment clause. Therefore, the decision cannot be made with
+> the given information."
+
+Read on its own, that reasoning is sound: it names 5.3 as relevant and
+undecided, and doesn't apply it. But the answer key was written before the
+run and says "don't cite 5.3", and changing a key after seeing an answer is
+how an eval stops measuring anything. So it stays counted as a false citation
+and a cost of part 2. It also shows that a wording change in one block moves
+which clauses the model cites from other blocks.
+
+## Failure 85: the batch written for this milestone did not move
+
+The honest headline is the last row of the table. **The batch written to test
+M22 scored 1 of 6 before and 1 of 6 after.** The gains are on cases that were
+read while building it (the knee case) and on main-set cases.
+
+What the five failing cases now cite, from the stored answers:
+
+| Case | Fact now | Answer | Cites |
+|---|---|---|---|
+| `ho4-thyroid-after-cover` | pre-existing: no | not_covered | 3.3 Specified Disease |
+| `ho4-gallstones-found-last-year` | pre-existing: no | not_covered | 4.4 Breach of Law |
+| `ho4-back-trouble-on-and-off` | unknown | not_covered | 4.4 Breach of Law |
+| `ho4-before-buying-checked-cover` | unknown | not_covered | 3.3 Specified Disease |
+| `ho4-acute-no-history` | unknown | not_covered | 3.3 Specified Disease |
+
+The facts are right where M22 meant them to be: thyroid and gallstones are now
+settled as "no" (gallstones by the M18 arithmetic: known for one year, policy
+held for two). The pre-existing bar is no longer cited. The model refuses
+anyway, and moves to another clause:
+
+- **3.3** is the specified-disease period, and its line now says "Specified
+  Disease Waiting Period". That name doesn't say *which* diseases. Thyroid,
+  malaria and appendicitis are not on the list, but the line doesn't say so,
+  and the model doesn't go and check.
+- **4.4** excludes treatment connected with a breach of law. Nothing in either
+  question mentions one.
+
+**What this shows.** On a policy held for under three years, this model leans
+towards refusing, and each fix that removes one reason for refusing reveals
+the next. Naming the subject helped where the subject was obviously unrelated
+(maternity). Where the name is a category ("specified disease"), the line
+needs the list itself, and that is a separate change for a separate
+milestone. The batch shows exactly what it was written to show: whether the
+fix generalises. It does not, yet.
+
+## Part 3: fixing the two costs
+
+Parts 1 and 2 left two problems: a new forbidden citation, and a held-out
+batch that didn't move. Both were investigated before anything was changed.
+
+### The forbidden citation was a scoring question
+
+Every citation the model returns carries an **effect**, picked from a fixed
+list: `denies`, `delays`, `reduces`, `requires`, `permits`. The answer for
+`copay-unknown-inception-age` cited 5.3 with effect `requires`, meaning "this
+clause needs information that is missing". It did not say `reduces`. The
+system's own reductions block had told the model:
+
+```
+- CANNOT TELL: clause 5.3: a 20% co-payment applies if the person had reached
+  60 at inception, but their age when the policy STARTED was not stated, so
+  this cannot be determined
+```
+
+The case's own `why` agrees: "Two things are unknown and both matter. The
+co-payment keys on age AT INCEPTION..." And the eval file defines
+`must_not_cite` as "a clause a correct answer must NOT **rely on** - a
+co-payment for someone who was 58 at inception". Naming 5.3 as undecided is
+not relying on it.
+
+So the scorer changed, not the answer key. In `evals/run_scenario_eval.py`:
+
+```python
+def relied_on(citations, forbidden: set[str]) -> list[str]:
+    """The forbidden clauses an answer cites AGAINST the claim. ..."""
+    return sorted({c.clause_id for c in citations
+                   if c.clause_id in forbidden and c.effect in ("denies", "delays", "reduces")})
+```
+
+**This is a rule changed after seeing an answer,** which Part 2 said not to
+do for a single case. What makes it acceptable here is the check made first:
+every stored answer, for all 78 questions, was replayed from the cache (no
+model time) and scored under both rules. Exactly one answer moved,
+`copay-unknown-inception-age`. A rule that had quietly forgiven other real
+false citations would have shown up in that list. A test pins both sides: a
+`requires` citation of a forbidden clause is not counted, a `reduces` one is.
+
+### The batch: the model was copying the line
+
+Reading the reasoning of the five held-out-4 refusals showed the mechanism
+directly. The thyroid answer said:
+
+> "...this waiting period still applies and blocks treatment covered by this
+> clause. The claim is not covered."
+
+That is the waiting-period line, copied word for word. For malaria the model
+wrote "specified diseases, including malaria"; malaria is not on the list. The
+two breach-of-law (4.4) citations were mix-ups: the reasoning discussed
+hazardous sports or the pre-existing period under 4.4's number. The quote
+check had already marked both answers *unverified*, so they were left alone.
+
+**The obvious fix was unsafe, and a check showed it before any code.** The
+idea was to tell the model "none of the question's words appear in this
+clause's list", using the existing word lookup (`named_in_question`, which
+lists words the person used that a clause also uses). The lookup was run
+against every question where the specified-disease or maternity period is
+unserved. For `maternity-too-early`:
+
+> "I gave birth 14 months after buying the policy. Will the delivery be paid
+> for?"
+
+it found **nothing**. The clause says "maternity, childbirth ... two
+deliveries", and "gave birth" / "delivery" don't match those words. A line
+saying "not named" would have cleared a claim that must be refused.
+
+**What was built instead** leaves the judgement with the model and changes
+only how the line opens. This is the same lesson as the pre-existing line:
+the first words of a line are the ones acted on. In
+`api/app/pipeline/waiting.py`:
+
+```python
+# A period that bars only the treatments its clause lists (IRDAI's "Specified
+# disease/procedure waiting period", maternity), recognised the same way. Only
+# these get the narrower line; anything not recognised keeps the firm one,
+# because calling an all-illness period list-only would pay claims it bars.
+_LISTED = re.compile(r"specified|maternity", re.IGNORECASE)
+```
+
+and, for an unserved period of that kind whose words the question does not
+share:
+
+```
+- clause 3.3 (Specified Disease Waiting Period): bars ONLY the treatments
+  this clause lists. If this treatment is not one of them, this period is not
+  the reason for this claim. (Requires 24 months; policy held 20 months, so
+  not yet served.)
+```
+
+Two choices in it follow Concept 53, *a fix that acts in one direction only*:
+
+- **Recognise the list-type periods, not the all-illness one.** The opposite
+  design would recognise "initial waiting period" and narrow everything else.
+  A miss there would tell the model that a 30-day bar on *every* illness
+  only bars a list, and wrongly pay a claim. A miss in the chosen design only
+  leaves today's over-refusal.
+- **Keep the firm line when the question's words appear in the clause.** A
+  hysterectomy 18 months in shares "hysterectomy" with clause 3.3, so it is
+  probably listed, and the firm "still applies and blocks" line stays.
+
+**Measured.** The request comparison showed 16 of 78 questions changed, with no
+fact requests among them. Only those 16 were re-asked, three samples each:
+
+| | Part 2 | Part 3 |
+|---|---:|---:|
+| the 16 changed questions | 8 right | **10 right** |
+| `maternity-too-early` (must stay refused) | not_covered | not_covered 3/3 |
+| `ho-hysterectomy-too-soon` (must stay refused) | not_covered | not_covered 3/3 |
+| `ho2-cataract-too-soon` (must stay refused) | not_covered | not_covered 3/3 |
+| `ho-copay-derived-age` (the kidney stone) | not_covered | **conditional 3/3** |
+| `ho4-gallstones-found-last-year` | not_covered | **covered 3/3** |
+
+The kidney-stone case that started M22 is now right. The other 62 questions
+send byte-identical requests and keep their measurements, so the totals are:
+
+| Set | v51 | Part 2 | Part 3 |
+|---|---:|---:|---:|
+| main set | 35/40 | 36/40 | 36/40 |
+| held-out 1 | 12/16 | 13/16 | **14/16** |
+| held-out 2 | 12/13 | 12/13 | 12/13 |
+| held-out 3 | 0/3 | 0/3 | 0/3 |
+| held-out 4 | 1/6 | 1/6 | **2/6** |
+| total | 60/78 | 62/78 | **64/78** |
+
+**What is still wrong in held-out 4, and why it stops here.** In each of the
+four, the model's own judgement fails, not a line the system wrote:
+
+- thyroid (now `conditional`) and appendicitis still say clause 3.3 covers
+  them
+- malaria: the model reads "Before I bought this policy I checked..." as a
+  pre-existing illness, the trap the code no longer falls into
+- back trouble: the model decides it is pre-existing, where the history is
+  simply unknown
+
+Going further would mean code deciding whether a treatment is on a clause's
+list. The `maternity-too-early` check showed the word lookup can't be trusted
+to do that.
+
+## Closing out M22
+
+### How it connects to what was already there
+
+M22 follows the shape of every fix since M14:
+
+1. the person's words are read with a fixed pattern (as in M21)
+2. a fact is settled in code only where the evidence is plain (as in M18's
+   `derive_pre_existing`)
+3. the waiting-period arithmetic tells the model the result in a line it
+   can't misread
+
+What M22 added:
+
+- a fix can act in one direction only (Concept 53)
+- a correct fact can still make the answer worse (Failure 84)
+- a line in the prompt has to say what it is about, not just which clause it
+  comes from, and the model may copy it word for word into its answer
+- a scoring rule can be corrected after seeing an answer only if every stored
+  answer is rescored under both rules and the full list of what moved is shown
+
+### What it made possible
+
+The pre-existing-disease fact now reaches the waiting-period check, which
+M19 had left as an open gap "until a case shows it costs an answer". The case
+turned up, and the gap is closed.
+
+What is left is the model's own judgement: deciding whether a treatment
+is on a clause's list, and whether an illness with no stated history predates
+the policy. Neither can be handed to code without a lookup that has been
+shown to understand "gave birth" as "childbirth".
+
+## Check it yourself
+
+```bash
+cd api
+.venv/Scripts/python -m pytest tests/test_scenario.py tests/test_waiting.py -q -k "pre_existing or new_condition or names_what or list or stays_firm"
+```
+
+**Predict before you look:** "I have had high blood pressure since before I
+bought the policy." What does `stated_not_pre_existing` return, and what
+would the pipeline's `pre_existing_condition` fact be if the model had said
+`"unknown"`?
+
+<details>
+<summary>Answer</summary>
+
+`False`. "Since before I bought" is the "yes" direction, which this lookup
+deliberately does not read (Failure 84). The fact stays `"unknown"`, unless
+the person also gave two durations that `derive_pre_existing` can compare.
+The waiting-period line for clause 3.2 stays the hedged one, and whether the
+condition predates the policy remains the model's judgement.
+</details>

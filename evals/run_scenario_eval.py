@@ -69,6 +69,7 @@ HELDOUT_PATHS = {
     "1": GOLDEN_DIR / "scenarios-heldout.json",
     "2": GOLDEN_DIR / "scenarios-heldout-2.json",
     "3": GOLDEN_DIR / "scenarios-heldout-3.json",
+    "4": GOLDEN_DIR / "scenarios-heldout-4.json",
 }
 REPORT_PATH = REPO_ROOT / "evals" / "scenario-report.md"
 
@@ -100,6 +101,21 @@ async def build_clauses(pdf: Path = GOLDEN_PDF) -> list[ShortlistClause]:
 
 
 NO_ANSWER = "no_answer"
+
+
+def relied_on(citations, forbidden: set[str]) -> list[str]:
+    """The forbidden clauses an answer cites AGAINST the claim.
+
+    must_not_cite means a clause a correct answer must not rely on: a
+    co-payment applied to someone who was 58 at inception. Citing that clause
+    as something still to be settled (effect "requires") is not relying on it.
+    Changed in M22, after `copay-unknown-inception-age` - right verdict, and
+    5.3 cited only as "relevant, but the age at inception is not stated" -
+    was counted as a false citation. Replaying every stored answer under both
+    rules showed that was the only answer the change moves.
+    """
+    return sorted({c.clause_id for c in citations
+                   if c.clause_id in forbidden and c.effect in ("denies", "delays", "reduces")})
 
 
 def _unanswered(case: dict, error: str) -> dict:
@@ -214,7 +230,7 @@ async def run(
             "verdict_ok": result.verdict == case["expected_verdict"],
             "required": sorted(required),
             "forbidden": sorted(forbidden),
-            "wrongly_cited": sorted(forbidden & cited),
+            "wrongly_cited": relied_on(result.citations, forbidden),
             "cited": sorted(cited),
             "citation_ok": required.issubset(cited),
             "grounded": result.verified,
