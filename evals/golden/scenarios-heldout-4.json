@@ -1,0 +1,69 @@
+{
+  "_why": [
+    "FOURTH held-out batch. Never used to choose or tune a change.",
+    "",
+    "Written for M22, before any code for it existed and before any run of",
+    "these cases. M22 lets code settle whether a condition is pre-existing",
+    "when the person says so plainly, or when two stated durations decide it,",
+    "and lets the waiting-period check use that answer. The cases that",
+    "prompted it (`ho-copay-derived-age`, `ho-knee-replacement-served`) have",
+    "been read, so these say the same kinds of thing in other words, and add",
+    "traps the change must not fall into.",
+    "",
+    "`ho4-acute-no-history` measures a problem M22 deliberately does NOT fix:",
+    "an illness with no history mentioned, where the model still applies the",
+    "pre-existing-disease waiting period. It is here to show that problem",
+    "separately, not to be fixed by tuning against it.",
+    "",
+    "Same synthetic policy and conventions as scenarios.json. Same author as",
+    "the fix, so not fully independent - but fixed before the fix was built."
+  ],
+  "cases": [
+    {
+      "id": "ho4-thyroid-after-cover",
+      "scenario": "I was diagnosed with a thyroid problem after I took out this cover, and I was hospitalised for it this month. I have held the policy for 20 months and I am 50.",
+      "expected_verdict": "covered",
+      "must_cite": ["2.1"],
+      "must_not_cite": ["3.2"],
+      "why": "The condition began after the policy did, so the pre-existing disease bar does not concern it. Twenty months clears the 30-day initial wait, and a thyroid disorder is in no waiting-period list."
+    },
+    {
+      "id": "ho4-asthma-since-childhood",
+      "scenario": "My asthma started when I was a child, well before this policy, and I was admitted with a severe attack. I have held the policy for two years.",
+      "expected_verdict": "not_covered",
+      "must_cite": ["3.2"],
+      "why": "Asthma since childhood predates the policy, and two years is short of the 36-month pre-existing disease waiting period."
+    },
+    {
+      "id": "ho4-gallstones-found-last-year",
+      "scenario": "I have held this policy for two years. My gallstones were found last year and I have now been admitted for surgery. I am 45.",
+      "expected_verdict": "covered",
+      "must_cite": ["2.1"],
+      "must_not_cite": ["3.2"],
+      "why": "Found one year ago under a policy held for two, so the condition began a year into cover and is not pre-existing. Gallbladder surgery is in no waiting-period list, and two years clears the initial wait."
+    },
+    {
+      "id": "ho4-back-trouble-on-and-off",
+      "scenario": "I have had back trouble on and off and was admitted for back surgery. I have held this policy for two years.",
+      "expected_verdict": "insufficient_information",
+      "must_cite": [],
+      "why": "Whether the back trouble began before the policy is not said, and it decides the claim: if it did, two years is short of the 36-month pre-existing disease bar; if not, the claim is payable."
+    },
+    {
+      "id": "ho4-before-buying-checked-cover",
+      "scenario": "Before I bought this policy I checked that it covered hospital stays. I was admitted with malaria fourteen months later. I am 33.",
+      "expected_verdict": "covered",
+      "must_cite": ["2.1"],
+      "must_not_cite": ["3.2"],
+      "why": "\"Before I bought this policy\" describes checking the cover, not an illness, so nothing here is pre-existing. Fourteen months clears the 30-day initial wait and malaria is in no waiting-period list."
+    },
+    {
+      "id": "ho4-acute-no-history",
+      "scenario": "I was admitted with appendicitis and had my appendix removed. I have held the policy for 18 months and I am 29.",
+      "expected_verdict": "covered",
+      "must_cite": ["2.1"],
+      "must_not_cite": ["3.2"],
+      "why": "Appendicitis is a sudden illness and nothing describes it as existing before the policy. Eighteen months clears the initial wait; no exclusion or cap applies."
+    }
+  ]
+}

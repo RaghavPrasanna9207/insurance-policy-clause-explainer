@@ -82,6 +82,7 @@ HELDOUT_NOTES = {
     "1": "read while diagnosing M14 failures - no longer clean",
     "2": "written before running; one case read while diagnosing",
     "3": "written for M21 before its code and before any run",
+    "4": "written for M22 before its code and before any run",
 }
 
 

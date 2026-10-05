@@ -287,3 +287,34 @@ def test_a_partly_served_period_is_listed_with_the_ones_that_block():
     assert "clause 2#2" in block
     assert "No waiting period blocks this claim" not in block
     assert "IRRELEVANT" not in block
+
+
+# --- M22: a pre-existing diseases bar told whether the condition predates ----
+
+
+def test_a_condition_settled_as_new_is_not_barred_by_the_pre_existing_period():
+    """Thirty months into a 36-month bar, for a condition that began after the
+    policy. The old line hedged ("unless the description says..."), and the
+    model refused a kidney stone "never had before taking the policy" under it."""
+    block = render(evaluate([PED], days_held=900, condition_predates_policy="no"))
+    assert "does not concern this claim" in block
+    assert "No waiting period blocks this claim" in block
+
+
+def test_only_a_new_condition_changes_the_line():
+    """A firm "yes" line was measured to make the model refuse under unrelated
+    clauses, so "yes" and "unknown" both keep the hedged line."""
+    for predates in ("yes", "unknown"):
+        block = render(evaluate([PED], days_held=730, condition_predates_policy=predates))
+        assert "Unless the description says" in block
+
+
+@dataclass
+class HeadedClause(FakeClause):
+    heading: str = ""
+
+
+def test_a_blocking_period_names_what_it_is_for():
+    """Without its subject, an unserved maternity wait read as a bar on everything."""
+    block = render(evaluate([HeadedClause("3.4", [1080], heading="3.4 Maternity Waiting Period")], days_held=600))
+    assert "clause 3.4 (Maternity Waiting Period): requires" in block

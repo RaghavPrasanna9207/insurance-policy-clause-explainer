@@ -418,6 +418,44 @@ def derive_pre_existing(facts: dict[str, Any]) -> dict[str, Any]:
     return facts | {"pre_existing_condition": "yes" if known > policy else "no"}
 
 
+# The start of the policy, as people say it: "I took it out", "buying",
+# "my cover started", "this policy".
+_START = (
+    r"(?:I\s+(?:took(?:\s+(?:it|this|the\s+policy|this\s+policy|this\s+cover|the\s+cover))?\s+out"
+    r"|took\s+out\s+(?:this|the|my)\s+(?:policy|cover)|bought|got|started|joined|took)"
+    r"|(?:taking|buying|getting|starting)\b"
+    r"|(?:my|the|this)\s+(?:policy|cover)\s+(?:started|began)"
+    r"|(?:this|the|my)\s+(?:policy|cover)\b)"
+)
+_STATED_NOT_PRE_EXISTING = re.compile(
+    r"\b(?:never|not)\s+(?:had|suffered\s+from)\b[^.;]{0,30}?\bbefore\s+" + _START
+    + r"|\b(?:started|began|begun|developed|appeared|arose|diagnosed|found|noticed)\b"
+    r"[^.;]{0,40}?\bafter\s+" + _START,
+    re.IGNORECASE,
+)
+
+
+def stated_not_pre_existing(scenario: str) -> bool:
+    """True when the person says plainly that the condition began after the policy.
+
+    Measured on the scenario eval: "a kidney stone, which I never had before
+    taking the policy" and "the knee trouble only started after I took the
+    policy out" both came back `pre_existing_condition: "unknown"`, and both
+    claims were then refused under the pre-existing diseases waiting period.
+    Two attempts to fix this in the extraction prompt cost unrelated answers,
+    and M21 showed why: any change to that prompt rewords the free-text notes
+    of every question. So it is read here, from the person's own words, and
+    only questions saying it this plainly are affected. Written against all 78
+    eval questions before use.
+
+    Only this direction. A first version also read "yes" ("I have had it since
+    before I took the policy"), and on the eval a settled "yes" made the model
+    refuse under unrelated clauses: a claim whose pre-existing wait was already
+    served got refused as cosmetic, 5 times in 5.
+    """
+    return bool(_STATED_NOT_PRE_EXISTING.search(scenario))
+
+
 async def extract_facts(scenario: str, *, use_cache: bool = True) -> dict[str, Any]:
     facts = await client.complete_json(
         [
@@ -427,7 +465,12 @@ async def extract_facts(scenario: str, *, use_cache: bool = True) -> dict[str, A
         FACTS_SCHEMA,
         use_cache=use_cache,
     )
-    return derive_pre_existing(correct_misfiled_age(facts, scenario))
+    facts = derive_pre_existing(correct_misfiled_age(facts, scenario))
+    # After the arithmetic, which is the stronger evidence, and like it, only
+    # ever filling in an answer the model declined to give.
+    if facts.get("pre_existing_condition") == "unknown" and stated_not_pre_existing(scenario):
+        facts = facts | {"pre_existing_condition": "no"}
+    return facts
 
 
 # --- 5b: shortlist (no LLM) ----------------------------------------------
@@ -918,7 +961,10 @@ def compute(
         # Python, before the model sees anything. Nothing is guessed: if the
         # person said nothing, every waiting period comes back UNKNOWN rather
         # than being compared against an invented figure.
-        waiting=waiting.evaluate(clauses, held, named_in_question(facts, clauses)),
+        waiting=waiting.evaluate(
+            clauses, held, named_in_question(facts, clauses),
+            facts.get("pre_existing_condition", "unknown"),
+        ),
         # And the second family of comparisons, added after the first was
         # fixed: a waiting period decides whether the claim is PAID, a
         # reduction decides whether it is paid IN FULL. Only the first question

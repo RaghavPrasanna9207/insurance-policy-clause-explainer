@@ -1133,3 +1133,25 @@ def test_the_line_is_silent_unless_the_person_holds_another_policy_now():
         "Two weeks after my policy started I was admitted.",
     ):
         assert "ANOTHER POLICY" not in _computed_prompt(question, clauses)
+
+
+# --- M22: whether the condition predates the policy, read from the words ----
+
+
+def test_a_plainly_stated_new_condition_is_read():
+    from app.pipeline.scenario import stated_not_pre_existing
+
+    assert stated_not_pre_existing("A kidney stone, which I never had before taking the policy.")
+    assert stated_not_pre_existing("The knee trouble only started after I took the policy out.")
+
+
+def test_a_before_that_names_no_illness_settles_nothing():
+    """Written as traps before the lookup was: "before" about something other
+    than a condition, a history with no policy date in it, and a condition
+    plainly older than the policy, which this lookup deliberately does not read."""
+    from app.pipeline.scenario import stated_not_pre_existing
+
+    assert not stated_not_pre_existing("Before I bought this policy I checked that it covered hospital stays.")
+    assert not stated_not_pre_existing("I have had diabetes for years and was hospitalised 8 months after buying this policy.")
+    assert not stated_not_pre_existing("I was admitted with a fever.")
+    assert not stated_not_pre_existing("I have had high blood pressure since before I bought the policy.")
