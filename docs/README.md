@@ -271,6 +271,14 @@ The prompt and the schema's clause-id enum must be built from one clause list or
 - **Concept 51: a circular import, and why it was hidden inside a function** - how Python loads modules, why an import inside a function avoids the crash, and why that is a design problem rather than a fix.
 - **Failure 81: a docstring that said the check measured what the eval sends** - the determinism check's "exactly the operation the eval performs" sent prompts with no facts and no computed blocks; corrected, with the real-prompt version left as its own measured change.
 
+### M21 - Another policy covering the same claim
+A case that never cited the policy's contribution clause, a fix built the project's usual way (the model reads the fact, code finds the clause), a first version that cost four main-set answers through a side channel, and a rebuild proven to touch only the three questions it was meant to. **If you read one entry about measuring, read Failure 83.**
+
+- **Failure 82: the target fixed, the new cases not** - the clause is now cited every time; a held-out batch written first stays at 0 of 3, for one extraction miss and two cases of the pre-existing-disease waiting period over-applied.
+- **Failure 83: three breaks, and what actually caused them** - resampling, then holding the facts fixed and swapping one field, separates a real regression from answers that depend on the question asked before them.
+- **Concept 52: a free-text field is a side channel** - adding one structured field rewrote the free-text notes for every question, and the reasoning step read the new wording differently.
+- **The rebuild: a lookup instead of a fact** - reading the person's words with a fixed pattern, and proving by request comparison that only 3 of 72 questions change, so the other 69 need no re-measuring.
+
 ---
 
 ## Related documents

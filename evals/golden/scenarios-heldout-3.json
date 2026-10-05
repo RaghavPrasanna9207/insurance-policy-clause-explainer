@@ -1,0 +1,40 @@
+{
+  "_why": [
+    "THIRD held-out batch. Never used to choose or tune a change.",
+    "",
+    "Written for M21, before any code for it existed and before any run of",
+    "these cases. M21 makes the system connect a claim shared with another",
+    "insurance policy to the policy's contribution clause (6.6), because the",
+    "main-set case `other-policy-contribution` never cited 6.6. A fix designed",
+    "around one case is a fix tuned to that case, so these test the same idea",
+    "in words that case does not use, plus one situation that mentions another",
+    "insurer and must NOT bring in the contribution clause.",
+    "",
+    "Same synthetic policy and conventions as scenarios.json. Same author as",
+    "the fix, so not fully independent - but fixed before the fix was built."
+  ],
+  "cases": [
+    {
+      "id": "ho3-group-cover-shares-bill",
+      "scenario": "My employer's group health insurance paid part of my hospital bill for a three-day stay with typhoid, and I am claiming the rest under this policy, which I have held for three years. I am 41.",
+      "expected_verdict": "conditional",
+      "must_cite": ["6.6"],
+      "why": "A second policy covers the same stay, so this insurer pays no more than its rateable proportion. The stay itself is payable: three years clears the 30-day initial wait, and typhoid is in no waiting-period list."
+    },
+    {
+      "id": "ho3-two-policies-appendix",
+      "scenario": "I have two health insurance policies, this one and a family floater from another company. I had my appendix removed and spent five days in hospital, and I am claiming on both. I have held this policy two years and I am 38.",
+      "expected_verdict": "conditional",
+      "must_cite": ["6.6"],
+      "why": "Two policies covering one claim is exactly the contribution clause: paid, but only this insurer's rateable share."
+    },
+    {
+      "id": "ho3-switched-from-old-insurer",
+      "scenario": "Last year I left my old insurer and bought this policy instead, and I no longer have the old one. I was in hospital for four days with dengue fever last month. I am 35.",
+      "expected_verdict": "covered",
+      "must_cite": ["2.1"],
+      "must_not_cite": ["6.6"],
+      "why": "The contribution clause applies only to another policy held at the time of the claim, and the old one has lapsed. One year held clears the 30-day initial wait, dengue is in no waiting-period list, and nothing reduces an ordinary in-patient stay for a 35-year-old."
+    }
+  ]
+}

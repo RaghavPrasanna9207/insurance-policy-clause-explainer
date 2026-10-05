@@ -738,6 +738,7 @@ def named_by_code(
               if c.status is not window.WindowStatus.NOT_RAISED}
     named |= set(shared_words(scenario, clauses, facts))
     named |= set(computed.absent)
+    named |= set(computed.another_policy)
     return named
 
 
@@ -758,6 +759,70 @@ async def narrow(
         len(chosen), len(clauses), clause_tokens(chosen), clause_tokens(clauses),
     )
     return chosen
+
+
+# The two wordings this has met. Older policies, and the synthetic one, have a
+# "Contribution" clause: "rateable proportion" of a claim another policy also
+# covers. IRDAI's standard "Multiple Policies" clause, in all three real wordings
+# measured, instead lets the insured choose which policy settles first. Matched
+# on the subject they share; what each one decides is left to the model to read.
+_ANOTHER_POLICY = re.compile(
+    r"\brateable\b|\bcontribution\b|\b(?:other|multiple) (?:polic(?:y|ies)|insurance)\b",
+    re.IGNORECASE,
+)
+
+
+# The person saying they hold a second policy. Read from their own words, not
+# asked of the fact extractor: M21 first added a field to the extraction prompt,
+# and measured over three samples that cost four main-set answers, because any
+# change to that prompt rewords the free-text `notes` of EVERY question. A lookup
+# here leaves that prompt, and every question that mentions no second policy,
+# exactly as they were.
+_MENTIONS_ANOTHER_POLICY = re.compile(
+    r"\b(?:another|other|second)\s+(?:health\s+)?(?:insurance\s+)?"
+    r"(?:polic(?:y|ies)|insurers?|insurance|mediclaim)\b"
+    r"|\b(?:two|both|multiple)\s+(?:health\s+)?(?:insurance\s+)?"
+    r"(?:polic(?:ies|y)|insurers|insurance companies|companies)\b"
+    # Employer and group cover: the usual second policy in India.
+    r"|\b(?:group|corporate|company|employer'?s?|office)\s+(?:health\s+)?"
+    r"(?:insurance|cover|policy|mediclaim)\b",
+    re.IGNORECASE,
+)
+# A sentence about a policy the person no longer holds, or never had, does not
+# count: "I have no other insurance", "I left my old insurer".
+_NOT_HELD_NOW = re.compile(
+    r"\b(?:no|not|never|don't|no longer|used to|previous|old|lapsed?|left|dropped"
+    r"|switched|cancell?ed)\b",
+    re.IGNORECASE,
+)
+
+
+def mentions_another_policy(scenario: str) -> bool:
+    """Whether some sentence says the person holds another policy now."""
+    return any(
+        _MENTIONS_ANOTHER_POLICY.search(s) and not _NOT_HELD_NOW.search(s)
+        for s in re.split(r"(?<=[.;!?])\s+", scenario)
+    )
+
+
+def another_policy_clauses(scenario: str, clauses: list[ShortlistClause]) -> list[str]:
+    """Clauses about another policy covering the same claim - when the person mentions one."""
+    if not mentions_another_policy(scenario):
+        return []
+    return [c.clause_id for c in clauses if _ANOTHER_POLICY.search(c.text)]
+
+
+def render_another_policy(clause_ids: list[str]) -> str:
+    """The reasoning prompt's line for those clauses: which ones, never what they decide."""
+    if not clause_ids:
+        return ""
+    lines = ["THE PERSON MENTIONS ANOTHER POLICY (a lookup on their words, not a judgement)."]
+    lines += [
+        f"- clause {i} sets what happens when another policy covers the same claim. "
+        f"Read it: it decides how this claim is shared between the policies."
+        for i in clause_ids
+    ]
+    return "\n".join(lines)
 
 
 _ANNEXURE = re.compile(r"\bannexure\s+([ivxl]+|\d+)\b", re.IGNORECASE)
@@ -839,9 +904,13 @@ class Computed:
     windows: list[window.WindowCheck]
     # Clause id -> annexures it refers to that the document does not contain.
     absent: dict[str, list[str]] = field(default_factory=dict)
+    # Clauses about another policy covering this claim, when the person mentions one.
+    another_policy: list[str] = field(default_factory=list)
 
 
-def compute(facts: dict[str, Any], clauses: list[ShortlistClause]) -> Computed:
+def compute(
+    facts: dict[str, Any], clauses: list[ShortlistClause], scenario: str = ""
+) -> Computed:
     held = duration_days(facts, "time_since_policy_start")
     return Computed(
         absent=absent_annexures(clauses),
@@ -862,6 +931,7 @@ def compute(facts: dict[str, Any], clauses: list[ShortlistClause]) -> Computed:
             clauses, facts.get("expense_timing_anchor"),
             duration_days(facts, "expense_timing"),
         ),
+        another_policy=another_policy_clauses(scenario, clauses),
     )
 
 
@@ -892,6 +962,7 @@ def reasoning_request(
                 waiting.render(computed.waiting),
                 reduction.render(computed.reductions),
                 window.render(computed.windows),
+                render_another_policy(computed.another_policy),
             ),
         },
     ]
@@ -1170,7 +1241,7 @@ async def run_scenario(
             missing_facts=missing,
         )
 
-    computed = compute(facts, considered)
+    computed = compute(facts, considered, scenario)
     # Computed on every clause, before any picking: a waiting period or a cap
     # must be checked whether or not the model picks its clause. The picking
     # below only decides what the reasoning step READS, and it can never drop a

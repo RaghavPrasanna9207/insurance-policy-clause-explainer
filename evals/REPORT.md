@@ -6,13 +6,13 @@ one run against the code and settings stated here.
 | | |
 |---|---|
 | Model | `qwen2.5:7b-instruct-q4_K_M` |
-| Ollama | `0.35.0` |
-| Prompt version | `v49-condition-known-for` |
+| Ollama | `0.35.1` |
+| Prompt version | `v51-another-policy-lookup` |
 | Decoding | num_ctx 28672, num_predict 1600, temperature 0.0, KV cache q8_0 |
 | Analysis batch size | 1 |
-| Commit | `22acffa` |
-| Generated | 2026-09-30 18:23 UTC |
-| Total wall time | 628s |
+| Commit | `8a6664c` |
+| Generated | 2026-10-05 15:32 UTC |
+| Total wall time | 1s (served from cache; a cold run takes several minutes) |
 
 The golden set is a 39-clause synthetic IRDAI-style policy authored for
 this repository, so the labels and the document come from one source and
@@ -27,9 +27,10 @@ cannot drift apart. No real insurer wording is used.
 | Clause classification (macro-F1) | **0.973** | quality |
 | Risk ranking expectations | **8/9** | quality |
 | Scenario verdict accuracy | **0.825** | quality |
-| Scenario verdict accuracy, held-out batch 1 (16 cases, read while diagnosing M14 failures - no longer clean) | **0.688** | quality |
-| Scenario verdict accuracy, held-out batch 2 (13 cases, written before running; one case read while diagnosing) | **0.846** | quality |
-| Scenario citation recall | **0.750** | quality |
+| Scenario verdict accuracy, held-out batch 1 (16 cases, read while diagnosing M14 failures - no longer clean) | **0.750** | quality |
+| Scenario verdict accuracy, held-out batch 2 (13 cases, written before running; one case read while diagnosing) | **0.923** | quality |
+| Scenario verdict accuracy, held-out batch 3 (3 cases, written for M21 before its code and before any run) | **0.000** | quality |
+| Scenario citation recall | **0.719** | quality |
 | Scenario false citation rate | **0.000** | quality |
 | Quote fabrication rate | **0.000** | quality |
 | **Citation detection integrity** | **1.000** | **guarantee** |
@@ -100,7 +101,7 @@ inspected, so the metric tests the system rather than rationalising it.
 
 ## 3. Scenario simulator
 
-**Verdict accuracy 0.825** (33/40) · citation recall 0.750 · detection integrity 1.000
+**Verdict accuracy 0.825** (33/40) · citation recall 0.719 · detection integrity 1.000
 
 | Case | Expected | Got | Cited | Quotes verified |
 |---|---|---|---|---|
@@ -108,7 +109,7 @@ inspected, so the metric tests the system rather than rationalising it.
 | `ped-waiting-served` | covered | covered | 3.2 | yes |
 | `cosmetic-exclusion` | not_covered | not_covered | 4.1 | yes |
 | `cosmetic-after-accident` | covered | covered | 4.1 | yes |
-| `no-timing-given` | insufficient_information | insufficient_information | 3.2, 3.4 | yes |
+| `no-timing-given` | insufficient_information | insufficient_information | 3.1, 3.2, 3.3, 3.4 | yes |
 | `late-notice` | conditional | conditional | 6.1 | yes |
 | `room-rent-breach` | conditional | conditional | 5.1 | yes |
 | `senior-copay` | conditional | conditional | 5.3 | yes |
@@ -118,11 +119,11 @@ inspected, so the metric tests the system rather than rationalising it.
 | `maternity-too-early` | not_covered | not_covered | 3.4 | yes |
 | `dental-no-accident` | not_covered | conditional ⚠ | 4.6 | yes |
 | `non-medical-items` | not_covered | not_covered | 4.7 | yes |
-| `not-in-document` | insufficient_information | insufficient_information | — | yes |
+| `not-in-document` | insufficient_information | insufficient_information | 4.7 | yes |
 | `cataract-served` | conditional | covered ⚠ | 2.4 (missing 5.4) | yes |
 | `copay-applies-emergency` | conditional | insufficient_information ⚠ | 3.1, 3.2, 3.3, 3.4 (missing 5.3) | yes |
 | `copay-just-under-sixty` | covered | covered | 2.1 | yes |
-| `copay-unknown-inception-age` | insufficient_information | insufficient_information | 2.1 | yes |
+| `copay-unknown-inception-age` | insufficient_information | insufficient_information | 3.2, 3.3, 3.4 | yes |
 | `copay-and-room-breach` | conditional | conditional | 5.1, 5.3 | yes |
 | `senior-but-excluded` | not_covered | not_covered | 4.1 | yes |
 | `room-rent-within-cap` | covered | covered | 2.1, 5.1 | yes |
@@ -130,20 +131,20 @@ inspected, so the metric tests the system rather than rationalising it.
 | `proportionate-deduction` | conditional | conditional | 5.2 | yes |
 | `cataract-sublimit-amount` | conditional | conditional | 5.4 | yes |
 | `robotic-surgery-limit` | conditional | conditional | 5.5 | yes |
-| `oral-chemo-limit` | conditional | conditional | 5.5 | yes |
+| `oral-chemo-limit` | conditional | covered ⚠ | 2.1 (missing 5.5) | yes |
 | `intoxication-injury` | not_covered | covered ⚠ | 2.1 (missing 4.2) | yes |
-| `infertility-ivf` | not_covered | not_covered | 4.5 | yes |
+| `infertility-ivf` | not_covered | not_covered | 4.1 (missing 4.5) | yes |
 | `breach-of-law` | not_covered | not_covered | 4.3 (missing 4.4) | yes |
 | `documents-late` | conditional | conditional | 6.2 | yes |
 | `no-preauth-cashless` | conditional | conditional | 6.4 | yes |
 | `non-disclosure` | not_covered | not_covered | 4.1 (missing 6.3) | yes |
-| `other-policy-contribution` | conditional | insufficient_information ⚠ | — (missing 6.6) | yes |
+| `other-policy-contribution` | conditional | conditional | 6.6 | yes |
 | `pre-hospitalisation-window` | covered | covered | 2.2 | yes |
 | `post-hospitalisation-too-late` | not_covered | not_covered | 2.3 | yes |
 | `ayush-private-clinic` | not_covered | not_covered | 2.6 | yes |
-| `ambulance-admissible` | covered | covered | 2.1 (missing 2.5) | yes |
-| `day-care-not-listed` | insufficient_information | covered ⚠ | 3.1, 3.2 | yes |
-| `dependant-not-addressed` | insufficient_information | insufficient_information | 3.1, 3.2, 3.3, 3.4 | yes |
+| `ambulance-admissible` | covered | covered | 3.1, 3.2 (missing 2.5) | yes |
+| `day-care-not-listed` | insufficient_information | covered ⚠ | 2.1, 3.1, 3.2 | yes |
+| `dependant-not-addressed` | insufficient_information | insufficient_information | — | yes |
 
 ### What the misses actually need
 
@@ -153,8 +154,8 @@ These are not random. Read them together:
 - **`dental-no-accident`** — expected `not_covered`, got `conditional`. Dental treatment is excluded unless caused by an accident and requiring hospitalisation.
 - **`cataract-served`** — expected `conditional`, got `covered`. 24-month specified-disease waiting period served; under 60 so no co-payment. Cataract treatment is capped by the cataract sub-limit, which definitely applies to a cataract operation, so by this file's convention the claim is paid but not necessarily in full: conditional. LABEL CHANGED in M13 from covered: it contradicted the stated convention and the matching cases oral-chemo-limit and robotic-surgery-limit, which expect conditional for a sub-limit naming the treatment with no cost given.
 - **`copay-applies-emergency`** — expected `conditional`, got `insufficient_information`. 70 at inception is over 60, so the 20% co-payment applies to the whole admissible claim. Two years held clears the 30-day initial waiting period, and pneumonia is not in the specified-disease list.
+- **`oral-chemo-limit`** — expected `conditional`, got `covered`. Oral chemotherapy is named in the modern treatment limit, restricted to 50% of sum insured per policy year.
 - **`intoxication-injury`** — expected `not_covered`, got `covered`. Expenses attributable to the use of alcohol are excluded outright, and no waiting period or cap enters into it.
-- **`other-policy-contribution`** — expected `conditional`, got `insufficient_information`. The contribution clause limits this insurer to its rateable proportion. The claim is paid, but only in part by this policy.
 - **`day-care-not-listed`** — expected `insufficient_information`, got `covered`. In-patient cover needs more than twenty four consecutive hours, so 2.1 does not apply. Day care cover applies only to treatments listed in Annexure II, and this document does not contain that annexure - so whether a six-hour drip qualifies cannot be answered from what is here.
 
 Most require either date arithmetic (is 5 years more than 36 months?)
@@ -180,16 +181,19 @@ their score and the main set's is an estimate of how much of the main
 score is fit rather than skill. Single run each; see the learning log for
 the majority-of-three figures.
 
-**Batch 1** (read while diagnosing M14 failures - no longer clean): verdict accuracy 0.688 (11/16), citation recall 0.583, detection integrity 1.000
+**Batch 1** (read while diagnosing M14 failures - no longer clean): verdict accuracy 0.750 (12/16), citation recall 0.667, detection integrity 1.000
 - `ho-war-injury`: expected `not_covered`, got `covered`
 - `ho-knee-replacement-served`: expected `covered`, got `not_covered`
+- `ho-icu-within-cap`: expected `covered`, got `conditional`
 - `ho-copay-derived-age`: expected `conditional`, got `not_covered`
-- `ho-planned-notice-late`: expected `conditional`, got `covered`
-- `ho-short-procedure`: expected `insufficient_information`, got `conditional`
 
-**Batch 2** (written before running; one case read while diagnosing): verdict accuracy 0.846 (11/13), citation recall 1.000, detection integrity 1.000
-- `ho2-drunk-scooter`: expected `not_covered`, got `covered`
+**Batch 2** (written before running; one case read while diagnosing): verdict accuracy 0.923 (12/13), citation recall 1.000, detection integrity 1.000
 - `ho2-gallbladder-no-timing`: expected `insufficient_information`, got `conditional`
+
+**Batch 3** (written for M21 before its code and before any run): verdict accuracy 0.000 (0/3), citation recall 0.333, detection integrity 1.000
+- `ho3-group-cover-shares-bill`: expected `conditional`, got `covered`
+- `ho3-two-policies-appendix`: expected `conditional`, got `not_covered`
+- `ho3-switched-from-old-insurer`: expected `covered`, got `conditional`
 
 
 ---
