@@ -39,7 +39,7 @@ coverage, it just happens to be describing its ceiling.
 from app.grounding import normalize
 from app.taxonomy import ClauseType
 
-PROMPT_VERSION = "v49-condition-known-for"
+PROMPT_VERSION = "v51-another-policy-lookup"
 
 CLASSIFY_SYSTEM = """\
 You are an expert on Indian (IRDAI-regulated) health insurance policy wordings.
@@ -553,7 +553,7 @@ def render_reasoning_request(
     scenario: str, known: dict, missing: list[str],
     shared: dict[str, list[str]], clauses,
     waiting_block: str = "", reduction_block: str = "",
-    window_block: str = "",
+    window_block: str = "", another_policy_block: str = "",
 ) -> str:
     """Format the reasoning prompt from what the pipeline has already worked out.
 
@@ -596,6 +596,10 @@ def render_reasoning_request(
     # nothing is paid at all.
     if reduction_block:
         lines += ["", reduction_block]
+    # After the reductions: like them, it bears on how much THIS policy pays,
+    # not on whether the claim is payable at all.
+    if another_policy_block:
+        lines += ["", another_policy_block]
 
     # Last before the clauses, and silent unless something is shared: most
     # questions share no unusual words with any clause and see nothing here.

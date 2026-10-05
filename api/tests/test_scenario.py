@@ -1087,3 +1087,49 @@ def test_what_the_person_said_outright_is_never_overruled():
 
     assert derive_pre_existing(_timed(1, "months", 14, "months", ped="yes"))["pre_existing_condition"] == "yes"
     assert derive_pre_existing(_timed(3, "years", 8, "months", ped="no"))["pre_existing_condition"] == "no"
+
+
+# --- another policy covering the same claim ---------------------------------
+
+CONTRIBUTION_TEXT = (
+    "6.6 Contribution If at the time of a claim the Insured Person holds any other "
+    "policy of indemnity covering the same risk, the Company shall not be liable to pay "
+    "more than its rateable proportion of the claim."
+)
+# IRDAI's standard wording, as the real policies print it: the insured chooses
+# which policy settles first. Same subject, different rule - so code may say
+# WHICH clause, but never what it decides.
+MULTIPLE_POLICIES_TEXT = (
+    "4 Multiple Policies In case of multiple policies taken by an insured person during "
+    "a period from one or more insurers, the insured person shall have the right to "
+    "require a settlement of his/her claim in terms of any of his/her policies."
+)
+
+
+def _computed_prompt(scenario: str, clauses: list) -> str:
+    """The reasoning prompt with the computed blocks, as `reason` sends it."""
+    from app.pipeline.scenario import compute, reasoning_request
+
+    messages, _ = reasoning_request(scenario, {}, clauses, compute({}, clauses, scenario))
+    return messages[1]["content"]
+
+
+def test_a_claim_shared_with_another_policy_names_the_clause_that_governs_it():
+    clauses = _policy(HOSPITAL_TEXT, CONTRIBUTION_TEXT, MULTIPLE_POLICIES_TEXT)
+    shared = _computed_prompt("I sent the same bill to my other insurer too.", clauses)
+    assert "clause 6.6" in shared and "clause 4" in shared
+    assert "clause 1.1" not in shared.split("POLICY CLAUSES AVAILABLE TO YOU:")[0]
+
+
+def test_the_line_is_silent_unless_the_person_holds_another_policy_now():
+    """Measured against all 72 eval questions before it was kept: it fires on
+    the three about a second policy and nowhere else - not on "two weeks after
+    my policy", and not on a policy the person has left."""
+    clauses = _policy(HOSPITAL_TEXT, CONTRIBUTION_TEXT)
+    for question in (
+        "A three-day stay with a fever.",
+        "I have no other insurance.",
+        "I switched from another insurer last year and dropped that policy.",
+        "Two weeks after my policy started I was admitted.",
+    ):
+        assert "ANOTHER POLICY" not in _computed_prompt(question, clauses)

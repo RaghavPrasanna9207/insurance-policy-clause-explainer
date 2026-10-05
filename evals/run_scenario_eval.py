@@ -68,6 +68,7 @@ CASES_PATH = GOLDEN_DIR / "scenarios.json"
 HELDOUT_PATHS = {
     "1": GOLDEN_DIR / "scenarios-heldout.json",
     "2": GOLDEN_DIR / "scenarios-heldout-2.json",
+    "3": GOLDEN_DIR / "scenarios-heldout-3.json",
 }
 REPORT_PATH = REPO_ROOT / "evals" / "scenario-report.md"
 
