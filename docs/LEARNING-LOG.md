@@ -10375,3 +10375,98 @@ one matches with nothing to exclude it, and the line appears for a policy the
 person no longer holds. A lookup is cheap and predictable, and its mistakes are
 predictable too, which is why its tests list the phrasings it must not match.
 </details>
+
+---
+
+# After M21 — Testing the scenario endpoint without a model
+
+## The starting position
+
+The scenario endpoint, `create_scenario` in `api/app/routers/scenarios.py`,
+does real work around the model's answer:
+
+- loads the document's clauses (`load_clauses`, from M19)
+- calls `run_scenario`
+- turns each citation back into a database row, heading and page
+- saves the run as a `ScenarioRun` row
+- hides facts the person never stated before sending the response
+
+Until now, the only test that reached that work was
+`test_scenario_end_to_end_is_grounded`. That test needs a live model, so it is
+marked `@pytest.mark.llm` and skipped by the everyday `pytest -m "not llm"`
+run. The other endpoint tests cover only the error paths (404, 409, 422). So a
+bug in, say, the page arithmetic would pass the everyday suite.
+
+## The change, and the bigger change it replaced
+
+An architecture review of the codebase had proposed something larger: one
+shared "model" interface that every test could plug a fake into, replacing
+four different ways the tests stub the model today. Looked at closely, two of
+those stubs live in one test file, and the other two test the model client
+itself, so they have to sit where they are. A shared interface would have
+added a layer across the codebase to replace two local fakes. The gap that
+mattered was narrower: the endpoint's own work was untested.
+
+So the new test, `test_scenario_answer_is_mapped_back_to_the_policy_and_stored`
+in `api/tests/test_api.py`, replaces `run_scenario` itself with a fixed answer:
+
+```python
+async def fixed_answer(question, clauses):
+    received.extend(clauses)
+    return ScenarioResult(
+        verdict="not_covered",
+        reasoning="Cosmetic surgery is excluded.",
+        citations=[Citation("4.1", "shall not be liable", "denies")],
+        facts={"procedure": "nose job", "age": None, "pre_existing_condition": "unknown"},
+        missing_facts=["age"],
+        clauses_considered=len(clauses),
+    )
+
+monkeypatch.setattr(scenarios, "run_scenario", fixed_answer)
+```
+
+Replacing `run_scenario`, rather than the model underneath it, keeps this a
+test of the endpoint and nothing else. Against the seeded test database it
+checks that:
+
+- all four analysed clauses reached `run_scenario`, in document order
+- the citation came back as clause `4.1`, its database row, its heading, and
+  page 1 (pages are stored counting from 0)
+- the facts the person never gave (`None`, `"unknown"`) were not shown back
+- the run was saved with its verdict and citations
+
+## Seen failing, on purpose
+
+A new test that passes the first time it runs has only shown that it doesn't
+fail on correct code. It hasn't shown that it can fail at all. So the endpoint
+was broken deliberately, twice, with the test run after each:
+
+1. the page counted from 0 instead of 1: the test failed, `assert 0 == 1`
+2. the filter that hides unstated facts removed: the test failed
+
+Both breaks were then undone. A test that can't fail is decoration. This is the
+same rule as "each test was seen failing first", applied after the fact
+instead of before.
+
+## Check it yourself
+
+```bash
+cd api
+.venv/Scripts/python -m pytest tests/test_api.py -q -k mapped_back
+```
+
+**Predict before you look:** if `load_clauses` started returning clauses in
+the order SQLite happened to store them, which assertion in this test would
+catch it, and why does the order matter beyond this test?
+
+<details>
+<summary>Answer</summary>
+
+`assert [c.clause_id for c in received] == ["2.1", "3.2", "4.1", "5.1"]`.
+The fake records exactly which clauses reached `run_scenario`, in order.
+Beyond the test, order decides which repeat of a clause number gets the plain
+id and which gets the `#2` suffix (M19), and it decides the order the clauses
+appear in the prompt. The model tends to cite the first relevant clause it
+reads, so the same policy could produce different answers if the order
+drifted.
+</details>

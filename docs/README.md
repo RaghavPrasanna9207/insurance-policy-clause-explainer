@@ -279,6 +279,9 @@ A case that never cited the policy's contribution clause, a fix built the projec
 - **Concept 52: a free-text field is a side channel** - adding one structured field rewrote the free-text notes for every question, and the reasoning step read the new wording differently.
 - **The rebuild: a lookup instead of a fact** - reading the person's words with a fixed pattern, and proving by request comparison that only 3 of 72 questions change, so the other 69 need no re-measuring.
 
+### After M21 - Testing the scenario endpoint without a model
+The endpoint's own work around the model's answer (loading clauses, mapping citations to pages, saving the run) had only a live-model test; one test now covers it with `run_scenario` replaced by a fixed answer, and was broken on purpose twice to prove it can fail.
+
 ---
 
 ## Related documents
