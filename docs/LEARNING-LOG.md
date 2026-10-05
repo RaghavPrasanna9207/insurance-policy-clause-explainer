@@ -9951,3 +9951,427 @@ than shown as fact. That is why the pair is built in one function. The
 second check should not have to catch what the first was supposed to make
 impossible.
 </details>
+
+---
+
+# M21 — Another policy covering the same claim
+
+## The starting position
+
+One case in the scenario eval's main set, `other-policy-contribution`, asks:
+
+> "I hold another health policy with a different insurer and I have sent the
+> same hospital bill to both. I have held this policy four years."
+
+The synthetic policy answers it in clause 6.6:
+
+> **6.6 Contribution.** If at the time of a claim the Insured Person holds any
+> other policy of indemnity covering the same risk, the Company shall not be
+> liable to pay more than its rateable proportion of the claim, and the Insured
+> Person shall disclose particulars of such other policy to the Company.
+
+So the expected verdict is `conditional`: the claim is paid, but this policy
+pays only its share. The case must cite 6.6.
+
+The run history (`evals/run-history.json`, which records every eval run
+locally) showed the case answered `conditional`, then `covered`, then
+`conditional` on Ollama 0.34.2. On Ollama 0.35.0 it was `insufficient_information`
+five times out of five. It looked like a runtime upgrade had broken it.
+
+The history said otherwise. Even in the runs where the verdict was
+`conditional`, the report listed the case as citing `2.1 (missing 6.6)`.
+**Clause 6.6 had never been cited, on any runtime.** The right verdicts had been
+right for the wrong reason, and the new runtime only made the miss visible as a
+wrong verdict.
+
+## Reading what the model was given
+
+Before changing anything, the actual request was rebuilt and printed. Three
+findings:
+
+1. **Clause 6.6 was in the prompt.** The synthetic policy's 40 clauses fit in
+   the context window whole, so nothing was cut.
+2. **Nothing pointed at it.** The prompt has a "WORDS THIS QUESTION SHARES WITH
+   A CLAUSE" section (Concept 35), which lists unusual words the question and a
+   clause have in common. The question says "another health policy",
+   "different insurer", "same hospital bill"; the clause says "other policy of
+   indemnity", "same risk", "rateable proportion", "Contribution". The only
+   shared word is "policy", which is everywhere in the document, so nothing was
+   listed.
+3. **The missing-facts list pulled the model off course.** The prompt's "NOT
+   STATED" section listed age, pre-existing condition, hospitalised and hours
+   since admission, none of which matter here. The model answered:
+
+   > "...the situation does not specify whether the claim is for a pre-existing
+   > disease, cosmetic surgery, or any other excluded treatment. Additionally,
+   > the policyholder has sent the same hospital bill to another insurer, which
+   > may affect the claim..."
+
+   It noticed the other insurer and never connected it to 6.6.
+
+## The runtime moved twice in a week
+
+This investigation crossed two automatic Ollama updates: 0.34.2 to 0.35.0, then
+0.35.0 to 0.35.1. Two consequences, both following from Concept 45 (the runtime
+is part of the model):
+
+- **The response cache emptied itself, in effect.** The cache key includes the
+  Ollama version, so every stored answer from the old version is a miss. The
+  first sign was a "quick" check making 40 live model calls.
+- **A comparison spread across days can mix a code change with a runtime
+  change.** So every measurement in this milestone was taken on one version,
+  0.35.1, back to back: the old code first, the new code immediately after.
+
+## Test cases written before the fix
+
+A fix designed while staring at one case is tuned to that case (Concept 36).
+So before any code was written, a third held-out batch was added,
+`evals/golden/scenarios-heldout-3.json`, with three cases:
+
+| Case | Situation | Expected |
+|---|---|---|
+| `ho3-group-cover-shares-bill` | employer's group insurance paid part, claiming the rest here | `conditional`, cite 6.6 |
+| `ho3-two-policies-appendix` | two policies, claiming an appendix operation on both | `conditional`, cite 6.6 |
+| `ho3-switched-from-old-insurer` | left an old insurer last year, no longer holds it | `covered`, must **not** cite 6.6 |
+
+The first two say the same thing as the main-set case in different words. The
+third mentions another insurer but must not bring in the clause, because 6.6
+applies only to another policy held "at the time of a claim". These were never
+used to choose or adjust the fix.
+
+## The real policies say something different
+
+The fix needed code to find "the clause about another policy" in any policy, not
+just the synthetic one. Before writing that pattern, it was run over the three
+real insurer wordings the project measures against (reading and segmenting
+only, no model). None of them has a "Contribution" clause. All three carry
+IRDAI's standard **"Multiple Policies"** clause (Star's clause 4, Niva's
+6.1.11, HDFC's inside one oversized segment). That clause says something
+different: the insured person may choose which policy settles the claim first.
+It does not limit the insurer to a share.
+
+This shaped the design. Code can reliably tell *which* clause is about another
+policy, because the subject is named in the wording. It cannot reliably tell
+*what that clause decides*, because insurers decide it differently. So the
+line code adds names the clause and leaves the reading to the model. This is
+the project's usual division of labour: code does the lookups, the model reads
+the language.
+
+## The first version: a new fact
+
+**A new fact.** `FACTS_SCHEMA` in `api/app/pipeline/scenario.py` gained one
+nullable yes/no field, `another_policy_covers_this_claim`, and the extraction
+prompt (`FACTS_SYSTEM` in `api/app/llm/prompts.py`) a short section:
+
+```
+ANOTHER POLICY: another_policy_covers_this_claim is true only when the person
+says they hold another health policy NOW that covers this same claim. A policy
+they used to have, and have left, is false. Nothing said about other insurance
+is null.
+```
+
+**A pattern for the clause**, matching both wordings by their shared subject:
+
+```python
+_ANOTHER_POLICY = re.compile(
+    r"\brateable\b|\bcontribution\b|\b(?:other|multiple) (?:polic(?:y|ies)|insurance)\b",
+    re.IGNORECASE,
+)
+```
+
+It matches only 6.6 in the synthetic policy and exactly one clause in each real
+one.
+
+**A line in the reasoning prompt**, only when the person said so and a clause
+matched:
+
+```
+ANOTHER POLICY ALSO COVERS THIS CLAIM (the person said so).
+- clause 6.6 sets what happens when another policy covers the same claim.
+  Read it: it decides how this claim is shared between the policies.
+```
+
+It sits after the payment-reduction section, because like those it bears on how
+much this policy pays rather than whether the claim is payable. The same clause
+ids are added to `named_by_code`, so on a policy too long to show whole, the
+clause-picking step can never drop it.
+
+`PROMPT_VERSION` became `v50-another-policy`.
+
+## Failure 82: the target fixed, the new cases not
+
+Single runs, both on Ollama 0.35.1:
+
+| | old code (v49) | new code (v50) |
+|---|---:|---:|
+| main set, verdicts right | 32/40 | 31/40 |
+| held-out batch 1 | 0.750 | 0.688 |
+| held-out batch 2 | 0.923 | 1.000 |
+| held-out batch 3 (new) | 0/3 | 0/3 |
+| citation recall | 0.688 | 0.812 |
+| made-up quotes | 0 | 0 |
+
+Resampled five times, the target case went from wrong 5/5 to **right 5/5,
+citing 6.6**. The mechanism works.
+
+The new held-out batch stayed at 0 of 3, for three different reasons, two of
+which have nothing to do with this change:
+
+- **`ho3-group-cover-shares-bill`: the fact was not read.** "My employer's group
+  health insurance paid part of my hospital bill" came back with
+  `another_policy_covers_this_claim: null`, so the line never appeared. The
+  fact-extraction check (`evals/check_fact_extraction.py`) found the same: of
+  four new sentences written for the field, "my old policy lapsed" and "no
+  other insurance" were read right, and both phrasings of "two insurers, one
+  bill" were missed in at least one run.
+- **`ho3-two-policies-appendix`: the line worked, the answer was still wrong.**
+  The model wrote "the fact that another policy covers this claim (clause 6.6)
+  does not affect the outcome", then refused the claim under the
+  pre-existing-disease waiting period (3.2) for an appendix operation nobody
+  described as pre-existing.
+- **`ho3-switched-from-old-insurer`: the fact was read right** (old policy
+  lapsed, so no line), and the model again applied the pre-existing-disease
+  waiting period, this time to dengue.
+
+The last two are the weakness recorded at the end of M19 part 2: the
+waiting-period line for the pre-existing-diseases clause hedges, and the model
+over-applies that clause. M19 left it open "until a case shows it costs an
+answer". Two cases now do.
+
+## Failure 83: three breaks, and what actually caused them
+
+In the single runs, three cases that are normally right came back wrong under
+the new code: `cosmetic-exclusion`, `no-preauth-cashless` and
+`ayush-private-clinic`. Resampling settled whether they were real. On the old
+code, all three were right **five times out of five**. On the new code they
+were wrong four or five times out of five.
+
+**None of these cases mentions another policy, so the new line never
+appeared.** The structured facts extracted for them were identical between old
+and new code. One thing did differ: the free-text `notes` field.
+
+| Case | `notes` under the old prompt | `notes` under the new prompt |
+|---|---|---|
+| cosmetic-exclusion | "Procedure was for aesthetic reasons, not due to a pre-existing condition." | "The procedure was a nose job, but there is no mention of when the policy started, the person's age, the cost..." |
+| ayush-private-clinic | "treatment at a private clinic that is not government-run and has no Quality Council accreditation" | "Private clinic, not government-run, no Quality Council accreditation" |
+| no-preauth-cashless | (the question, ending "I have held the policy four years.") | (the same, without the last sentence) |
+
+To test whether the notes caused the flips, the new code was run with each
+case's facts held fixed and only `notes` swapped, three fresh samples each:
+
+| Case | new notes | old notes | no notes |
+|---|---:|---:|---:|
+| ayush-private-clinic | **0/3** | 3/3 | 3/3 |
+| cosmetic-exclusion | 3/3 | 3/3 | 3/3 |
+| no-preauth-cashless | 3/3 | 3/3 | **0/3** |
+
+Two different results:
+
+- **`ayush-private-clinic` is a genuine regression, and the notes caused it.**
+  The same facts with the old wording are right every time; with the new
+  wording, wrong every time.
+- **`cosmetic-exclusion` and `no-preauth-cashless` are right every time with
+  the new notes when asked on their own**, yet were wrong inside the eval run.
+  What differed was the questions asked *before* them. Concept 26 and
+  Concept 27 explain why that matters: the runtime reuses the cached state of
+  a matching prompt prefix and batches work differently depending on what came
+  just before, so a near-tie can break differently. These two are fragile
+  cases sitting on a near-tie, not cases this change damaged.
+
+## Concept 52: a free-text field is a side channel
+
+Every structured fact the extractor returns is checked: an enum, a nullable
+integer, a yes/no. `notes` is different. It is free text, kept because people
+sometimes say things no field captures, and the reasoning prompt shows it
+under "FACTS UNDERSTOOD" like any other fact.
+
+A free-text field is a **side channel**: a path information takes that no
+schema constrains. Two consequences showed up here:
+
+1. **Any change to the extraction prompt rewrites it for every case.** Adding
+   one field about other insurance changed the wording of `notes` on questions
+   about nose jobs and Ayurveda. Nothing tested those words, because nothing
+   can: there is no right answer for a paraphrase.
+2. **The reasoning step is sensitive to its wording.** "a private clinic that
+   is not government-run" and "Private clinic, not government-run" mean the
+   same thing to a person, and produced opposite verdicts here, every time.
+
+This is Concept 48 (a prompt is not a list of independent rules) arriving
+through a side door. Concept 48 is about an instruction for one field competing
+with the others. Here, the instruction changed nothing structured and still
+moved unrelated answers, through the one field nothing checks.
+
+## Measured properly
+
+Single runs could not settle whether the first version helped, so both
+versions were measured by majority of three (Concept 34): each case asked
+three times and scored by its most common verdict. The old code ran first,
+then the new, back to back on Ollama 0.35.1:
+
+| | old code (v49) | first version (v50) |
+|---|---:|---:|
+| main set | **34/40** | **30/40** |
+| held-out batch 1 | 12/16 | 12/16 |
+| held-out batch 2 | 12/13 | 13/13 |
+| held-out batch 3 | 0/3 | 0/3 |
+| total | **58/72** | **55/72** |
+
+On the main set the first version fixed two cases (`other-policy-contribution`,
+`breach-of-law`) and broke six (`ped-waiting-served`, `cosmetic-exclusion`,
+`copay-unknown-inception-age`, `no-preauth-cashless`, `ayush-private-clinic`,
+`day-care-not-listed`). **It made the system worse overall.** Inside the eval
+run, `cosmetic-exclusion` and `no-preauth-cashless` were wrong in the majority
+even though they were right when asked on their own. The eval run is what's
+measured, so they count.
+
+The route the damage took is the one Failure 83 proved for `ayush-private-clinic`:
+the extraction prompt changed, so `notes` changed for every question, so
+answers to questions that never mentioned another policy moved.
+
+## The rebuild: a lookup instead of a fact
+
+The fix was kept and the side channel closed. The person's mention of a second
+policy is now found **in code, from their own words**, and the extraction
+prompt is back to exactly what it was. This is the same move the project
+already makes in `correct_misfiled_age`, which checks the person's words for a
+mention of the policy starting rather than asking the model.
+
+The pattern in `api/app/pipeline/scenario.py`:
+
+```python
+_MENTIONS_ANOTHER_POLICY = re.compile(
+    r"\b(?:another|other|second)\s+(?:health\s+)?(?:insurance\s+)?"
+    r"(?:polic(?:y|ies)|insurers?|insurance|mediclaim)\b"
+    r"|\b(?:two|both|multiple)\s+(?:health\s+)?(?:insurance\s+)?"
+    r"(?:polic(?:ies|y)|insurers|insurance companies|companies)\b"
+    # Employer and group cover: the usual second policy in India.
+    r"|\b(?:group|corporate|company|employer'?s?|office)\s+(?:health\s+)?"
+    r"(?:insurance|cover|policy|mediclaim)\b",
+    re.IGNORECASE,
+)
+```
+
+and a sentence-level exclusion, so a policy the person no longer holds, or
+never had, does not count:
+
+```python
+_NOT_HELD_NOW = re.compile(
+    r"\b(?:no|not|never|don't|no longer|used to|previous|old|lapsed?|left|dropped"
+    r"|switched|cancell?ed)\b",
+    re.IGNORECASE,
+)
+```
+
+**The pattern was checked against every question in the eval first.** A looser
+draft also matched "two weeks after my policy" and "two years into the
+policy", which would have put the line into two unrelated questions. The
+final version matches exactly three of the 72 questions: `other-policy-contribution`
+and the two held-out batch-3 cases about a second policy.
+
+One honest caveat: by then the batch-3 wording had been seen, so the pattern is
+not a clean test against those two cases. It was written from general
+phrasings (employer and group cover is the usual second policy in India), not
+from their exact words.
+
+Because the line is now a lookup, it is labelled as one (Concept 35):
+
+```
+THE PERSON MENTIONS ANOTHER POLICY (a lookup on their words, not a judgement).
+- clause 6.6 sets what happens when another policy covers the same claim.
+  Read it: it decides how this claim is shared between the policies.
+```
+
+`PROMPT_VERSION` became `v51-another-policy-lookup`.
+
+### Isolation, proven rather than hoped for
+
+Every request the pipeline sends was recorded for all 72 eval questions on the
+old code and on the rebuilt code, with the model call intercepted:
+
+```
+cases with any different request: 3
+cases whose FACT request differs: 0
+```
+
+This has a consequence worth stating carefully. The response cache keys on the
+exact request (Concept 29). For the 69 unchanged questions, the rebuilt code
+sends **byte-identical requests**, so the measurements already taken on the old
+code are measurements of the rebuilt code too. Only the three changed questions
+needed new samples, and they got five each.
+
+## The rebuild, measured
+
+| Case | old code | rebuilt (v51), 5 samples |
+|---|---|---|
+| `other-policy-contribution` | covered, 2 of 3 | **conditional 5/5, cites 6.6** |
+| `ho3-group-cover-shares-bill` | covered | covered 5/5, does not cite 6.6 |
+| `ho3-two-policies-appendix` | not_covered | not_covered 5/5, does not cite 6.6 |
+
+| | old code | first version | rebuilt |
+|---|---:|---:|---:|
+| main set | 34/40 | 30/40 | **35/40** |
+| held-out batches 1 / 2 / 3 | 12/16 · 12/13 · 0/3 | 12/16 · 13/13 · 0/3 | 12/16 · 12/13 · 0/3 |
+| total | 58/72 | 55/72 | **59/72** |
+
+What this does and does not show:
+
+- **It cannot cost an answer to a question that doesn't mention a second
+  policy.** The request comparison proves that; it isn't inferred from scores.
+- **The case it was built for is fixed, reliably.**
+- **It did not carry over to new wording: 0 of 2.** In both held-out cases the
+  line is now in the prompt and the model still does not cite 6.6. In
+  `ho3-two-policies-appendix`, the pre-existing-disease waiting period also gets
+  in the way, as in Failure 82.
+
+It was merged on those terms: a small, contained gain on a case it was tuned
+against, with no evidence yet that it generalises. Why the model reads the line
+and still ignores the clause is the open question it leaves.
+
+## Closing out M21
+
+### How it connects to what was already there
+
+M21 has the same shape as the project's earlier fixes: the model reads the
+language, and code finds the clause and puts it in front of the model.
+Waiting periods, reductions and cover windows all work this way. What M21
+added is a lesson about **where** the reading happens. Asking the fact
+extractor for one more field looked like the obvious place, and it was the
+expensive one, because that prompt feeds a free-text field into every
+question. Reading the person's words with a fixed pattern did the same job
+without touching anything else.
+
+### What it made possible
+
+The request comparison is reusable. Any change that should touch only some
+questions can be checked the same way, before any model time is spent: record
+every request on old and new code, and confirm that only the intended questions
+differ. Where that holds, the unchanged questions don't need re-measuring at
+all.
+
+## Check it yourself
+
+```bash
+cd api
+.venv/Scripts/python -m pytest tests/test_scenario.py -q -k "another_policy or shared_with_another"
+```
+
+**Predict before you look:** a person writes "My wife's office mediclaim
+covers me too. Can I claim the rest of the bill from this policy?" Will the
+line appear in the prompt? Now try "I used to have another policy but it
+lapsed." Which part of the code decides each one?
+
+<details>
+<summary>Answer</summary>
+
+The first one fires. "office mediclaim" matches the employer-and-group branch
+of `_MENTIONS_ANOTHER_POLICY`, nothing in the sentence matches `_NOT_HELD_NOW`,
+and the policy has a clause the `_ANOTHER_POLICY` pattern finds, so the line
+names it. The second does not: "another policy" matches, but the same sentence
+contains "used to" and "lapsed", so `_NOT_HELD_NOW` excludes it.
+
+The exclusion works sentence by sentence, and that is also its weakness. "I had
+another policy. It lapsed last year." splits into two sentences, so the first
+one matches with nothing to exclude it, and the line appears for a policy the
+person no longer holds. A lookup is cheap and predictable, and its mistakes are
+predictable too, which is why its tests list the phrasings it must not match.
+</details>
