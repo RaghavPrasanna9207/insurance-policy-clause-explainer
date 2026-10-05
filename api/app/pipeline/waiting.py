@@ -41,6 +41,11 @@ from enum import StrEnum
 # wins, and is not about them.
 _PRE_EXISTING = re.compile(r"pre[\s-]?existing", re.IGNORECASE)
 _OPENING_CHARS = 60
+# A period that bars only the treatments its clause lists (IRDAI's "Specified
+# disease/procedure waiting period", maternity), recognised the same way. Only
+# these get the narrower line; anything not recognised keeps the firm one,
+# because calling an all-illness period list-only would pay claims it bars.
+_LISTED = re.compile(r"specified|maternity", re.IGNORECASE)
 
 
 class WaitingStatus(StrEnum):
@@ -80,6 +85,8 @@ class WaitingCheck:
     # clause" was read as blocking everything - a 36-month maternity wait was
     # given as the reason to refuse unrelated claims on a new policy.
     subject: str = ""
+    # Bars only the treatments its clause lists.
+    listed: bool = False
 
     def concerns_nothing_here(self) -> bool:
         """A pre-existing diseases bar, for a condition settled as beginning after the policy."""
@@ -174,6 +181,20 @@ class WaitingCheck:
                 f"policy held {_human(self.held_days)} -> this waiting period no "
                 f"longer applies (it says nothing about any other clause)"
             )
+        if self.listed and not self.named and not self.exceptions:
+            # M22: told "still applies and blocks treatment covered by THIS
+            # clause", the model refused a thyroid problem, malaria and
+            # appendicitis under the specified-disease period, copying the
+            # line into its reasoning; none is on the clause's list. The
+            # pre-existing lesson again: open with whom the bar concerns.
+            # Not when the question's words appear in the clause - then it
+            # probably is listed, and the firm line stays.
+            return (
+                f"{who}: bars ONLY the treatments this clause lists. If this "
+                f"treatment is not one of them, this period is not the reason "
+                f"for this claim. (Requires {requires}; policy held "
+                f"{_human(self.held_days)}, so not yet served.)"
+            )
         blocked = (
             f"{who}: requires {requires}, "
             f"policy held {_human(self.held_days)} -> this waiting period still "
@@ -261,6 +282,8 @@ def evaluate(
                     getattr(clause, "text", "")[:_OPENING_CHARS])),
                 condition_predates_policy=condition_predates_policy,
                 # The heading repeats the clause number; the line already has it.
+                listed=bool(_LISTED.search(
+                    f"{getattr(clause, 'heading', '')} {getattr(clause, 'text', '')[:_OPENING_CHARS]}")),
                 subject=re.sub(r"^[\d.]+\s*", "", getattr(clause, "heading", "") or ""),
             )
         )

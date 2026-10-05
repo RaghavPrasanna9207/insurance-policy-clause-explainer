@@ -283,11 +283,12 @@ A case that never cited the policy's contribution clause, a fix built the projec
 The endpoint's own work around the model's answer (loading clauses, mapping citations to pages, saving the run) had only a live-model test; one test now covers it with `run_scenario` replaced by a fixed answer, and was broken on purpose twice to prove it can fail.
 
 ### M22 - Whether an illness began before the policy
-"The knee trouble only started after I took the policy out" was read as unknown, and the claim refused under the pre-existing disease waiting period. A fixed pattern now settles the plain "it began after" case, the waiting-period check is told, and every waiting-period line names what it is for. 62/78 from 60/78, with one new forbidden citation, and the held-out batch written for it did not move.
+"The knee trouble only started after I took the policy out" was read as unknown, and the claim refused under the pre-existing disease waiting period. A fixed pattern now settles the plain "it began after" case, the waiting-period check is told, and every waiting-period line names what it is for. Part 3 fixes the two costs parts 1-2 left: a scoring rule corrected after rescoring every stored answer, and list-type waiting periods (specified disease, maternity) that now open by saying they bar only their list. 64/78 from 60/78.
 
 - **Failure 84: the "yes" direction broke a case that was already right** - a true "pre-existing: yes" made the model refuse a served claim under the cosmetic exclusion, five times in five.
 - **Concept 53: a fix that acts in one direction only** - settle a fact only in the direction measured to help, and leave the other as a judgement.
 - **Failure 85: the batch written for this milestone did not move** - with the pre-existing bar settled, the model refuses under the specified-disease period instead, whose line names a category but not its list.
+- **Part 3: fixing the two costs** - why the obvious fix ("none of your words are on the list") was unsafe ("gave birth" doesn't match "childbirth"), and the narrower line built instead; the held-out batch moves from 1/6 to 2/6 and the kidney-stone case that started M22 is fixed.
 
 ---
 

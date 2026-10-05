@@ -317,4 +317,25 @@ class HeadedClause(FakeClause):
 def test_a_blocking_period_names_what_it_is_for():
     """Without its subject, an unserved maternity wait read as a bar on everything."""
     block = render(evaluate([HeadedClause("3.4", [1080], heading="3.4 Maternity Waiting Period")], days_held=600))
-    assert "clause 3.4 (Maternity Waiting Period): requires" in block
+    assert "clause 3.4 (Maternity Waiting Period): " in block
+
+
+SPECIFIED = HeadedClause("3.3", [720], heading="3.3 Specified Disease Waiting Period",
+                         text="Expenses related to the treatment of cataract, hernia ...")
+ALL_ILLNESS = HeadedClause("3.1", [30], heading="3.1 Initial Waiting Period",
+                       text="No claim shall be payable in respect of any Illness ...")
+
+
+def test_a_list_period_says_it_bars_only_its_list():
+    """M22: "blocks treatment covered by THIS clause" refused a thyroid problem
+    under the specified-disease period; it is not on the list."""
+    block = render(evaluate([SPECIFIED], days_held=600))
+    assert "bars ONLY the treatments this clause lists" in block
+
+
+def test_a_period_naming_the_treatment_or_barring_all_illness_stays_firm():
+    named = render(evaluate([SPECIFIED], days_held=600, named={"3.3": ["cataract"]}))
+    initial = render(evaluate([ALL_ILLNESS], days_held=10))
+    for block in (named, initial):
+        assert "still applies and blocks" in block
+        assert "bars ONLY" not in block

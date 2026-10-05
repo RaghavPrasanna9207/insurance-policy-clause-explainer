@@ -10824,6 +10824,148 @@ needs the list itself, and that is a separate change for a separate
 milestone. The batch shows exactly what it was written to show: whether the
 fix generalises. It does not, yet.
 
+## Part 3: fixing the two costs
+
+Parts 1 and 2 left two problems: a new forbidden citation, and a held-out
+batch that didn't move. Both were investigated before anything was changed.
+
+### The forbidden citation was a scoring question
+
+Every citation the model returns carries an **effect**, picked from a fixed
+list: `denies`, `delays`, `reduces`, `requires`, `permits`. The answer for
+`copay-unknown-inception-age` cited 5.3 with effect `requires`, meaning "this
+clause needs information that is missing". It did not say `reduces`. The
+system's own reductions block had told the model:
+
+```
+- CANNOT TELL: clause 5.3: a 20% co-payment applies if the person had reached
+  60 at inception, but their age when the policy STARTED was not stated, so
+  this cannot be determined
+```
+
+The case's own `why` agrees: "Two things are unknown and both matter. The
+co-payment keys on age AT INCEPTION..." And the eval file defines
+`must_not_cite` as "a clause a correct answer must NOT **rely on** - a
+co-payment for someone who was 58 at inception". Naming 5.3 as undecided is
+not relying on it.
+
+So the scorer changed, not the answer key. In `evals/run_scenario_eval.py`:
+
+```python
+def relied_on(citations, forbidden: set[str]) -> list[str]:
+    """The forbidden clauses an answer cites AGAINST the claim. ..."""
+    return sorted({c.clause_id for c in citations
+                   if c.clause_id in forbidden and c.effect in ("denies", "delays", "reduces")})
+```
+
+**This is a rule changed after seeing an answer,** which Part 2 said not to
+do for a single case. What makes it acceptable here is the check made first:
+every stored answer, for all 78 questions, was replayed from the cache (no
+model time) and scored under both rules. Exactly one answer moved,
+`copay-unknown-inception-age`. A rule that had quietly forgiven other real
+false citations would have shown up in that list. A test pins both sides: a
+`requires` citation of a forbidden clause is not counted, a `reduces` one is.
+
+### The batch: the model was copying the line
+
+Reading the reasoning of the five held-out-4 refusals showed the mechanism
+directly. The thyroid answer said:
+
+> "...this waiting period still applies and blocks treatment covered by this
+> clause. The claim is not covered."
+
+That is the waiting-period line, copied word for word. For malaria the model
+wrote "specified diseases, including malaria"; malaria is not on the list. The
+two breach-of-law (4.4) citations were mix-ups: the reasoning discussed
+hazardous sports or the pre-existing period under 4.4's number. The quote
+check had already marked both answers *unverified*, so they were left alone.
+
+**The obvious fix was unsafe, and a check showed it before any code.** The
+idea was to tell the model "none of the question's words appear in this
+clause's list", using the existing word lookup (`named_in_question`, which
+lists words the person used that a clause also uses). The lookup was run
+against every question where the specified-disease or maternity period is
+unserved. For `maternity-too-early`:
+
+> "I gave birth 14 months after buying the policy. Will the delivery be paid
+> for?"
+
+it found **nothing**. The clause says "maternity, childbirth ... two
+deliveries", and "gave birth" / "delivery" don't match those words. A line
+saying "not named" would have cleared a claim that must be refused.
+
+**What was built instead** leaves the judgement with the model and changes
+only how the line opens. This is the same lesson as the pre-existing line:
+the first words of a line are the ones acted on. In
+`api/app/pipeline/waiting.py`:
+
+```python
+# A period that bars only the treatments its clause lists (IRDAI's "Specified
+# disease/procedure waiting period", maternity), recognised the same way. Only
+# these get the narrower line; anything not recognised keeps the firm one,
+# because calling an all-illness period list-only would pay claims it bars.
+_LISTED = re.compile(r"specified|maternity", re.IGNORECASE)
+```
+
+and, for an unserved period of that kind whose words the question does not
+share:
+
+```
+- clause 3.3 (Specified Disease Waiting Period): bars ONLY the treatments
+  this clause lists. If this treatment is not one of them, this period is not
+  the reason for this claim. (Requires 24 months; policy held 20 months, so
+  not yet served.)
+```
+
+Two choices in it follow Concept 53, *a fix that acts in one direction only*:
+
+- **Recognise the list-type periods, not the all-illness one.** The opposite
+  design would recognise "initial waiting period" and narrow everything else.
+  A miss there would tell the model that a 30-day bar on *every* illness
+  only bars a list, and wrongly pay a claim. A miss in the chosen design only
+  leaves today's over-refusal.
+- **Keep the firm line when the question's words appear in the clause.** A
+  hysterectomy 18 months in shares "hysterectomy" with clause 3.3, so it is
+  probably listed, and the firm "still applies and blocks" line stays.
+
+**Measured.** The request comparison showed 16 of 78 questions changed, with no
+fact requests among them. Only those 16 were re-asked, three samples each:
+
+| | Part 2 | Part 3 |
+|---|---:|---:|
+| the 16 changed questions | 8 right | **10 right** |
+| `maternity-too-early` (must stay refused) | not_covered | not_covered 3/3 |
+| `ho-hysterectomy-too-soon` (must stay refused) | not_covered | not_covered 3/3 |
+| `ho2-cataract-too-soon` (must stay refused) | not_covered | not_covered 3/3 |
+| `ho-copay-derived-age` (the kidney stone) | not_covered | **conditional 3/3** |
+| `ho4-gallstones-found-last-year` | not_covered | **covered 3/3** |
+
+The kidney-stone case that started M22 is now right. The other 62 questions
+send byte-identical requests and keep their measurements, so the totals are:
+
+| Set | v51 | Part 2 | Part 3 |
+|---|---:|---:|---:|
+| main set | 35/40 | 36/40 | 36/40 |
+| held-out 1 | 12/16 | 13/16 | **14/16** |
+| held-out 2 | 12/13 | 12/13 | 12/13 |
+| held-out 3 | 0/3 | 0/3 | 0/3 |
+| held-out 4 | 1/6 | 1/6 | **2/6** |
+| total | 60/78 | 62/78 | **64/78** |
+
+**What is still wrong in held-out 4, and why it stops here.** In each of the
+four, the model's own judgement fails, not a line the system wrote:
+
+- thyroid (now `conditional`) and appendicitis still say clause 3.3 covers
+  them
+- malaria: the model reads "Before I bought this policy I checked..." as a
+  pre-existing illness, the trap the code no longer falls into
+- back trouble: the model decides it is pre-existing, where the history is
+  simply unknown
+
+Going further would mean code deciding whether a treatment is on a clause's
+list. The `maternity-too-early` check showed the word lookup can't be trusted
+to do that.
+
 ## Closing out M22
 
 ### How it connects to what was already there
@@ -10841,7 +10983,9 @@ What M22 added:
 - a fix can act in one direction only (Concept 53)
 - a correct fact can still make the answer worse (Failure 84)
 - a line in the prompt has to say what it is about, not just which clause it
-  comes from
+  comes from, and the model may copy it word for word into its answer
+- a scoring rule can be corrected after seeing an answer only if every stored
+  answer is rescored under both rules and the full list of what moved is shown
 
 ### What it made possible
 
@@ -10849,15 +10993,16 @@ The pre-existing-disease fact now reaches the waiting-period check, which
 M19 had left as an open gap "until a case shows it costs an answer". The case
 turned up, and the gap is closed.
 
-The next problem is now precise rather than vague: a specified-disease line
-that names a category without its list, and a lean towards refusal on young
-policies that moves from clause to clause.
+What is left is the model's own judgement: deciding whether a treatment
+is on a clause's list, and whether an illness with no stated history predates
+the policy. Neither can be handed to code without a lookup that has been
+shown to understand "gave birth" as "childbirth".
 
 ## Check it yourself
 
 ```bash
 cd api
-.venv/Scripts/python -m pytest tests/test_scenario.py tests/test_waiting.py -q -k "pre_existing or new_condition or names_what"
+.venv/Scripts/python -m pytest tests/test_scenario.py tests/test_waiting.py -q -k "pre_existing or new_condition or names_what or list or stays_firm"
 ```
 
 **Predict before you look:** "I have had high blood pressure since before I
