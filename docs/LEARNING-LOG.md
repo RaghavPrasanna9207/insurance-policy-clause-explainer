@@ -11487,3 +11487,192 @@ waiting period, so `evaluate` skips it at the top of its loop. If it
 did record one, it would still stay in: it says "means" once, and the rule
 needs two.
 </details>
+
+---
+
+# M25 — Treatment outside India
+
+## The problem
+
+Star Health's Arogya Sanjeevani excludes treatment abroad in two short lines,
+its exclusion 22:
+
+> "22. Treatment taken outside the geographical limits of India"
+
+The Star question `star-treatment-abroad` asks:
+
+> "I was hospitalised with pneumonia while on holiday in Dubai. I have held
+> the policy for two years."
+
+The right answer is `not_covered`, citing 22. Under M24 the model answered
+`conditional` (pneumonia is payable, less Star's 5% co-payment), 3 samples of
+3. Clause 22 was in the prompt; the model never connected "Dubai" with
+"outside the geographical limits of India". The fact extraction step did not
+help either: it has no field for where treatment happened, and wrote "Dubai"
+only into its free-text `notes`.
+
+Three fixes were considered:
+
+- **A new fact field**, "where treated", in the extraction prompt. Rejected
+  for the reason M21 recorded as Concept 52 (*a free-text field is a side
+  channel*): any change to that prompt rewords the notes on every question,
+  and every answer would have to be measured again.
+- **Always point at the clause**, on every question, for any policy with an
+  "outside India" clause. Rejected: all ten Star questions would change, and
+  a line asking "where was the treatment?" invites `insufficient_information`
+  on every question that doesn't say.
+- **A word lookup on the question**, M21's pattern: code finds a place abroad
+  in the person's words and names the clause; the model judges. Chosen.
+
+## Questions written before the code
+
+`evals/real/scenarios-star-heldout-abroad.json`, four questions written before
+any code or run: two treated abroad (Singapore, London) and two traps
+(typhoid in Mumbai; "fell ill on a trip to Thailand, flew home, and was
+admitted to a hospital in Chennai"). On the M24 code, majority of three: **2
+of 4**, the traps right and both abroad questions wrong, never citing 22.
+
+## The lookup
+
+In `api/app/pipeline/scenario.py`, two patterns. One finds the clause:
+
+```python
+_ABROAD_CLAUSE = re.compile(r"\boutside\s+(?:the\s+)?(?:geographical\s+limits\s+of\s+)?india\b"
+                            r"|\bgeographical\s+(?:limits|scope)\b", re.IGNORECASE)
+```
+
+The other finds a place abroad in the question: "abroad", "overseas",
+"outside India", and a list of the places Indians most often travel to
+(Dubai, Singapore, Thailand, London, the USA, ...). It is a list, so a place
+not on it gets no line, which is the behaviour from before this change,
+never a wrong one. "Foreign" was left out on purpose: "foreign body removal"
+is a medical procedure.
+
+Run against every one of the 87 questions in the repository, it fired on
+Dubai and the abroad questions and nowhere else.
+
+## Failure 88: a hedged line changed nothing
+
+The first line, placed right after the waiting-period block:
+
+```
+THE PERSON MENTIONS A PLACE OUTSIDE INDIA (a lookup on their words, not a judgement).
+- clause 22 is about treatment taken outside India. Decide from the
+  description WHERE the treatment itself was taken: if outside India, read
+  this clause as deciding the claim; if in India, it does not apply.
+```
+
+Result: **no change at all**. Dubai, Singapore and London stayed
+`conditional`, 3 samples of 3. Reading the prompt showed why. The line sat
+between two firm statements:
+
+```
+- No waiting period blocks this claim. Some other clause decides it.
+...
+- APPLIES: clause 9: a 5% co-payment is taken from EVERY claim this policy pays ...
+```
+
+A conditional instruction ("if outside India, read this clause as
+deciding") lost to the firm lines around it. M22 had found the same thing:
+the model acts on what a line opens with and states plainly, not on what it
+asks the model to work out.
+
+The second line opens with the fact the lookup found:
+
+```
+- The person names "Singapore", which is outside India. Clause 22 excludes
+  treatment taken outside India. Unless the description says the treatment
+  itself was taken in India, clause 22 refuses this claim.
+```
+
+Singapore, London and Dubai became `not_covered`, citing 22, 3 samples of 3.
+**But the Chennai trap was refused**, 3 of 3. The model didn't count
+"admitted to a hospital in Chennai" as "the description says the treatment
+was taken in India". That's the costly direction: a valid claim told it
+will be refused.
+
+## The fallback, and keeping the test honest
+
+The fix follows Concept 53, *a fix that acts in one direction only*. The firm
+line is used only when the question names nowhere in India. If it also names
+an Indian city, "India", "home", "came back" or "returned", where the
+treatment happened is a real judgement, and the soft line is used:
+
+```python
+if _MENTIONS_INDIA.search(scenario):
+    # Both places named, so where the treatment happened is a judgement.
+    ...
+```
+
+A miss in that list (a small Indian city, no "came back") gives the firm
+line, so its ceiling is marked with a `ponytail:` comment.
+
+The fallback was designed *after* reading the Chennai failure, so Chennai
+can no longer measure it honestly. Before writing the fallback's code, three
+more questions were added and the file's notes mark Chennai as no longer
+clean:
+
+- "I came back from a work trip to Dubai ... admitted to a hospital in Kochi"
+  (expected `conditional`)
+- "After returning from a holiday in Bali, I developed dengue and was
+  hospitalised in Nashik" (expected `conditional`; Nashik is deliberately not
+  in the city list, so only "returning" can trigger the fallback)
+- "I flew from India to visit my brother in Toronto and was admitted to a
+  hospital there" (expected `not_covered`). This one measures the fallback's
+  cost: "India" makes the line soft, and the soft line was measured not to work.
+
+## Measuring
+
+Majority of three, Ollama 0.35.1, all eight questions about place, on the
+M24 code and on M25:
+
+| Question | M24 | M25 |
+|---|---|---|
+| Singapore (treated there) | conditional ✗ | not_covered ✓ |
+| London (planned surgery there) | conditional ✗ | not_covered ✓ |
+| Dubai (`star-treatment-abroad`) | conditional ✗ | not_covered ✓ |
+| Toronto ("flew from India") | conditional ✗ | conditional ✗ |
+| Mumbai | conditional ✓ | conditional ✓ |
+| Thailand, treated in Chennai | conditional ✓ | conditional ✓ |
+| Dubai trip, treated in Kochi | conditional ✓ | conditional ✓ |
+| Bali holiday, treated in Nashik | conditional ✓ | conditional ✓ |
+| **right** | **4/8** | **7/8** |
+
+One blemish: in the Kochi question, 2 of 3 answers also list clause 22 among
+their reasons, though the verdict is right.
+
+The request comparison (every reasoning request hashed, model stubbed) shows
+**0 of 78** synthetic questions changed and **1 of 10** Star questions
+(Dubai), so every other measurement stands. Star overall: right verdicts
+8/10 → **9/10**, answers citing the deciding clause 7/10 → **8/10**.
+
+## Closing out M25
+
+M25 is M21's pattern applied to a new fact: read the person's words with a
+fixed pattern, name the clause, and leave the judgement to the model. It
+added two lessons:
+
+- **A hedged instruction can do literally nothing** next to firm ones
+  (Failure 88). The same idea worked when the line opened with the fact.
+- **A firm line needs a way out** when the question gives evidence both
+  ways, so the firm version is limited to the questions where its mistake
+  can't happen.
+
+## Check it yourself
+
+```bash
+cd api
+.venv/Scripts/python -m pytest tests/test_scenario.py -q -k abroad
+```
+
+**Predict before you look:** "I had a foreign body removed from my eye in
+Pune." Which line does the prompt get: firm, soft, or none?
+
+<details>
+<summary>Answer</summary>
+
+None. "Foreign" is deliberately not in the abroad pattern and nothing else
+in the question names a place abroad, so `abroad_clauses` returns an empty
+list and the block isn't rendered. "Pune" only matters once a place abroad
+has been found, when it switches the line to the soft one.
+</details>

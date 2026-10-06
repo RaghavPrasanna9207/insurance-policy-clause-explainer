@@ -39,7 +39,7 @@ coverage, it just happens to be describing its ceiling.
 from app.grounding import normalize
 from app.taxonomy import ClauseType
 
-PROMPT_VERSION = "v56-definitions-block"
+PROMPT_VERSION = "v57-treatment-abroad"
 
 CLASSIFY_SYSTEM = """\
 You are an expert on Indian (IRDAI-regulated) health insurance policy wordings.
@@ -554,6 +554,7 @@ def render_reasoning_request(
     shared: dict[str, list[str]], clauses,
     waiting_block: str = "", reduction_block: str = "",
     window_block: str = "", another_policy_block: str = "",
+    abroad_block: str = "",
 ) -> str:
     """Format the reasoning prompt from what the pipeline has already worked out.
 
@@ -590,6 +591,9 @@ def render_reasoning_request(
     # at all" - which has to be settled before "is it payable in full".
     if window_block:
         lines += ["", window_block]
+    # Also "is this claim payable at all", so before the reductions.
+    if abroad_block:
+        lines += ["", abroad_block]
     # After the waiting periods, because the two answer questions that come in
     # that order: first "is this claim payable at all", then "is it payable in
     # full". Reversing them puts a co-payment in front of a bar that means

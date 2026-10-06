@@ -782,6 +782,7 @@ def named_by_code(
     named |= set(shared_words(scenario, clauses, facts))
     named |= set(computed.absent)
     named |= set(computed.another_policy)
+    named |= set(computed.abroad)
     return named
 
 
@@ -868,6 +869,82 @@ def render_another_policy(clause_ids: list[str]) -> str:
     return "\n".join(lines)
 
 
+# A clause excluding treatment outside India: Star's exclusion 22, "Treatment
+# taken outside the geographical limits of India".
+_ABROAD_CLAUSE = re.compile(r"\boutside\s+(?:the\s+)?(?:geographical\s+limits\s+of\s+)?india\b"
+                            r"|\bgeographical\s+(?:limits|scope)\b", re.IGNORECASE)
+
+# The person naming a place outside India, read from their words like the
+# another-policy lookup and for the same reason (Concept 52). M25: asked about
+# pneumonia "on holiday in Dubai", the model never connected Dubai with
+# Star's two-line exclusion of treatment outside India, 3 samples of 3.
+# ponytail: a list of the places Indians most often travel to; a place not on
+# it leaves today's behaviour (no line), never a wrong one. Add places as cases
+# show them. Not "foreign": "foreign body removal" is a procedure.
+_MENTIONS_ABROAD = re.compile(
+    r"\b(?:abroad|overseas|outside\s+india"
+    r"|dubai|abu\s+dhabi|uae|emirates|saudi|qatar|doha|oman|muscat|kuwait|bahrain"
+    r"|singapore|malaysia|thailand|bangkok|bali|indonesia|nepal|bhutan|sri\s+lanka"
+    r"|maldives|bangladesh|china|japan|hong\s+kong"
+    r"|london|uk|england|britain|europe|paris|france|germany|switzerland|italy"
+    r"|usa|america|new\s+york|canada|toronto|australia|sydney|melbourne|new\s+zealand)\b",
+    re.IGNORECASE,
+)
+
+
+# The question also placing the person in India, or back home. Then the line
+# stays soft (see render_abroad).
+# ponytail: the largest cities only; a smaller one with no "came back" or
+# "home" in the question gets the firm line. Widen if a case shows it.
+_MENTIONS_INDIA = re.compile(
+    r"\b(?:india|home|came\s+back|returned|returning|got\s+back"
+    r"|mumbai|delhi|chennai|kolkata|bengaluru|bangalore|hyderabad|pune|ahmedabad"
+    r"|kochi|jaipur|lucknow)\b",
+    re.IGNORECASE,
+)
+
+
+def abroad_clauses(scenario: str, clauses: list[ShortlistClause]) -> list[str]:
+    """Clauses excluding treatment outside India - when the person names a place abroad."""
+    if not _MENTIONS_ABROAD.search(scenario):
+        return []
+    return [c.clause_id for c in clauses if _ABROAD_CLAUSE.search(c.text)]
+
+
+def render_abroad(clause_ids: list[str], scenario: str) -> str:
+    """The reasoning prompt's line for those clauses, opening with the place named."""
+    if not clause_ids:
+        return ""
+    place = _MENTIONS_ABROAD.search(scenario).group(0)
+    lines = ["THE PERSON MENTIONS A PLACE OUTSIDE INDIA (a lookup on their words, not a judgement)."]
+    if _MENTIONS_INDIA.search(scenario):
+        # Both places named, so where the treatment happened is a judgement.
+        # The firm line below refused "fell ill on a trip to Thailand, flew
+        # home, and was admitted ... in Chennai" 3 samples of 3: the costly
+        # direction, a valid claim refused. This softer line, measured on the
+        # same question, left it payable.
+        lines += [
+            f"- clause {i} is about treatment taken outside India. Decide from the "
+            f"description WHERE the treatment itself was taken: if outside India, "
+            f"read this clause as deciding the claim; if in India, it does not apply."
+            for i in clause_ids
+        ]
+        return "\n".join(lines)
+    # Opens with the fact, then the consequence. A first version said only
+    # "decide WHERE the treatment was taken: if outside India, read this clause
+    # as deciding the claim", and changed nothing: Dubai, Singapore and London
+    # stayed `conditional` 3 samples of 3, the hedge losing to the firm
+    # co-payment line below it. "The treatment itself", not where the person
+    # was: ill on a trip and treated at home is not treatment abroad.
+    lines += [
+        f'- The person names "{place}", which is outside India. Clause {i} '
+        f"excludes treatment taken outside India. Unless the description says "
+        f"the treatment itself was taken in India, clause {i} refuses this claim."
+        for i in clause_ids
+    ]
+    return "\n".join(lines)
+
+
 _ANNEXURE = re.compile(r"\bannexure\s+([ivxl]+|\d+)\b", re.IGNORECASE)
 
 
@@ -949,6 +1026,8 @@ class Computed:
     absent: dict[str, list[str]] = field(default_factory=dict)
     # Clauses about another policy covering this claim, when the person mentions one.
     another_policy: list[str] = field(default_factory=list)
+    # Clauses excluding treatment outside India, when the person names a place abroad.
+    abroad: list[str] = field(default_factory=list)
 
 
 def compute(
@@ -978,6 +1057,7 @@ def compute(
             duration_days(facts, "expense_timing"),
         ),
         another_policy=another_policy_clauses(scenario, clauses),
+        abroad=abroad_clauses(scenario, clauses),
     )
 
 
@@ -1009,6 +1089,7 @@ def reasoning_request(
                 reduction.render(computed.reductions),
                 window.render(computed.windows),
                 render_another_policy(computed.another_policy),
+                render_abroad(computed.abroad, scenario),
             ),
         },
     ]
