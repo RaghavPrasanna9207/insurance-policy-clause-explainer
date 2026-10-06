@@ -297,6 +297,11 @@ The model quoted the specified-disease list in its own answer and still applied 
 - **Concept 54: a ligature, and why "Speciﬁed" is not "Specified"** - PDFs store "fi" as one character, so M22's line had never been used on Star's real policy; Unicode NFKC normalization, and why every text pattern on PDF text should run on normalized text.
 - **Failure 86: the right answer, now for the wrong reason** - on Star, removing one blunt "blocks" line let a definitions block misfiled as a waiting period (`c7`) become the cited reason; left as its own fix.
 
+### M24 - A definitions block is not a waiting period
+Star's definitions page, cut into pieces for length, left one piece typed as a 36-month waiting period, and every Star question was told it blocked the claim. Why the classification prompt's tie-breaker order did it, why the fix went in the waiting-period check rather than the prompt, and a "means" count measured on three policies before the rule was written.
+
+- **Failure 87: the score fell, and the change was kept** - Star 9/10 → 8/10 verdicts: the treatment-abroad answer had been right only because of the false line. A verdict is only as good as the clause it rests on.
+
 ---
 
 ## Related documents

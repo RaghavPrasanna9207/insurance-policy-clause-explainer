@@ -53,6 +53,14 @@ _LISTED = re.compile(r"specified|maternity", re.IGNORECASE)
 # ponytail: a longer clause keeps the unquoted line; extract just the list if
 # a real policy shows that costs answers.
 _QUOTE_LIST_CHARS = 600
+# A run of definitions ("X means ...") is not a waiting period, even when one
+# term it defines is. Star's definitions page, split for length, left a piece
+# defining "Specific Waiting Period" typed waiting_period with 36 months, and
+# every claim within three years was told it "still applies and blocks"
+# (Failure 86). Measured on three policies: that piece says "means" 8 times,
+# every real waiting period 0 times.
+_DEFINES = re.compile(r"\bmeans\b", re.IGNORECASE)
+_DEFINITIONS_BLOCK = 2
 
 
 class WaitingStatus(StrEnum):
@@ -288,6 +296,8 @@ def evaluate(
         # NFKC first: PDFs set "fi" as one ligature character, so Star's
         # "Speciﬁed disease" never matched "specified" and got the firm line.
         text = " ".join(unicodedata.normalize("NFKC", getattr(clause, "text", "") or "").split())
+        if len(_DEFINES.findall(text)) >= _DEFINITIONS_BLOCK:
+            continue
         heading = unicodedata.normalize("NFKC", getattr(clause, "heading", "") or "").strip()
         listed = bool(_LISTED.search(f"{heading} {text[:_OPENING_CHARS]}"))
         body = text.removeprefix(heading).strip()
