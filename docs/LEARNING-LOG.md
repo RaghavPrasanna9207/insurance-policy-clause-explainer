@@ -12212,3 +12212,179 @@ no full stop between the letter and "Code". Here the code comes after
 stays inside the clause above it (Excl11). That is the `ponytail:` ceiling in
 `segment.py`.
 </details>
+
+---
+
+# M28 — Two explanations that measurement refuted
+
+## The problem
+
+After M27, one HDFC question in the costly direction was still wrong. On HDFC
+ERGO's Optima Secure, `hdfc-typhoid-20-days` asks:
+
+> "I was admitted to hospital with typhoid 20 days after buying this policy.
+> It is my first health insurance."
+
+The policy excludes any illness in the first 30 days (IRDAI code Excl03, the
+"30-day waiting period"), so the answer is `not_covered`. The system answered
+`covered`, 3 samples of 3. The waiting-period line it was given (built by
+`describe()` in `api/app/pipeline/waiting.py`) was correct:
+
+```
+- clause Excl03 (c. 30-day waiting period: Code – Excl03): requires 1 month, policy
+  held 20 days -> this waiting period still applies and blocks treatment covered by
+  THIS clause, EXCEPT where the situation falls within this clause's own exception:
+  "claims arising due to an accident". Decide from the description whether it does
+```
+
+and the model's reasoning said:
+
+> "The 20 days since you bought the policy is not long enough to trigger the
+> waiting periods listed in the policy."
+
+M28 tested two explanations for that, one at a time. Both were wrong. M28
+keeps no code change; what it keeps is three new questions and the evidence.
+
+## Questions written first
+
+Typhoid on day 20 had been read closely while forming the explanations, so it
+could no longer measure them fairly. Three questions were added to
+`evals/real/scenarios-hdfc-optima-secure.json` before any code or run:
+
+- malaria, policy bought 25 days ago (`not_covered`, citing Excl03)
+- gastroenteritis, three weeks in (`not_covered`, citing Excl03)
+- pneumonia, 40 days in (`covered`: the 30 days are served)
+
+On the M27 code, majority of three: malaria and pneumonia right,
+**gastroenteritis paid**, the same failure as typhoid.
+
+## Explanation 1: the units
+
+`_human()` writes each number in its natural unit: 30 days becomes "1 month",
+20 days stays "20 days". The model reasoned as if 20 days hadn't reached the
+bar, so perhaps it was failing the conversion. This module exists to keep
+arithmetic away from the model, so a line that makes it compare months with
+days is a plausible leak.
+
+**The change:** when the time held is in days, state the requirement in days
+too ("requires 30 days, policy held 20 days"). Lines with the policy held in
+whole months stay unchanged.
+
+**Request comparison:** 9 questions changed: 2 synthetic, Star's dengue, and
+6 on HDFC.
+
+**Result:**
+
+| | M27 | units |
+|---|---|---|
+| HDFC typhoid day 20, gastroenteritis 3 weeks | paid ✗ | paid ✗ |
+| HDFC malaria 25 days | refused ✓ | **paid ✗** |
+| Star dengue cites the 30-day clause 3#2 | 0 of 3 | 3 of 3 |
+
+With the line now reading "requires 30 days, policy held 25 days -> this
+waiting period still applies and blocks", the malaria answer said:
+
+> "The policy does not have any waiting periods or exclusions that apply to
+> malaria."
+
+So the units were not the problem. The model wasn't misreading the
+comparison. It wasn't acting on the line at all.
+
+## Explanation 2: the order
+
+Reading the whole waiting-period block for those prompts showed where the
+30-day line sat:
+
+```
+- clause 2.10#2 (...): bars ONLY the treatments this clause lists: "..." If this
+  treatment is not one of them, this period is not the reason for this claim. ...
+- clause Excl02 (...): bars ONLY the treatments this clause lists: "List of ..." ...
+- clause Excl03 (...): requires 1 month, policy held 20 days -> ... still applies and blocks ...
+- clause 6: bars ONLY the treatments this clause lists: "..." ... not the reason ...
+- clause 2.12 (...): concerns ONLY an illness the person already had ...
+- clause Excl01 (...): concerns ONLY an illness the person already had ...
+```
+
+One firm line among five that each end "...is not the reason for this claim".
+`render()` already orders these lines on the principle that "the model tends
+to cite the first bar it reads", so the second explanation was: put periods
+that bar *everything* before periods that bar only a list. The units change
+was reverted first, so the two were measured separately.
+
+```python
+def first(check: WaitingCheck) -> tuple[bool, bool, bool]:
+    return (not check.named, check.listed, check.pre_existing)
+```
+
+**Request comparison:** 32 questions changed across all sets, because the
+synthetic policy and Star both have list-type periods. All 32 were measured
+on both codes, majority of three (the M27 answers replayed from the cache):
+
+| Set (changed questions only) | M27 | ordering |
+|---|---|---|
+| Synthetic main (12) | 10 | 10 |
+| Synthetic held-out 1–3 (7) | 4 | 4 |
+| Synthetic held-out 4 (4) | 3 | **1** |
+| Star (2) | 1 | 1 |
+| HDFC (7) | 5 | **4** |
+| **Total** | **23** | **20** |
+
+Typhoid on day 20 and gastroenteritis stayed paid. Pneumonia at 40 days,
+whose 30 days are served, was now refused. On held-out 4, two payable claims
+(`ho4-before-buying-checked-cover`, `ho4-acute-no-history`) were refused,
+citing the pre-existing diseases clause 3.2, which their answer key forbids.
+Star's dengue cited 3#2 again, as it had under the units change.
+
+Ordering was reverted too.
+
+## Failure 91: two plausible explanations, both wrong
+
+Each explanation came from reading the prompt and the answer, and each
+matched the evidence available when it was formed:
+
+- The model's own words ("not long enough to trigger") pointed at the
+  comparison, so the units looked guilty. A rewritten comparison changed
+  nothing, and the next answer ("no waiting periods ... apply") showed the
+  line wasn't being used at all.
+- The block's layout pointed at position. Moving the line up changed the
+  answers of other questions far more than of the ones it was aimed at.
+
+A 7B model's reasoning text describes its answer; it is not a trace of how
+the answer was reached. "Not long enough to trigger" sounds like a unit
+mistake, but the same verdict came back once there was no unit left to get
+wrong. The only reliable test of an explanation was the one used here:
+change exactly one thing, run the request comparison to know which questions
+it can affect, and measure all of them.
+
+What is still known, and not explained: on HDFC, a correct firm 30-day line
+loses to a block of narrower lines. Before M27 gave Excl02 a line, typhoid on
+day 20 was refused, 3 of 3. So the clearest remaining lead is the *number* of
+"not the reason" lines around the firm one, not their order. That is not
+tested here.
+
+## Results
+
+No code changed in M28. HDFC, majority of three, on the M27 code:
+**9 of 12** (M27's 7 of 9, plus malaria and pneumonia right and
+gastroenteritis wrong). Every other set is exactly as M27 left it.
+
+## Check it yourself
+
+```bash
+python evals/run_scenario_eval.py --policy samples/real/hdfc-optima-secure.pdf \
+  --cases evals/real/scenarios-hdfc-optima-secure.json \
+  --only hdfc-typhoid-20-days,hdfc-gastroenteritis-three-weeks --repeats 3
+```
+
+**Predict before you look:** the units change made Star's dengue question cite
+the 30-day clause again, 3 of 3. Was that a reason to keep it?
+
+<details>
+<summary>Answer</summary>
+
+Not on its own. It was one citation gained against one HDFC verdict lost
+(malaria at 25 days, paid). A wrong verdict is the costlier error: a person
+inside the 30-day wait would be told they're covered. The citation gain is
+recorded here as evidence that the same-unit wording helps Star, for any
+later change that also fixes what it broke on HDFC.
+</details>

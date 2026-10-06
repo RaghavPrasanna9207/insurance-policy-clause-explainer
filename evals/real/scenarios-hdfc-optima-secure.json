@@ -23,7 +23,13 @@
     "The last two cases were added during M27, after the segmenter began splitting",
     "Section C into Excl01/02/03 and before any run of them: they check the split did not",
     "lose the two bars it separated. Ids Excl01 and Excl02 are the IRDAI codes the",
-    "policy prints, which the segmenter now uses as these clauses' ids."
+    "policy prints, which the segmenter now uses as these clauses' ids.",
+    "",
+    "The three cases from hdfc-malaria-25-days on were added for M28, before its code and",
+    "before any run of them. M28 states a waiting period in the same unit as the time held",
+    "('requires 30 days, policy held 20 days' instead of 'requires 1 month'), because",
+    "hdfc-typhoid-20-days was answered as if 20 days had not reached the 30-day bar.",
+    "That case has been read while designing M28, so it is no longer clean; these are."
   ],
   "cases": [
     {
@@ -114,6 +120,34 @@
         "Excl01"
       ],
       "why": "Diabetes predates the policy, so it is a pre-existing disease, excluded with its direct complications until 36 months of continuous cover (Excl01). One year has not served it."
+    },
+    {
+      "id": "hdfc-malaria-25-days",
+      "scenario": "I bought this policy 25 days ago and have now been admitted to hospital with malaria. I have never had health insurance before.",
+      "expected_verdict": "not_covered",
+      "must_cite": [
+        "Excl03"
+      ],
+      "why": "An illness within 30 days of the first policy is excluded (Excl03). Malaria is not an accident, and there was no prior cover to waive the wait."
+    },
+    {
+      "id": "hdfc-gastroenteritis-three-weeks",
+      "scenario": "Three weeks after my policy started I was hospitalised for two days with severe gastroenteritis. This is my first policy.",
+      "expected_verdict": "not_covered",
+      "must_cite": [
+        "Excl03"
+      ],
+      "why": "Three weeks is inside the 30-day initial waiting period (Excl03); gastroenteritis is an illness, not an accident, and there was no prior cover."
+    },
+    {
+      "id": "hdfc-pneumonia-40-days",
+      "scenario": "I was admitted to hospital with pneumonia 40 days after buying this policy. It is my first health insurance.",
+      "expected_verdict": "covered",
+      "must_cite": [],
+      "must_not_cite": [
+        "Excl03"
+      ],
+      "why": "Forty days serves the 30-day initial waiting period, and pneumonia is neither pre-existing nor on the specified disease list."
     }
   ]
 }
