@@ -317,6 +317,10 @@ The first questions on a second real policy. HDFC refused almost every claim in 
 - **Splitting HDFC's lettered exclusions** - why the IRDAI code, not the letter, makes a line safe to treat as a clause, and why it becomes the id.
 - **Failure 90: a long quote drowned the line beside it** - a 2,400-character list quote; a reordering rejected because it changed 25 other requests; quoting only the list, and the Star citation it cost.
 
+### M28 - Two explanations that measurement refuted
+HDFC still paid an illness inside its 30-day wait although the line said it "still applies and blocks". Two fixes were tried one at a time: stating both sides in days, and putting periods that bar everything before narrow ones. Neither fixed it, and ordering cost 3 of 32 answers elsewhere; both reverted. Keeps three new HDFC questions (HDFC 9/12).
+- **Failure 91: two plausible explanations, both wrong** - why a 7B model's reasoning text is not a trace of its answer, and why only one-change-at-a-time measurement settles it.
+
 ---
 
 ## Related documents
