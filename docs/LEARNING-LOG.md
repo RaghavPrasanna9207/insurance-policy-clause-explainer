@@ -11206,6 +11206,15 @@ hospital stays") was not a target: it had been read as a pre-existing
 illness. With the list quoted, the model stopped refusing it. No case that
 was right went wrong.
 
+One cost, in citations rather than verdicts: `initial-waiting-period` ("a bad
+chest infection two weeks after my policy started") was already wrong
+(`covered`, expected `not_covered`), and now also stops citing clause 3.1,
+the 30-day initial waiting period, in 3 of 3 answers. Main-set citation recall
+in the regenerated report falls from 0.812 to 0.781. With two list-type lines
+each ending "this period is not the reason for this claim", the model
+answers as if no waiting period applied at all. Left open, along with the
+wrong verdict it already had.
+
 | Set | M22 | M23 |
 |---|---:|---:|
 | main set | 36/40 | 36/40 |
