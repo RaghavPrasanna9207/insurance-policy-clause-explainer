@@ -12388,3 +12388,164 @@ inside the 30-day wait would be told they're covered. The citation gain is
 recorded here as evidence that the same-unit wording helps Star, for any
 later change that also fixes what it broke on HDFC.
 </details>
+
+---
+
+# M29 — HDFC's 180-day window after discharge
+
+## The problem
+
+Health policies pay for treatment around a hospital stay only within stated
+**cover windows**: tests and medicines for so many days *before admission*,
+follow-up care for so many days *after discharge*. Deciding whether an
+expense fell inside a window is a comparison of two numbers, so since M11 it
+has been done in code (`api/app/pipeline/window.py`), not by the model. The
+model is given a line such as:
+
+```
+WHEN THE EXPENSES FELL (arithmetic, not opinion).
+- OUTSIDE THE WINDOW: clause 2.3 pays only for expenses within 90 days after
+  discharge. These were 120 days after discharge, so clause 2.3 does NOT pay for them.
+```
+
+The code needs two operands. The *expense* side comes from fact extraction
+(`expense_timing_value`, `_unit`, `_anchor`). The *window* side,
+`cover_window_days` and `cover_window_anchor`, comes from analysis: the model
+reads each clause once when the policy is uploaded and records the window it
+states.
+
+On HDFC ERGO's Optima Secure, clause 1.6 says:
+
+> "Such expenses shall be indemnified if the same were incurred upto 180 days
+> unless otherwise specified in the Policy Schedule, immediately post the date
+> of discharge from the Hospital."
+
+Analysis recorded no window for it. So `hdfc-medicines-seven-months-after`
+(physiotherapy seven months after discharge, expected `not_covered`) got no
+window line at all, and was answered `conditional`, 3 of 3. The facts were
+right: `expense_timing: 7 months, after_discharge`.
+
+## Questions written first
+
+That question had been read while finding the problem, so two fresh ones were
+added to `evals/real/scenarios-hdfc-optima-secure.json` before any code:
+
+- medicines five months after discharge for a kidney infection (`covered`,
+  inside 180 days)
+- a follow-up scan 200 days after discharge for a fractured hip
+  (`not_covered`)
+
+On the code before M29, majority of three: five months right, **the scan
+`conditional`**.
+
+## The fix: read a window stated in figures
+
+The same move as M27's fallback for a waiting period: when analysis gave a
+clause nothing, read the number off the clause's own words. A window stated
+in figures has a recognisable shape: a number of days, then within one
+sentence "prior to / preceding / before ... admission" or "post / following /
+after ... discharge".
+
+Before writing it, the pattern was run over every clause in five policies:
+
+```
+synthetic 2.2, 2.3; Star 4, 5    windows from analysis; pattern finds nothing (numbers spelt out: "sixty days")
+HDFC 1.5    coverage        analysis: 60 before_admission   pattern: 60 before
+HDFC 1.6    coverage        analysis: none                  pattern: 180 after
+HDFC 2.14   definition      analysis: none                  pattern: 30 before
+HDFC 2.15   waiting_period  analysis: none                  pattern: 60 after
+```
+
+2.14 and 2.15 are optional covers that *change* the window for one plan
+("Modification of Post-Hospitalization expenses days from 180 days ... to 60
+days ... This option is inbuilt in Optima Lite plan"). Read as windows, 2.15
+would tell every claim 61 to 180 days after discharge that it is outside a
+60-day window. A cover window is a property of a benefit, so the fallback only
+reads coverage clauses, which leaves 1.6 alone.
+
+In `api/app/pipeline/window.py`:
+
+```python
+_STATED_WINDOW = re.compile(
+    r"\b(\d+)\s*days?\b[^.]{0,80}?\b(?:(?:prior\s+to|preceding|before)\s+(?:the\s+)?(?:date\s+of\s+)?admission"
+    r"|(?:post|following|after)\s+(?:the\s+)?(?:date\s+of\s+)?discharge)", re.IGNORECASE)
+...
+        if not window and getattr(clause, "clause_type", "") == "coverage":
+            text = unicodedata.normalize("NFKC", getattr(clause, "text", "") or "")
+            if m := _STATED_WINDOW.search(" ".join(text.split())):
+                window = int(m[1])
+                clause_anchor = (Anchor.AFTER_DISCHARGE if "discharge" in m[0].lower()
+                                 else Anchor.BEFORE_ADMISSION)
+```
+
+`[^.]{0,80}?` allows up to 80 characters within the same sentence between the
+number and the anchor: 1.6's "unless otherwise specified in the Policy
+Schedule, immediately" is about 60.
+
+**Request comparison:** 0 of 95 questions outside HDFC changed, and 3 of 14 on
+HDFC: the three whose facts place an expense after discharge. The
+five-months question is not among them; its facts didn't place the medicines
+after discharge, so no window line is raised (and it was already right).
+
+## Measuring
+
+Majority of three, Ollama 0.35.1:
+
+| Question | Before | M29 |
+|---|---|---|
+| scan, 200 days after (fresh) | conditional ✗ | **not_covered ✓** |
+| medicines, 5 months after (fresh) | covered ✓ | covered ✓ |
+| medicines, 3 months after | covered ✓ | covered ✓ |
+| physiotherapy, 7 months after | conditional ✗ | conditional ✗ |
+
+HDFC overall: **11 of 14**.
+
+## Failure 92: a firm, correct line, and an invented co-payment
+
+Physiotherapy at seven months now gets the right line:
+
+```
+- OUTSIDE THE WINDOW: clause 1.6 pays only for expenses within 180 days after
+  discharge. These were 210 days after discharge, so clause 1.6 does NOT pay for them.
+```
+
+and the model still answered `conditional`:
+
+> "You are covered for physiotherapy, but the claim will be reduced by a 20%
+> co-payment. ... clause 1.24 states that 'No co-payment shall apply if Insured
+> Person from Tier 2 avails a treatment in Tier 1.' ..."
+
+There is no 20% anywhere in the prompt. The code's own reductions block,
+which lists every co-payment and cap that applies, was empty for this
+question. Clause 1.24 is HDFC's premium-tier clause, and its only sentence
+about co-payment says when there is *none*. The model built a co-payment from
+the word and let it outrank a firm, correct line.
+
+This is not the problem M29 set out to fix (the window line was missing), and
+the question had been read closely while fixing it, so tuning the prompt for
+it here would fit a known answer. It is recorded and left open. The fresh
+200-day scan, with the same line, is refused correctly, 3 of 3. So the line
+works, and something about this question pulls the model to 1.24.
+
+## Check it yourself
+
+```bash
+cd api
+.venv/Scripts/python -m pytest tests/test_window.py -q
+```
+
+**Predict before you look:** HDFC's 2.15 says "Post-hospitalization medical
+expenses shall be indemnified only if the same were incurred upto 60 days
+immediately post the date of discharge". The pattern matches it. Why does
+the fallback never give 2.15 a 60-day window?
+
+<details>
+<summary>Answer</summary>
+
+The fallback only reads clauses typed `coverage`, and analysis typed 2.15
+`waiting_period`. That restriction is deliberate: 2.15 is an option for one
+plan (Optima Lite), and treating its 60 days as the policy's window would
+refuse claims between 61 and 180 days after discharge on every other plan.
+The test `test_a_window_stated_in_figures_is_read_off_a_coverage_clause`
+pins it.
+</details>
