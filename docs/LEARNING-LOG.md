@@ -11311,3 +11311,179 @@ False, then true. Lowercasing doesn't touch the ligature, because "ﬁ" is
 already lowercase; it is just not the two letters `f` and `i`. NFKC replaces
 it with them. That's why `re.IGNORECASE` alone never matched Star's heading.
 </details>
+
+---
+
+# M24 — A definitions block is not a waiting period
+
+## The problem
+
+Every Star Health question with a policy held under three years was being
+told, in the waiting-period block of its reasoning prompt:
+
+```
+- clause c7 ((cont.)): requires 36 months, policy held 20 days -> this
+  waiting period still applies and blocks treatment covered by THIS clause
+```
+
+`c7` is not a waiting period. Star's definitions section is long, so the
+segmenter (stage 2) cuts it into pieces of at most `MAX_CLAUSE_CHARS`, at
+line breaks, in `_split_oversized` (`api/app/pipeline/segment.py`). Every
+piece after the first gets the heading of the original plus " (cont.)".
+That's how `c3` to `c7` were made. Each piece is then analysed separately by
+the model (stage 3). `c3` to `c6` came back `definition`. `c7` came back
+`waiting_period`, with 36 months, because one of the terms it defines is:
+
+> "Specific Waiting Period means a period up to 36 months from the
+> commencement of a health insurance policy during which period specified
+> diseases/treatments (except due to an Accident) are not covered."
+
+M23 recorded what this cost (Failure 86): once the specified-disease line
+stopped saying "blocks", the dengue question cited `c7` as its reason.
+
+## Why the model typed it that way
+
+The classification prompt (`CLASSIFY_SYSTEM` in `api/app/llm/prompts.py`)
+resolves overlapping labels with tie-breakers checked in order:
+
+```
+TIE-BREAKERS (apply in this order - the more specific label always wins):
+1. Does it cap or reduce an amount?              -> sub_limit
+2. Does coverage start after a stated period?    -> waiting_period
+...
+5. Does it define a term?                        -> definition
+```
+
+A definition *of* a waiting period hits rule 2 before rule 5. The model
+followed the prompt.
+
+## Two places a fix could go
+
+- **The prompt.** Add "a clause that defines terms is a definition, even when
+  a term it defines is a waiting period". That is the root cause, but a
+  changed analysis prompt is a cache miss for every clause of every policy.
+  Every clause would be re-analysed, every scenario prompt could change, and
+  the whole eval would have to be measured again to learn what one sentence
+  did.
+- **The waiting-period check.** Leave the stored type alone and stop a
+  definitions block from producing a waiting-period line. Only the line
+  changes, and only where the rule fires.
+
+The second was built, after checking the rule cleanly separates the two on
+every policy available.
+
+## The rule, measured before it was written
+
+The candidate signal was the word "means", which is how Indian policy
+definitions are worded ("Hospital means...", "Accident means..."). Every
+clause with a waiting period recorded, on all three policies, with the
+number of times its text says "means":
+
+| Policy | Clause | Says "means" |
+|---|---|---:|
+| synthetic | 3.1, 3.2, 3.3, 3.4 | 0 each |
+| Star | `c7` (definitions block) | **8** |
+| Star | `2#2` specified disease, `3#2` 30-day | 0 each |
+| HDFC | `2.10#2`, `2.12`, `1#2`, `1#4`, `1.5#2`, `1.6#2`, `6` | 0 each |
+
+In `api/app/pipeline/waiting.py`:
+
+```python
+# A run of definitions ("X means ...") is not a waiting period, even when one
+# term it defines is. ...
+_DEFINES = re.compile(r"\bmeans\b", re.IGNORECASE)
+_DEFINITIONS_BLOCK = 2
+```
+
+and in `evaluate`, before a check is built:
+
+```python
+if len(_DEFINES.findall(text)) >= _DEFINITIONS_BLOCK:
+    continue
+```
+
+Two, not one: a real waiting-period clause could reasonably define one term
+in passing. A run of definitions defines several.
+
+The same table turned up another misreading, left for later: HDFC's
+pre- and post-hospitalisation windows (`1.5#2`, `1.6#2`: "60 days", "180
+days") are typed `waiting_period`. They are the windows for claiming
+expenses before and after a stay, not periods before cover starts. They say
+"means" zero times, so this rule does not catch them.
+
+## Measuring
+
+**Which questions change.** The request comparison (every reasoning request
+hashed with the model stubbed out, before and after) found **0 of 78**
+synthetic questions changed (no synthetic clause says "means" twice and
+carries a waiting period), and **10 of 10** Star questions, since `c7`'s
+line had been in every one.
+
+**Star, majority of three, Ollama 0.35.1:**
+
+| Case | M23 | M24 |
+|---|---|---|
+| `star-caesarean` (expected not_covered) | conditional | **not_covered** |
+| `star-treatment-abroad` (expected not_covered) | not_covered | **conditional** |
+| `star-gallstones-no-timing` (expected insufficient_information) | insufficient_information | **conditional** |
+| right verdicts | 9/10 | 8/10 |
+| answers citing the clause that decides them | 6/10 | 7/10 |
+
+## Failure 87: the score fell, and the change was kept
+
+**What happened.** Removing a false line cost one right verdict overall.
+The answers explain why:
+
+- **Treatment abroad** ("hospitalised with pneumonia while on holiday in
+  Dubai... held the policy for two years"). Star excludes treatment outside
+  India in its clause `22`. Under M23 the answer was `not_covered`, but **no**
+  answer cited 22, in three samples of three. It was refused on `c7`'s
+  36-month bar, which is false. With that gone, the model answers
+  `conditional` (pneumonia is payable, less Star's 5% co-payment), and never
+  sees that the exclusion of treatment abroad applies. The right verdict had
+  been propped up by a wrong fact.
+- **Gallstones, no timing** ("I need my gallbladder removed... How much will
+  the policy pay?"). The reasoning is sound. It says gallbladder stones are on
+  the specified-disease list, that the policy's age was not stated, and that
+  if the period is not served the claim is refused. It then picks
+  `conditional` where the answer key says `insufficient_information`. The
+  verdict is wrong; the reasoning is not.
+- **Caesarean** is now right. With no false 36-month bar on the page, the
+  model found Star's maternity exclusion.
+
+Dengue still misses its deciding clause, the 30-day wait. It now cites the
+specified-disease period instead and treats dengue as being on its list. That
+list is about 1,970 characters, over the 600 M23 allows for quoting, so the
+line never shows it.
+
+**Why it was kept.** The line removed was false for every Star question. A
+score that depends on a false statement measures luck, not the system, and
+protecting it would mean keeping a known wrong fact in every prompt. The
+change exposes Dubai's real problem: the model doesn't notice an exclusion of
+treatment abroad. That is the next thing to fix, and it can now be measured
+honestly.
+
+The general point pairs with Failure 86. There, removing a wrong signal let
+the next wrong signal take over. Here, removing a wrong signal took away a
+right answer that had rested on it. **A verdict is only as good as the clause
+it rests on, so read the citation before counting the verdict.**
+
+## Check it yourself
+
+```bash
+cd api
+.venv/Scripts/python -m pytest tests/test_waiting.py -q -k definitions
+```
+
+**Predict before you look:** the synthetic policy's clause 1.2 says
+"Pre-existing Disease means any condition...". Does the new rule drop it
+from the waiting-period check?
+
+<details>
+<summary>Answer</summary>
+
+It never reaches the rule. Clause 1.2 is typed `definition` and records no
+waiting period, so `evaluate` skips it at the top of its loop. If it
+did record one, it would still stay in: it says "means" once, and the rule
+needs two.
+</details>

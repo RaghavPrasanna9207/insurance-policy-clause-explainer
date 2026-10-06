@@ -362,3 +362,14 @@ def test_a_long_list_is_not_quoted():
                         text="Expenses related to " + "hernia, " * 100)
     block = render(evaluate([long], days_held=600))
     assert "this clause lists. If this" in block
+
+
+def test_a_run_of_definitions_is_not_a_waiting_period():
+    """Failure 86: a piece of Star's definitions page, defining "Specific
+    Waiting Period", was typed waiting_period and told every claim within
+    three years it "still applies and blocks"."""
+    definitions = HeadedClause("c7", [1080], heading=" (cont.)", text=(
+        "Pre-hospitalization Medical Expenses means medical expenses incurred ... "
+        "Specific Waiting Period means a period up to 36 months ..."))
+    assert evaluate([definitions], days_held=20) == []
+    assert evaluate([SPECIFIED], days_held=20) != []
