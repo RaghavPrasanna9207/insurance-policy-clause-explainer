@@ -11019,3 +11019,286 @@ the person also gave two durations that `derive_pre_existing` can compare.
 The waiting-period line for clause 3.2 stays the hedged one, and whether the
 condition predates the policy remains the model's judgement.
 </details>
+
+---
+
+# M23 — A waiting period that bars only its list
+
+## The problem
+
+Indian health policies have a **specified disease waiting period**: a list of
+treatments that are not paid for until the policy has been held for a while.
+In the synthetic policy it is clause 3.3:
+
+> "Expenses related to the treatment of cataract, hernia, hysterectomy, benign
+> prostatic hypertrophy, joint replacement surgery, and diseases of the ear,
+> nose and throat shall be excluded until the expiry of twenty four months of
+> continuous coverage from the date of inception of the first policy."
+
+Anything *not* on that list is untouched by it. Appendicitis 18 months into
+a policy is not on the list, so 3.3 has nothing to say about it.
+
+The scenario pipeline does the waiting-period arithmetic in code
+(`api/app/pipeline/waiting.py`) and tells the reasoning model the result as
+one line per period. Since M22, a period whose heading says "specified" or
+"maternity" gets a narrower line than the blunt "still applies and blocks":
+
+```
+- clause 3.3 (Specified Disease Waiting Period): bars ONLY the treatments
+  this clause lists. If this treatment is not one of them, this period is not
+  the reason for this claim. (Requires 24 months; policy held 18 months, so
+  not yet served.)
+```
+
+Two held-out cases were still refused under it: `ho4-acute-no-history`
+(appendicitis, 18 months) and `ho4-thyroid-after-cover` (thyroid problem, 20
+months). Both are expected `covered`.
+
+## What the model actually did
+
+Reading the stored answer for appendicitis showed something surprising. The
+model's own quote was the whole list:
+
+```json
+"reasoning": "The claim for appendicitis surgery is not covered because the
+  24-month waiting period for 'Specified Disease' as outlined in clause 3.3
+  has not been satisfied...",
+"deciding_clauses": [{"clause_id": "3.3",
+  "quote": "Expenses related to the treatment of cataract, hernia,
+            hysterectomy, ... shall be excluded until the expiry of twenty
+            four months ...",
+  "effect": "denies"}]
+```
+
+So the list was in front of it: the clause text is in the prompt, and the
+model copied it out. It still applied the period to appendicitis. What it
+acted on was the arithmetic in the line ("requires 24 months; policy held 18
+months, so not yet served"). It never checked appendicitis against the list,
+which sits much further down the prompt.
+
+## Two wordings, tried before any code
+
+Both were tried by patching the line in a scratch script, on the 16 questions
+whose prompt contains a list-type line, three fresh answers each, scored by
+majority. The current wording scores 10 of those 16.
+
+- **V1:** quote the clause's own text into the line:
+  `bars ONLY the treatments this clause lists: "Expenses related to the
+  treatment of cataract, hernia, ...". If this treatment is not one of them...`
+- **V2:** V1, plus name what the person was treated for beside it:
+  `Compare what the person was treated for ("appendicitis surgery") with that
+  list.`
+
+| | current | V1 | V2 |
+|---|---:|---:|---:|
+| the 16 questions | 10 | **11** | 10 |
+| `ho4-acute-no-history` (appendicitis) | not_covered | **covered 3/3** | covered 3/3 |
+| `ho4-gallstones-found-last-year` | covered | covered | **conditional 3/3** |
+| `maternity-too-early` (must stay refused) | not_covered | not_covered | not_covered |
+
+V2 looked like the stronger nudge and was worse: spelling out the comparison
+broke gallstones, which had been right. V1 was built. The comparison itself
+stays the model's job, because code cannot do it safely: M22 showed that a
+word lookup does not match "gave birth" to "childbirth".
+
+## What was built
+
+In `api/app/pipeline/waiting.py`, the list-type line now quotes the clause:
+
+```python
+lists = f': "{self.listing}"' if self.listing else ""
+return (
+    f"{who}: bars ONLY the treatments this clause lists{lists}. If this "
+    f"treatment is not one of them, this period is not the reason "
+    ...
+```
+
+`listing` is the clause text with its heading removed, filled in only when
+the period is list-type and the text is short:
+
+```python
+# The list is quoted into the line only up to this length. The synthetic
+# specified-disease clause is about 290 characters; Star's is about 1,970, and
+# quoting that would repeat ~560 tokens outside the clause budget.
+_QUOTE_LIST_CHARS = 600
+```
+
+The limit exists because the waiting-period lines sit *outside* the clause
+token budget (the room the shortlist reserves for clause text). Quoting a
+2,000-character clause twice could push the prompt past the context window,
+and the model would silently lose the end of it. A clause over the limit keeps
+the M22 line, unquoted.
+
+Measuring that limit on the real Star Health policy turned up a second
+problem.
+
+## Concept 54: a ligature, and why "Speciﬁed" is not "Specified"
+
+Typesetting software joins some letter pairs into one glyph so they look
+better: "f" followed by "i" becomes "ﬁ". In a PDF, that glyph is often stored
+as **one character**, Unicode U+FB01 LATIN SMALL LIGATURE FI, not as the two
+characters `f` and `i`. It looks identical on screen. To a program it is a
+different string:
+
+```python
+>>> "Speciﬁed" == "Specified"
+False
+>>> len("Speciﬁed"), len("Specified")
+(8, 9)
+```
+
+Star's specified-disease clause is headed "2. Speciﬁed disease / procedure
+waiting period", with the ligature. M22's pattern `specified|maternity`
+never matched it. **On the one real policy this project measures, M22's
+list-type line had never been used**; Star's specified-disease clause still
+got the blunt "blocks" line. The unit tests could not catch it: they were
+written with plain ASCII text.
+
+The standard fix is **Unicode normalization**. Unicode defines, for many
+characters, an equivalent plainer spelling, and `unicodedata.normalize`
+rewrites text into one canonical form. The form called **NFKC**
+("compatibility composition") replaces presentation variants with their plain
+equivalents: the "ﬁ" ligature becomes `f` + `i`, a full-width "Ａ" becomes
+"A", a superscript "²" becomes "2". It does not change ordinary letters or
+accents.
+
+This project already used it in one place. The quote checker
+(`api/app/grounding.py`, `normalize`) applies NFKC before comparing a
+model's quote with a clause, so a quote typed with plain "fi" still matches
+the PDF's ligature. The waiting-period code never got the same treatment.
+Now it does, in `evaluate`:
+
+```python
+# NFKC first: PDFs set "fi" as one ligature character, so Star's
+# "Speciﬁed disease" never matched "specified" and got the firm line.
+text = " ".join(unicodedata.normalize("NFKC", getattr(clause, "text", "") or "").split())
+heading = unicodedata.normalize("NFKC", getattr(clause, "heading", "") or "").strip()
+listed = bool(_LISTED.search(f"{heading} {text[:_OPENING_CHARS]}"))
+```
+
+The lesson outlives this project: **any text pattern run on PDF text should
+run on normalized text.** The same gap almost certainly exists in other
+lookups here (the word lookup `named_in_question`, for one); they were left
+alone because no measured case yet shows them costing an answer.
+
+## Measuring
+
+**Which questions change.** Every reasoning request was hashed with the model
+call replaced by a stub, once on main and once on this branch. On the
+synthetic policy, 16 of 78 questions changed: exactly the ones with a
+list-type line. On Star, 5 of 10 changed, all from the ligature fix. Every
+other request is byte-identical, so it keeps its stored answer and its
+measurement.
+
+**The 16 synthetic questions**, majority of three, with the code as built:
+
+| | before (v54) | after (v55) |
+|---|---:|---:|
+| the 16 changed questions | 10 | **12** |
+| `ho4-acute-no-history` (appendicitis) | not_covered | **covered 3/3** |
+| `ho4-before-buying-checked-cover` (malaria) | not_covered | **covered 3/3** |
+| `maternity-too-early`, `ho-hysterectomy-too-soon`, `ho2-cataract-too-soon` (must stay refused) | not_covered | not_covered 3/3 |
+| `ho4-thyroid-after-cover` | conditional | conditional 3/3 |
+| `ho4-back-trouble-on-and-off` | not_covered | not_covered 3/3 |
+
+The malaria case ("Before I bought this policy I checked that it covered
+hospital stays") was not a target: it had been read as a pre-existing
+illness. With the list quoted, the model stopped refusing it. No case that
+was right went wrong.
+
+| Set | M22 | M23 |
+|---|---:|---:|
+| main set | 36/40 | 36/40 |
+| held-out 1 | 14/16 | 14/16 |
+| held-out 2 | 12/13 | 12/13 |
+| held-out 3 | 0/3 | 0/3 |
+| held-out 4 | 2/6 | **4/6** |
+| total | 64/78 | **66/78** |
+
+## Failure 86: the right answer, now for the wrong reason
+
+**Setup.** Star's 5 changed questions, majority of three, on main and on this
+branch, Ollama 0.35.1 both times.
+
+**What happened.** All five verdicts were right on both. But
+`star-dengue-first-month` ("admitted with dengue fever 20 days after buying
+this policy"), which must cite the 30-day initial waiting period (Star's
+clause `3#2`), cited it in 3 of 3 answers on main and **0 of 3** on the branch.
+It now cites a clause called `c7`:
+
+```json
+"reasoning": "The claim for dengue fever is not covered because it falls
+  under the 36-month specific waiting period for 'Specified diseases' as per
+  clause c7...",
+"deciding_clauses": [{"clause_id": "c7", "quote": "Specific Waiting Period
+  means a period up to 36 months from the commencement of a health insurance
+  policy during which period specified diseases/treatments ... are not
+  covered...", "effect": "delays"}]
+```
+
+**Why.** `c7` is not a waiting period. It is a run of *definitions* from
+Star's definitions section (the end of "Pre-existing Disease", then
+"Pre-hospitalization Medical Expenses", then "Specific Waiting Period
+means..."), headed only "(cont.)" because it continues a page. The analysis
+step (stage 3) typed it `waiting_period` and recorded 36 months for it, so
+the waiting-period check gives it the blunt line:
+
+```
+- clause c7 ((cont.)): requires 36 months, policy held 20 days -> this
+  waiting period still applies and blocks treatment covered by THIS clause
+```
+
+On main, the specified-disease clause got the same blunt line, and the model
+passed over both to cite the 30-day period. Now that the specified-disease line
+correctly says it bars only its list, `c7` is the most forceful bar left, and
+the model leans on it.
+
+**What was decided.** The change was kept, and `c7` was left as a known issue
+to fix on its own. The misreading of `c7` is an analysis error that existed
+before this change; this change only exposed it. Fixing it means changing how
+stage 3 types a definitions block, which needs its own measurement. Folding it
+in here would have made M23's numbers impossible to attribute.
+
+The general point: **removing one wrong signal can promote the next wrong
+signal.** A verdict that stays right is not proof that nothing moved; the
+citation is what shows which reason the answer now rests on.
+
+## Closing out M23
+
+### How it connects
+
+M23 is the third step on the same line:
+
+1. M22 parts 1-2: every waiting-period line names its subject.
+2. M22 part 3: a list-type period opens by saying it bars only its list.
+3. M23: it shows the list.
+
+Each step leaves the judgement ("is this treatment on the list?") with the
+model and changes only what the model is shown. Each was tested before it was
+built, on the questions it changes.
+
+### What it made possible
+
+M22's line now reaches real policies, through normalization. The
+remaining wrong answers in held-out 4 are thyroid (the model still answers
+`conditional`) and back trouble (it decides an illness with an unknown
+history is pre-existing). Open next: Star's `c7` (Failure 86), and the same
+normalization in the other text lookups.
+
+## Check it yourself
+
+```bash
+cd api
+.venv/Scripts/python -m pytest tests/test_waiting.py -q -k "quotes or ligature or long_list"
+```
+
+**Predict before you look:** `"Speciﬁed".lower() == "specified"` - true or
+false? And after `unicodedata.normalize("NFKC", ...)`?
+
+<details>
+<summary>Answer</summary>
+
+False, then true. Lowercasing doesn't touch the ligature, because "ﬁ" is
+already lowercase; it is just not the two letters `f` and `i`. NFKC replaces
+it with them. That's why `re.IGNORECASE` alone never matched Star's heading.
+</details>

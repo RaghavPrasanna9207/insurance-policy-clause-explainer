@@ -32,6 +32,7 @@ was the model asserting a verdict when the timing had never been stated.
 """
 
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -46,6 +47,12 @@ _OPENING_CHARS = 60
 # these get the narrower line; anything not recognised keeps the firm one,
 # because calling an all-illness period list-only would pay claims it bars.
 _LISTED = re.compile(r"specified|maternity", re.IGNORECASE)
+# The list is quoted into the line only up to this length. The synthetic
+# specified-disease clause is about 290 characters; Star's is about 1,970, and
+# quoting that would repeat ~560 tokens outside the clause budget.
+# ponytail: a longer clause keeps the unquoted line; extract just the list if
+# a real policy shows that costs answers.
+_QUOTE_LIST_CHARS = 600
 
 
 class WaitingStatus(StrEnum):
@@ -87,6 +94,8 @@ class WaitingCheck:
     subject: str = ""
     # Bars only the treatments its clause lists.
     listed: bool = False
+    # The clause's own words, quoted into the line of a short list-type period.
+    listing: str = ""
 
     def concerns_nothing_here(self) -> bool:
         """A pre-existing diseases bar, for a condition settled as beginning after the policy."""
@@ -189,8 +198,14 @@ class WaitingCheck:
             # pre-existing lesson again: open with whom the bar concerns.
             # Not when the question's words appear in the clause - then it
             # probably is listed, and the firm line stays.
+            # M23: told only that the list exists, the model still refused
+            # appendicitis under 3.3 - quoting the list in its answer. With
+            # the list in this line, 3 of 3 answers were right. Naming the
+            # person's treatment beside it as well was measured worse (it
+            # broke gallstones), so the comparison is left to the model.
+            lists = f': "{self.listing}"' if self.listing else ""
             return (
-                f"{who}: bars ONLY the treatments this clause lists. If this "
+                f"{who}: bars ONLY the treatments this clause lists{lists}. If this "
                 f"treatment is not one of them, this period is not the reason "
                 f"for this claim. (Requires {requires}; policy held "
                 f"{_human(self.held_days)}, so not yet served.)"
@@ -270,6 +285,12 @@ def evaluate(
         else:
             status = WaitingStatus.PARTLY_SERVED
 
+        # NFKC first: PDFs set "fi" as one ligature character, so Star's
+        # "Speciﬁed disease" never matched "specified" and got the firm line.
+        text = " ".join(unicodedata.normalize("NFKC", getattr(clause, "text", "") or "").split())
+        heading = unicodedata.normalize("NFKC", getattr(clause, "heading", "") or "").strip()
+        listed = bool(_LISTED.search(f"{heading} {text[:_OPENING_CHARS]}"))
+        body = text.removeprefix(heading).strip()
         checks.append(
             WaitingCheck(
                 clause_id=clause.clause_id,
@@ -278,13 +299,12 @@ def evaluate(
                 status=status,
                 exceptions=list(getattr(clause, "exceptions", None) or []),
                 named=list(named.get(clause.clause_id, [])),
-                pre_existing=bool(_PRE_EXISTING.search(
-                    getattr(clause, "text", "")[:_OPENING_CHARS])),
+                pre_existing=bool(_PRE_EXISTING.search(text[:_OPENING_CHARS])),
                 condition_predates_policy=condition_predates_policy,
+                listed=listed,
+                listing=body if listed and len(body) <= _QUOTE_LIST_CHARS else "",
                 # The heading repeats the clause number; the line already has it.
-                listed=bool(_LISTED.search(
-                    f"{getattr(clause, 'heading', '')} {getattr(clause, 'text', '')[:_OPENING_CHARS]}")),
-                subject=re.sub(r"^[\d.]+\s*", "", getattr(clause, "heading", "") or ""),
+                subject=re.sub(r"^[\d.]+\s*", "", heading),
             )
         )
     return checks

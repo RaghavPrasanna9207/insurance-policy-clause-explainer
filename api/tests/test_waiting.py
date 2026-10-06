@@ -339,3 +339,26 @@ def test_a_period_naming_the_treatment_or_barring_all_illness_stays_firm():
     for block in (named, initial):
         assert "still applies and blocks" in block
         assert "bars ONLY" not in block
+
+
+def test_a_short_list_period_quotes_its_list():
+    """M23: told only that a list exists, the model refused appendicitis under
+    the specified-disease period while quoting that list in its own answer."""
+    block = render(evaluate([SPECIFIED], days_held=600))
+    assert 'lists: "Expenses related to the treatment of cataract, hernia ..."' in block
+
+
+def test_a_ligature_does_not_hide_a_list_period():
+    """Star's PDF sets "Speciﬁed" with the one-character fi ligature, so the
+    list-type period was never recognised on a real policy."""
+    star = HeadedClause("2#2", [720], heading="2. Speciﬁed disease / procedure waiting period",
+                        text="Expenses related to the treatment of the following listed Conditions")
+    assert evaluate([star], days_held=600)[0].listed
+
+
+def test_a_long_list_is_not_quoted():
+    """A real clause's list can run to ~2,000 characters, outside the clause budget."""
+    long = HeadedClause("3.3", [720], heading="3.3 Specified Disease Waiting Period",
+                        text="Expenses related to " + "hernia, " * 100)
+    block = render(evaluate([long], days_held=600))
+    assert "this clause lists. If this" in block

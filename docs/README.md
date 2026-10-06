@@ -290,6 +290,13 @@ The endpoint's own work around the model's answer (loading clauses, mapping cita
 - **Failure 85: the batch written for this milestone did not move** - with the pre-existing bar settled, the model refuses under the specified-disease period instead, whose line names a category but not its list.
 - **Part 3: fixing the two costs** - why the obvious fix ("none of your words are on the list") was unsafe ("gave birth" doesn't match "childbirth"), and the narrower line built instead; the held-out batch moves from 1/6 to 2/6 and the kidney-stone case that started M22 is fixed.
 
+### M23 - A waiting period that bars only its list
+The model quoted the specified-disease list in its own answer and still applied it to appendicitis. The list is now quoted into the waiting-period line itself (short clauses only), and the check that recognises list-type periods now works on real PDFs. 66/78 from 64/78.
+
+- **Two wordings, tried before any code** - quoting the list helped; also naming the person's treatment beside it was worse.
+- **Concept 54: a ligature, and why "Speciﬁed" is not "Specified"** - PDFs store "fi" as one character, so M22's line had never been used on Star's real policy; Unicode NFKC normalization, and why every text pattern on PDF text should run on normalized text.
+- **Failure 86: the right answer, now for the wrong reason** - on Star, removing one blunt "blocks" line let a definitions block misfiled as a waiting period (`c7`) become the cited reason; left as its own fix.
+
 ---
 
 ## Related documents
