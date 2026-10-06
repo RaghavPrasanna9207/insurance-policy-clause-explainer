@@ -321,6 +321,10 @@ The first questions on a second real policy. HDFC refused almost every claim in 
 HDFC still paid an illness inside its 30-day wait although the line said it "still applies and blocks". Two fixes were tried one at a time: stating both sides in days, and putting periods that bar everything before narrow ones. Neither fixed it, and ordering cost 3 of 32 answers elsewhere; both reverted. Keeps three new HDFC questions (HDFC 9/12).
 - **Failure 91: two plausible explanations, both wrong** - why a 7B model's reasoning text is not a trace of its answer, and why only one-change-at-a-time measurement settles it.
 
+### M29 - HDFC's 180-day window after discharge
+Analysis never recorded clause 1.6's window, so expenses months after discharge got no computed line. A window stated in figures is now read off a coverage clause's own words (never off the options that change it for one plan). Fresh 200-day scan fixed; HDFC 11/14.
+- **Failure 92: a firm, correct line, and an invented co-payment** - the window line said "does NOT pay", and the model built a 20% co-payment out of a sentence saying there is none.
+
 ---
 
 ## Related documents

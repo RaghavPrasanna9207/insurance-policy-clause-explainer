@@ -87,3 +87,22 @@ def test_meeting_the_timing_is_not_reported_as_meeting_the_clause():
     claim. WITHIN must say the other conditions still apply."""
     block = render(evaluate([POST], "after_discharge", 30))
     assert "other conditions still apply" in block
+
+
+@dataclass
+class WordedClause(FakeClause):
+    clause_type: str = "coverage"
+    text: str = ""
+
+
+def test_a_window_stated_in_figures_is_read_off_a_coverage_clause():
+    """HDFC 1.6 came back from analysis with no window; seven months after
+    discharge was answered `conditional` with nothing computed."""
+    post = WordedClause("1.6", text=(
+        "Such expenses shall be indemnified if the same were incurred upto 180 days unless "
+        "otherwise specified in the Policy Schedule, immediately post the date of discharge"))
+    assert status_of("1.6", evaluate([post], "after_discharge", 210)) is WindowStatus.OUTSIDE
+    assert status_of("1.6", evaluate([post], "after_discharge", 150)) is WindowStatus.WITHIN
+    # An option that changes the window for one plan says the same words.
+    option = WordedClause("2.15", clause_type="waiting_period", text=post.text)
+    assert evaluate([option], "after_discharge", 150) == []

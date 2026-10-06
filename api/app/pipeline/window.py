@@ -43,6 +43,8 @@ question touches is not doubt about that window - it is not what the question
 is about.
 """
 
+import re
+import unicodedata
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -56,6 +58,20 @@ _SIDE = {
     Anchor.BEFORE_ADMISSION: "before admission",
     Anchor.AFTER_DISCHARGE: "after discharge",
 }
+
+
+# A window stated in figures, read off a coverage clause the analysis gave none:
+# HDFC's 1.6, "upto 180 days unless otherwise specified in the Policy Schedule,
+# immediately post the date of discharge", came back with no window, so seven
+# months after discharge was answered `conditional` with nothing computed.
+# Coverage clauses only: HDFC's options 2.14 and 2.15, which change the window
+# for one plan ("from 180 days ... to 60 days"), say the same words, and read
+# as windows would refuse claims at 61-180 days. Measured on five policies, this
+# finds 1.6 alone; the others spell their numbers ("sixty days") and their
+# windows came from analysis.
+_STATED_WINDOW = re.compile(
+    r"\b(\d+)\s*days?\b[^.]{0,80}?\b(?:(?:prior\s+to|preceding|before)\s+(?:the\s+)?(?:date\s+of\s+)?admission"
+    r"|(?:post|following|after)\s+(?:the\s+)?(?:date\s+of\s+)?discharge)", re.IGNORECASE)
 
 
 class WindowStatus(StrEnum):
@@ -120,6 +136,12 @@ def evaluate(
     for clause in clauses:
         window = getattr(clause, "cover_window_days", None)
         clause_anchor = getattr(clause, "cover_window_anchor", None)
+        if not window and getattr(clause, "clause_type", "") == "coverage":
+            text = unicodedata.normalize("NFKC", getattr(clause, "text", "") or "")
+            if m := _STATED_WINDOW.search(" ".join(text.split())):
+                window = int(m[1])
+                clause_anchor = (Anchor.AFTER_DISCHARGE if "discharge" in m[0].lower()
+                                 else Anchor.BEFORE_ADMISSION)
         if not window or window <= 0 or clause_anchor not in _SIDE:
             continue
 

@@ -29,7 +29,12 @@
     "before any run of them. M28 states a waiting period in the same unit as the time held",
     "('requires 30 days, policy held 20 days' instead of 'requires 1 month'), because",
     "hdfc-typhoid-20-days was answered as if 20 days had not reached the 30-day bar.",
-    "That case has been read while designing M28, so it is no longer clean; these are."
+    "That case has been read while designing M28, so it is no longer clean; these are.",
+    "",
+    "The two cases from hdfc-medicines-five-months-after on were added for M29, before its",
+    "code and before any run of them. M29 reads clause 1.6's 180-day post-hospitalisation",
+    "window from its text, because analysis never recorded it. hdfc-medicines-seven-months-after",
+    "was read while designing M29, so it is no longer clean; these are."
   ],
   "cases": [
     {
@@ -148,6 +153,24 @@
         "Excl03"
       ],
       "why": "Forty days serves the 30-day initial waiting period, and pneumonia is neither pre-existing nor on the specified disease list."
+    },
+    {
+      "id": "hdfc-medicines-five-months-after",
+      "scenario": "I was discharged from hospital after a kidney infection five months ago and I am still buying the medicines my doctor prescribed for it. I have held this policy for four years. Will it pay for them?",
+      "expected_verdict": "covered",
+      "must_cite": [
+        "1.6"
+      ],
+      "why": "Five months is about 150 days, inside the 180 days after discharge that post-hospitalisation expenses are paid for (1.6), and four years serves every waiting period."
+    },
+    {
+      "id": "hdfc-scan-200-days-after",
+      "scenario": "I had a follow-up scan 200 days after I was discharged from hospital for a fractured hip. I have held this policy for five years. Is the scan covered?",
+      "expected_verdict": "not_covered",
+      "must_cite": [
+        "1.6"
+      ],
+      "why": "Post-hospitalisation expenses are paid only up to 180 days after discharge (1.6); 200 days is past it."
     }
   ]
 }
