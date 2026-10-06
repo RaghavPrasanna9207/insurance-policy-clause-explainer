@@ -7,11 +7,11 @@ one run against the code and settings stated here.
 |---|---|
 | Model | `qwen2.5:7b-instruct-q4_K_M` |
 | Ollama | `0.35.1` |
-| Prompt version | `v54-listed-waiting` |
+| Prompt version | `v55-quoted-list` |
 | Decoding | num_ctx 28672, num_predict 1600, temperature 0.0, KV cache q8_0 |
 | Analysis batch size | 1 |
-| Commit | `374a3c3` |
-| Generated | 2026-10-05 17:02 UTC |
+| Commit | `51da3de` |
+| Generated | 2026-10-06 12:23 UTC |
 | Total wall time | 1s (served from cache; a cold run takes several minutes) |
 
 The golden set is a 39-clause synthetic IRDAI-style policy authored for
@@ -30,8 +30,8 @@ cannot drift apart. No real insurer wording is used.
 | Scenario verdict accuracy, held-out batch 1 (16 cases, read while diagnosing M14 failures - no longer clean) | **0.875** | quality |
 | Scenario verdict accuracy, held-out batch 2 (13 cases, written before running; one case read while diagnosing) | **0.923** | quality |
 | Scenario verdict accuracy, held-out batch 3 (3 cases, written for M21 before its code and before any run) | **0.000** | quality |
-| Scenario verdict accuracy, held-out batch 4 (6 cases, written for M22 before its code and before any run) | **0.333** | quality |
-| Scenario citation recall | **0.812** | quality |
+| Scenario verdict accuracy, held-out batch 4 (6 cases, written for M22 before its code and before any run) | **0.667** | quality |
+| Scenario citation recall | **0.781** | quality |
 | Scenario false citation rate | **0.000** | quality |
 | Quote fabrication rate | **0.000** | quality |
 | **Citation detection integrity** | **1.000** | **guarantee** |
@@ -102,7 +102,7 @@ inspected, so the metric tests the system rather than rationalising it.
 
 ## 3. Scenario simulator
 
-**Verdict accuracy 0.875** (35/40) · citation recall 0.812 · detection integrity 1.000
+**Verdict accuracy 0.875** (35/40) · citation recall 0.781 · detection integrity 1.000
 
 | Case | Expected | Got | Cited | Quotes verified |
 |---|---|---|---|---|
@@ -115,7 +115,7 @@ inspected, so the metric tests the system rather than rationalising it.
 | `room-rent-breach` | conditional | conditional | 5.1 | yes |
 | `senior-copay` | conditional | conditional | 5.3 | yes |
 | `adventure-sport` | not_covered | not_covered | 4.3 | yes |
-| `initial-waiting-period` | not_covered | covered ⚠ | 2.1, 3.1 | yes |
+| `initial-waiting-period` | not_covered | covered ⚠ | 2.1 (missing 3.1) | yes |
 | `accident-in-initial-period` | covered | covered | 3.1 | yes |
 | `maternity-too-early` | not_covered | not_covered | 3.4 | yes |
 | `dental-no-accident` | not_covered | not_covered | 4.6 | yes |
@@ -192,11 +192,9 @@ the majority-of-three figures.
 - `ho3-two-policies-appendix`: expected `conditional`, got `not_covered`
 - `ho3-switched-from-old-insurer`: expected `covered`, got `insufficient_information`
 
-**Batch 4** (written for M22 before its code and before any run): verdict accuracy 0.333 (2/6), citation recall 0.400, detection integrity 1.000
+**Batch 4** (written for M22 before its code and before any run): verdict accuracy 0.667 (4/6), citation recall 0.600, detection integrity 1.000
 - `ho4-thyroid-after-cover`: expected `covered`, got `conditional`
 - `ho4-back-trouble-on-and-off`: expected `insufficient_information`, got `not_covered`
-- `ho4-before-buying-checked-cover`: expected `covered`, got `not_covered`
-- `ho4-acute-no-history`: expected `covered`, got `not_covered`
 
 
 ---
