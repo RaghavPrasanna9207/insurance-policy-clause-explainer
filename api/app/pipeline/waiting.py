@@ -40,21 +40,38 @@ from enum import StrEnum
 # clause's own heading. Not by any mention: the IRDAI specified-disease clause
 # mentions pre-existing diseases in its body, only to say which of two periods
 # wins, and is not about them.
-_PRE_EXISTING = re.compile(r"pre[\s-]?existing", re.IGNORECASE)
+# "PED" too, case-sensitive: HDFC heads its option "PED waiting period
+# modification", and the lower-case letters turn up inside words ("speed").
+_PRE_EXISTING = re.compile(r"(?i:pre[\s-]?existing)|\bPED\b")
 _OPENING_CHARS = 60
 # A period that bars only the treatments its clause lists (IRDAI's "Specified
 # disease/procedure waiting period", maternity), recognised the same way. Only
 # these get the narrower line; anything not recognised keeps the firm one,
 # because calling an all-illness period list-only would pay claims it bars.
 _LISTED = re.compile(r"specified|maternity", re.IGNORECASE)
+# A period outside the policy's waiting-period and exclusions section bars only
+# what its own clause covers: HDFC's 36 months for planned treatment abroad,
+# under an optional cover in Section B, and a 30-day wait in a chronic-care
+# add-on, both read as "blocks" and both refusing an accident on day 10.
+# Measured on five policies, every general period sits in a section named for
+# waiting periods or exclusions. An unknown section changes nothing.
+# ponytail: a general period in an oddly named section would get the narrow
+# line; name that section here if a real policy has one.
+_GENERAL_SECTION = re.compile(r"wait|exclu", re.IGNORECASE)
+_HEADED_WAIT = re.compile(r"waiting\s+period", re.IGNORECASE)
+_DURATION = re.compile(r"\b(\d+)\s*(day|month|year)s?\b", re.IGNORECASE)
+_DAYS_PER = {"day": 1, "month": 30, "year": 365}
 # The list is quoted into the line only up to this length. M23 set 600, which
 # left Star's ~1,970-character clause unquoted, and its dengue answer applied
 # the list to dengue. The ~560 tokens are room the prompt has: a policy over
 # PICK_ABOVE_TOKENS of clause text is narrowed long before the 28,672-token
 # window, and an overflow is refused by the client, never silently truncated.
-# ponytail: a longer clause keeps the unquoted line; extract just the list if
-# a real policy shows that costs answers.
+# ponytail: a longer clause keeps the unquoted line.
 _QUOTE_LIST_CHARS = 2_500
+# Where a clause says "List of ...", only the list is quoted. HDFC's quote, with
+# the five conditions before its list, ran to 2,400 characters and drowned the
+# 30-day line beside it: typhoid on day 20 was paid 3 times in 3.
+_LIST_STARTS = re.compile(r"list\s+of\b", re.IGNORECASE)
 # A run of definitions ("X means ...") is not a waiting period, even when one
 # term it defines is. Star's definitions page, split for length, left a piece
 # defining "Specific Waiting Period" typed waiting_period with 36 months, and
@@ -63,6 +80,13 @@ _QUOTE_LIST_CHARS = 2_500
 # every real waiting period 0 times.
 _DEFINES = re.compile(r"\bmeans\b", re.IGNORECASE)
 _DEFINITIONS_BLOCK = 2
+# A waiting period says so. HDFC's plan-comparison table has rows like
+# "1.6 Post-Hospitalization 180 days 180 days ...", typed waiting_period: a cover
+# window read as a 180-day bar on every claim. Measured on five policies, every
+# real waiting period says "wait" in its heading or text, and those rows don't.
+# ponytail: one that never says "wait" loses its computed line (its text still
+# reaches the model); add its wording here if a real policy has one.
+_WAITS = re.compile(r"wait", re.IGNORECASE)
 
 
 class WaitingStatus(StrEnum):
@@ -147,9 +171,20 @@ class WaitingCheck:
                 f"policy began. This one began after the policy did, so this "
                 f"waiting period does not concern this claim"
             )
-        # No firm line for "yes": measured in M22, a claim whose pre-existing
-        # wait was already served, told the condition was pre-existing, was
-        # refused under the cosmetic exclusion 5 times in 5.
+        # No firm line for "yes" on a SERVED wait: measured in M22, such a
+        # claim, told the condition was pre-existing, was refused under the
+        # cosmetic exclusion 5 times in 5. An unserved one is different: HDFC,
+        # "diabetes for six years", policy held one year, got the hedge below
+        # and was paid 3 times in 3, the model reading an optional PED
+        # modification as having cut the wait to 12 months.
+        if (self.pre_existing and self.condition_predates_policy == "yes"
+                and self.status is WaitingStatus.NOT_SERVED):
+            return (
+                f"{who}: concerns ONLY an illness the person already had when the "
+                f"policy began. This one had begun by then, and the policy has been "
+                f"held {_human(self.held_days)} of the {requires} required, so this "
+                f"waiting period still applies and blocks this claim"
+            )
         if self.pre_existing and self.status is not WaitingStatus.SERVED:
             # Regression: on the Star policy, "this waiting period still
             # applies and blocks treatment" for the pre-existing diseases bar
@@ -280,6 +315,16 @@ def evaluate(
     checks: list[WaitingCheck] = []
     for clause in clauses:
         required = sorted({d for d in getattr(clause, "waiting_periods_days", None) or [] if d > 0})
+        heading = unicodedata.normalize("NFKC", getattr(clause, "heading", "") or "").strip()
+        text = " ".join(unicodedata.normalize("NFKC", getattr(clause, "text", "") or "").split())
+        if not required and _HEADED_WAIT.search(heading):
+            # The analysis typed HDFC's "Specified Disease/Procedure waiting
+            # period" an exclusion and gave it no period, so it got no line,
+            # and a hernia 14 months in was told no waiting period applied.
+            # Reading "24 months" off a clause headed as a waiting period is
+            # extraction, not judgement; measured on five policies, it fires on
+            # that clause alone.
+            required = sorted({int(n) * _DAYS_PER[u.lower()] for n, u in _DURATION.findall(text)})
         if not required:
             continue
 
@@ -295,14 +340,15 @@ def evaluate(
         else:
             status = WaitingStatus.PARTLY_SERVED
 
-        # NFKC first: PDFs set "fi" as one ligature character, so Star's
+        # NFKC (above): PDFs set "fi" as one ligature character, so Star's
         # "Speciﬁed disease" never matched "specified" and got the firm line.
-        text = " ".join(unicodedata.normalize("NFKC", getattr(clause, "text", "") or "").split())
-        if len(_DEFINES.findall(text)) >= _DEFINITIONS_BLOCK:
+        if len(_DEFINES.findall(text)) >= _DEFINITIONS_BLOCK or not _WAITS.search(f"{heading} {text}"):
             continue
-        heading = unicodedata.normalize("NFKC", getattr(clause, "heading", "") or "").strip()
-        listed = bool(_LISTED.search(f"{heading} {text[:_OPENING_CHARS]}"))
+        section = getattr(clause, "section_path", "") or ""
+        listed = (bool(_LISTED.search(f"{heading} {text[:_OPENING_CHARS]}"))
+                  or bool(section) and not _GENERAL_SECTION.search(section))
         body = text.removeprefix(heading).strip()
+        listing = body[m.start():] if (m := _LIST_STARTS.search(body)) else body
         checks.append(
             WaitingCheck(
                 clause_id=clause.clause_id,
@@ -314,7 +360,7 @@ def evaluate(
                 pre_existing=bool(_PRE_EXISTING.search(text[:_OPENING_CHARS])),
                 condition_predates_policy=condition_predates_policy,
                 listed=listed,
-                listing=body if listed and len(body) <= _QUOTE_LIST_CHARS else "",
+                listing=listing if listed and len(listing) <= _QUOTE_LIST_CHARS else "",
                 # The heading repeats the clause number; the line already has it.
                 subject=re.sub(r"^[\d.]+\s*", "", heading),
             )

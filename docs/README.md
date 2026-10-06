@@ -311,6 +311,12 @@ Star's definitions page, cut into pieces for length, left one piece typed as a 3
 ### M26 - Quoting a real policy's list
 M23's 600-character limit kept Star's specified-disease list out of the waiting-period line, and the dengue answer applied the list to dengue. Checked against the real constraints (context window, picking step, overflow check), the limit was too cautious; raised to 2,500. Star deciding clause cited 8/10 → 9/10.
 
+### M27 - HDFC's waiting periods
+The first questions on a second real policy. HDFC refused almost every claim in its first three years: plan-table rows read as 60- and 180-day waiting periods, lettered IRDAI exclusions never split, "PED" unrecognised, optional covers with nothing marking them narrow. Fixed rule by rule, each checked across five policies and shown by request comparison to touch only HDFC. HDFC 4/9 → 7/9; Star cited 9/10 → 8/10.
+- **Failure 89: five more lines said "blocks"** - the first fix was correct and moved nothing; only measuring it alone showed what remained.
+- **Splitting HDFC's lettered exclusions** - why the IRDAI code, not the letter, makes a line safe to treat as a clause, and why it becomes the id.
+- **Failure 90: a long quote drowned the line beside it** - a 2,400-character list quote; a reordering rejected because it changed 25 other requests; quoting only the list, and the Star citation it cost.
+
 ---
 
 ## Related documents

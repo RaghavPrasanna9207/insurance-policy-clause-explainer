@@ -11778,3 +11778,437 @@ No. Its clause is about 290 characters, under both limits, so it was quoted
 under M23 too. That's why the request comparison found 0 of 78 synthetic
 questions changed.
 </details>
+
+---
+
+# M27 — HDFC's waiting periods
+
+## The problem
+
+Until M27, scenarios were measured on two documents: the synthetic policy
+written for this repository, and Star Health's Arogya Sanjeevani. The
+repository fetches a third real wording, HDFC ERGO's **my: Optima Secure**
+(`evals/real/sources.json`), the longest of the three, but no question had
+ever been asked of it.
+
+Listing the clauses the pipeline treats as waiting periods on HDFC showed a
+problem before any question was asked. Two of them were rows of the
+plan-comparison table near the end of the PDF:
+
+```
+1.5#2 | waiting_period [60]  | 1.5 Pre-Hospitalization 60 days 60 days 60 days 60 days (India only) 60 days 60 days 30 days
+1.6#2 | waiting_period [180] | 1.6 Post-Hospitalization 180 days 180 days 180 days 180 days (India only) 180 days 180 days 60 days
+```
+
+Those are **cover windows**: how long before admission and after discharge
+the policy pays for tests and medicines. A waiting period counts from the day
+the *policy* began; a cover window counts from one *hospital stay*. Typed as
+waiting periods, they tell every claim in the first six months that a
+"180-day waiting period still applies and blocks" it.
+
+(The ids with `#` are repeats of a clause number. HDFC numbers its benefits
+1.1 to 1.8 in Section B and again in the annexure table, so the table's 1.6
+becomes `1.6#2`. See `citation_ids()` in `api/app/pipeline/scenario.py`.)
+
+## Questions written before the code
+
+`evals/real/scenarios-hdfc-optima-secure.json`, seven questions written from
+the policy's own wording, before any code and before any run:
+
+- Three payable claims inside the first six months: typhoid on day 45, dengue
+  at four months, and a road accident on day 10. The 30-day initial waiting
+  period exempts accidents.
+- One refusal: typhoid on day 20, inside the 30-day wait.
+- Three about the real windows (clauses 1.5 and 1.6): medicines in the three
+  months after discharge (paid), physiotherapy seven months after discharge
+  (past the 180 days), and scans 75 days before admission (past the 60 days).
+
+HDFC has no compulsory co-payment, so a payable claim is `covered`, not
+`conditional` as on Star.
+
+Two more were added partway through (see below), before any run of them:
+a hernia 14 months in, and diabetes held six years before a one-year-old
+policy.
+
+**On the code as it stood: 2 of 7 right**, majority of three. All three
+payable claims were refused, the accident on day 10 included.
+
+## Step 1: a waiting period says so
+
+The table rows were found by reading, so the first question was how to tell
+them apart from a real waiting period without an LLM. Every clause typed
+`waiting_period` in all five policies the repository has (three synthetic,
+Star, HDFC) was listed with one test: does its heading or text contain the
+letters "wait"?
+
+```
+WAIT  3.1, 3.2, 3.3, 3.4          synthetic (and the same in the other two)
+WAIT  2#2, 3#2, c7                Star
+WAIT  2.10#2, 2.12, 1#2, 1#4, 6   HDFC
+----  1.5#2, 1.6#2                HDFC's table rows
+```
+
+A clean split. In `api/app/pipeline/waiting.py`:
+
+```python
+_WAITS = re.compile(r"wait", re.IGNORECASE)
+...
+if len(_DEFINES.findall(text)) >= _DEFINITIONS_BLOCK or not _WAITS.search(f"{heading} {text}"):
+    continue
+```
+
+The skip sits beside M24's rule for definitions blocks, in `evaluate()`, so
+every caller goes through it. Skipping a clause here removes only its
+computed line; the clause's text still reaches the model. The comment marks
+the ceiling with `ponytail:`: a real waiting period that never says "wait"
+would lose its line.
+
+Nineteen existing tests failed at once. Their fake clauses had empty text, so
+none said "wait". A real clause always has text, so the test helper got a
+neutral default (`text: str = "Waiting period"`), and one fixture that
+abbreviated the IRDAI pre-existing-disease wording got back the sentence it
+had dropped: "...then waiting period for the same would be reduced to the
+extent of prior coverage."
+
+**Measured: verdicts unchanged, 2 of 7.** Citations improved (citing the
+deciding clause went from 0–20% of answers to 40%), and quotes failing the
+verbatim check fell from 6–7 a run to 1–2. But nothing that was refused
+became paid.
+
+## Failure 89: five more lines said "blocks"
+
+Reading the prompt for the accident question showed why:
+
+```
+- clause 2.10#2 (Global Health Cover (Emergency & Planned Treatments) (cont.)): requires 36 months,
+  policy held 10 days -> this waiting period still applies and blocks treatment covered by THIS clause
+- clause 2.12 (PED waiting period modification): requires 36 months ... still applies and blocks ...
+- clause 1#2 (Waiting Periods): requires 36 months ... still applies and blocks ...
+- clause 1#4 (Waiting Periods (cont.)): requires 1 month ... blocks ..., EXCEPT where the situation
+  falls within this clause's own exception: "claims arising due to an accident"
+- clause 6: requires 1 month ... still applies and blocks treatment covered by THIS clause
+```
+
+Four firm "blocks" lines and one exception. Only 1#4 was a correct line. The
+table rows had been two of seven false signals, and removing them left five.
+This is Failure 86 again (removing one wrong signal lets the next one
+decide), and it is worth naming as its own failure because of how it was
+found: the fix was measured, and the measurement said *nothing moved*.
+Without the measurement, the table-row fix would have looked like the whole
+answer.
+
+Each of the remaining lines was wrong for a different reason:
+
+| Clause | What it is | Why it read as a bar on everything |
+|---|---|---|
+| 1#2 | Pre-existing diseases (36 months) **and** the specified-disease list (24 months), together | The segmenter never split them |
+| 2.12 | An optional cover that changes the pre-existing wait | Its heading says "PED"; the code looked for "pre-existing" |
+| 2.10#2 | 36 months for *planned treatment abroad*, under an optional cover | Nothing marked it as narrow |
+| 6 | An add-on: 30 days for asthma, BP, cholesterol, diabetes | Nothing marked it as narrow |
+
+## Step 2: splitting HDFC's lettered exclusions
+
+IRDAI standardises health-policy exclusions and gives each a code: `Excl01`
+pre-existing diseases, `Excl02` specified diseases, `Excl03` the 30-day wait,
+and so on to `Excl18`. Star numbers these items "1.", "2.", "3.", which the
+segmenter already treats as clause starts. HDFC letters them, with the letter
+on its own line:
+
+```
+a.                                      (bold, its own line)
+Pre-Existing Diseases: Code – Excl01    (bold, same row)
+i.
+Expenses related to the treatment of a pre-existing disease ...
+```
+
+The segmenter (`api/app/pipeline/segment.py`) joins a lone marker to the
+words beside it, but only recognised "2." or "(a)" as markers, never "a.". So
+everything from "1. Waiting Periods" ran on until the 3,000-character cap cut
+it into `1#2`, `1#3`, `1#4`.
+
+Accepting every "a." as a clause start would be wrong: HDFC also sets roman
+sub-items "i." the same way, and those must stay inside their clause. What
+makes a lettered line safe to believe is the code:
+
+```python
+_RE_MARKER_ONLY = re.compile(r"^(?:\d+(?:\.\d+)*\.?|\((?:[a-zA-Z]|[ivxlIVXL]+|\d+)\)|[a-z]\.)$")
+_RE_EXCL_ITEM = re.compile(r"^[a-z]\.\s+[^.]*?\bCode\s*[–-]?\s*Excl\s*(\d+)", re.IGNORECASE)
+...
+    if m := _RE_EXCL_ITEM.match(text):
+        return f"Excl{int(m.group(1)):02d}", True
+```
+
+The code also becomes the clause's **id**. A letter would repeat
+(`a`, `a#2`, ...); "Excl01" is unique and printed in the clause, so the id the
+model cites is a string the reader can find on the page. Three items print
+the code at the *end* of their text ("... thereof. Code – Excl12"); the
+`[^.]*?` refuses those, so they stay inside the item above them. That is
+harmless so far and marked with `ponytail:`.
+
+Comparing the segmentation of all six PDFs before and after: **only HDFC
+changed.** Star, Niva and the three synthetic policies segment exactly as
+before. HDFC's Section C became `Excl01`, `Excl02`, `Excl03`, and its
+standard exclusions became `Excl04` onwards.
+
+The same step taught the pre-existing check the abbreviation:
+
+```python
+_PRE_EXISTING = re.compile(r"(?i:pre[\s-]?existing)|\bPED\b")
+```
+
+"PED" is case-sensitive, because lower-case "ped" turns up inside words.
+
+### A side effect: re-analysis
+
+New clauses are new text, so analysis (stage 3, the model reading each clause
+in batches of five) ran again. Changing one clause shifts every batch after
+it, so most of HDFC was re-read, which took over ten minutes. One batch
+failed: clause 92, the insurance ombudsman's address list, made the model's
+answer run past its token limit three times. It decides no claim, so it was
+left unanalysed and noted.
+
+The re-analysis also moved something that mattered: **Excl02 came back typed
+`exclusion` with no waiting period at all.** Its text says "excluded until
+the expiry of 24 months", but the analysis model didn't record the 24.
+
+### The ids in the questions
+
+The questions had been written citing the 30-day clause as `1#4`, its id at
+the time. After the split it is `Excl03`. Only the id was renamed in the
+case file; no expectation changed, and the file's `_why` says so.
+
+### Two more questions
+
+The split exists to separate the pre-existing bar from the specified-disease
+bar, and none of the seven questions involved either. Two were added before
+any run of them: hernia 14 months in (`not_covered`, citing `Excl02`) and
+diabetes held six years before a one-year-old policy (`not_covered`, citing
+`Excl01`). On the old code both were refused, 3 of 3. That proves little: the
+old code refused nearly everything, and their ids didn't exist yet.
+
+**Measured after step 2: 4 of 9.** Medicines-after-discharge became right.
+Hernia became wrong ("covered"), because Excl02 had lost its period and got no
+line.
+
+## Step 3: a period under a benefit bars only that benefit
+
+2.10#2 and 6 are waiting periods for one benefit, not for the policy. A
+question across all five policies: where does each waiting period sit?
+
+```
+'SECTION 3 - WAITING PERIODS'               synthetic 3.1–3.4
+'SECTION 1 - COVER AND EXCLUSIONS'          synthetic mini 3.2
+'STANDARD EXCLUSIONS'                       Star 2#2, 3#2
+'SECTION C. WAITING PERIOD AND EXCLUSIONS'  HDFC Excl01, Excl03
+'SECTION B. BENEFITS'                       HDFC 2.10#2, 2.12
+'SECTION D. GENERAL TERMS AND CLAUSES'      HDFC 6 (the annexure, which the segmenter files under D)
+```
+
+Every general period sits in a section named for waiting periods or
+exclusions. So a period anywhere else is treated like a list-type period (M22,
+M23): its line says it "bars ONLY the treatments this clause lists" and quotes
+the clause.
+
+```python
+_GENERAL_SECTION = re.compile(r"wait|exclu", re.IGNORECASE)
+...
+section = getattr(clause, "section_path", "") or ""
+listed = (bool(_LISTED.search(f"{heading} {text[:_OPENING_CHARS]}"))
+          or bool(section) and not _GENERAL_SECTION.search(section))
+```
+
+An unknown (empty) section changes nothing. The ceiling, marked
+`ponytail:`, is a general period in an oddly named section, which would get
+the narrow line and could pay claims it bars.
+
+**Measured: 6 of 9.** Typhoid on day 45, dengue at four months and the
+accident on day 10 all became right, 3 of 3. Diabetes became wrong.
+
+### Failure 87 again: diabetes had been right for a false reason
+
+Diabetes had been refused under the false 2.10#2 "blocks" line. With that
+line gone, the model read the hedged pre-existing line:
+
+```
+- clause Excl01 (...): concerns ONLY an illness the person already had when the policy
+  began. Unless the description says this one had begun by then, it is not the reason
+  for this claim. (Requires 36 months; policy held 1 year, so not yet served.)
+```
+
+and paid, reasoning that "clause 2.12 ... states that the Pre-existing Disease
+Waiting Period has been modified to 12 months". Clause 2.12 says the modified
+period is "as stipulated in the Policy Schedule"; the 12 was invented.
+
+## Step 4: two more lines
+
+**Reading a period off a clause headed as one.** Excl02 has a heading that
+says what it is ("Specified Disease/Procedure waiting period") and a text that
+says how long ("24 months"). Reading that number is extraction, not
+judgement:
+
+```python
+if not required and _HEADED_WAIT.search(heading):
+    required = sorted({int(n) * _DAYS_PER[u.lower()] for n, u in _DURATION.findall(text)})
+```
+
+It only runs when analysis gave no period. Listed across all five policies,
+it fires on exactly one clause: Excl02, giving 720 days.
+
+**A firm line for an illness settled as older than the policy.** The facts
+for the diabetes question already said `pre_existing_condition: yes` (six
+years against one). M22 had kept the hedged line for "yes", and the reason
+matters. M22's Failure 84 was a *served* wait: blood pressure held since
+before a policy five years old, refused under an unrelated clause once the
+facts block said "yes". In M22 the firm line for an *unserved* wait had in
+fact fixed its question, 5 of 5; it was dropped along with the lookup that set
+"yes". So the firm line returns, for unserved periods only:
+
+```python
+if (self.pre_existing and self.condition_predates_policy == "yes"
+        and self.status is WaitingStatus.NOT_SERVED):
+    return (
+        f"{who}: concerns ONLY an illness the person already had when the "
+        f"policy began. This one had begun by then, and the policy has been "
+        f"held {_human(self.held_days)} of the {requires} required, so this "
+        f"waiting period still applies and blocks this claim"
+    )
+```
+
+M22's test, which pinned "yes keeps the hedge", was rewritten to pin the new
+decision: "unknown" keeps the hedge; "yes" with an unserved wait is firm.
+
+The request comparison found **0 of 95** questions on the other sets changed.
+
+**Measured: 6 of 9.** Hernia and diabetes became right, 3 of 3. But typhoid
+on day 20 and dengue at four months, both right before, went wrong.
+
+## Failure 90: a long quote drowned the line beside it
+
+Excl02's new line quoted the whole clause, about 2,400 characters: five
+conditions (i. to v.) and then the list. In the dengue answer the model
+applied the list to dengue ("a 24-month waiting period ... applies"). In the
+typhoid-on-day-20 prompt the correct 30-day line came *after* that quote:
+
+```
+- clause Excl02 (...): bars ONLY the treatments this clause lists: "i. Expenses related to
+  the treatment of the listed Conditions ... [2,400 characters] ..."
+- clause Excl03 (c. 30-day waiting period: Code – Excl03): requires 1 month, policy held
+  20 days -> this waiting period still applies and blocks treatment covered by THIS clause,
+  EXCEPT where the situation falls within this clause's own exception: "claims arising due
+  to an accident". ...
+```
+
+Two fixes were considered.
+
+- **Put periods that bar everything before periods that bar a list**, in
+  `render()`, which already orders lines because "the model tends to cite the
+  first bar it reads". Tried, and rejected *without a model run*: the request
+  comparison showed it changed **25** requests in the other sets. That is a
+  re-measurement of a quarter of everything for one HDFC question.
+- **Quote only the list**, from "List of ..." onward, when a clause has one.
+  M26's code comment had named this as the upgrade "if a real policy shows
+  that costs answers". The synthetic clauses don't contain "List of", so they
+  can't change. Chosen.
+
+```python
+_LIST_STARTS = re.compile(r"list\s+of\b", re.IGNORECASE)
+...
+listing = body[m.start():] if (m := _LIST_STARTS.search(body)) else body
+```
+
+The request comparison: **1 of 95** changed, Star's dengue question, whose
+2#2 clause also says "List of specific diseases/procedures".
+
+**Measured: HDFC 7 of 9.** Dengue became right again. Typhoid on day 20 stayed
+wrong, 3 of 3, with this reasoning:
+
+> "The 20 days since you bought the policy is not long enough to trigger the
+> waiting periods listed in the policy."
+
+The line it was given says "requires 1 month, policy held 20 days -> this
+waiting period still applies and blocks". The model read the comparison
+backwards. The same line was answered correctly before Excl02 gained its
+line, so a busier prompt seems to tip it. One untried idea: state both sides
+in the same unit ("requires 30 days, policy held 20 days"). That changes the
+wording for every short wait in every set, so it is left for its own
+milestone.
+
+**And Star's dengue** kept its right verdict, `not_covered`, but stopped
+citing the 30-day clause 3#2 (3 of 3 under M26, 0 of 3 now). It now gives the
+pre-existing exclusion as the reason, for a fever that began 20 days into
+cover. Quoting only the list helped HDFC's dengue and hurt Star's. That trade
+was kept on purpose: HDFC's case is a claim a person would act on (paid, with
+a false warning that a 24-month wait applies), while Star's is the wrong
+reason for a right refusal.
+
+## Results
+
+HDFC, majority of three, Ollama 0.35.1:
+
+| Question | Expected | Before M27 | M27 |
+|---|---|---|---|
+| typhoid, day 45 | covered | not_covered ✗ | covered ✓ |
+| dengue, 4 months | covered | not_covered ✗ | covered ✓ |
+| typhoid, day 20 | not_covered | not_covered ✓ | covered ✗ |
+| accident, day 10 | covered | not_covered ✗ | covered ✓ |
+| medicines after discharge | covered | not_covered ✗ | covered ✓ |
+| physiotherapy 7 months after | not_covered | conditional ✗ | conditional ✗ |
+| tests 75 days before | not_covered | not_covered ✓ | not_covered ✓ |
+| hernia, 14 months | not_covered | not_covered ✓ | not_covered ✓ |
+| diabetes, held before | not_covered | not_covered ✓ | not_covered ✓ |
+| **right** | | **4/9** | **7/9** |
+
+The "before" column is honest but flattering: its four right answers are all
+refusals from a system that refused almost everything. Typhoid on day 20 was
+right before for the same reason.
+
+The other sets: **0 of 95** requests changed except Star's dengue question.
+Synthetic 36/40 and held-out 30/38 stand. Star: 9 of 10 verdicts, unchanged;
+citing the deciding clause 9 → **8 of 10**.
+
+Still open on HDFC:
+
+- Typhoid on day 20 is paid (Failure 90).
+- Physiotherapy seven months after discharge is `conditional`, not
+  `not_covered`: clause 1.6 states the 180 days, but analysis never recorded
+  it as a cover window, so no window line is computed for it.
+- Clause 92 (the ombudsman list) is unanalysed.
+
+## Closing out M27
+
+M27 is the first time the pipeline met a second real policy's structure, and
+most of what broke was **reading**, not reasoning: table rows typed as
+waiting periods, lettered exclusions never split, an abbreviation, optional
+covers with nothing to mark them narrow. Each fix was a fixed rule checked
+across all five policies before it was written: "says wait", "has an IRDAI
+code", "sits in a waiting-period section", "headed as a waiting period". Each
+was confirmed to touch only HDFC with the request comparison.
+
+Two lessons repeat from earlier milestones, and that repetition is the
+lesson:
+
+- **Measure each fix alone** (Failure 89). The first fix was correct and moved
+  nothing; only the measurement showed there were five more false lines.
+- **A right answer can rest on a false line** (Failure 87). Diabetes was right
+  until the false line under it was removed.
+
+## Check it yourself
+
+```bash
+cd api
+.venv/Scripts/python -m pytest tests/test_waiting.py tests/test_segment.py -q
+```
+
+**Predict before you look:** HDFC's item "i. Treatment for Alcoholism, drug or
+substance abuse ... thereof. Code – Excl12" has an IRDAI code. Does the
+segmenter start a new clause for it?
+
+<details>
+<summary>Answer</summary>
+
+No. `_RE_EXCL_ITEM` needs the code inside the item's *title*: `[^.]*?` allows
+no full stop between the letter and "Code". Here the code comes after
+"thereof.", at the end of the text, so the line doesn't match, and the item
+stays inside the clause above it (Excl11). That is the `ponytail:` ceiling in
+`segment.py`.
+</details>

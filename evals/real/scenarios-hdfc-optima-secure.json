@@ -1,0 +1,119 @@
+{
+  "_why": [
+    "Scenarios for a REAL policy wording: HDFC ERGO's my: Optima Secure.",
+    "Fetch the PDF with evals/real/fetch_policies.py; it is never committed.",
+    "",
+    "Written for M27, before any code for it and before any run of these cases, from the",
+    "policy's own wording. Same author as the system, so not fully independent.",
+    "",
+    "What prompted them: the plan-comparison table near the end of the PDF has rows like",
+    "'1.6 Post-Hospitalization 180 days 180 days ...'. The pipeline types those rows (ids",
+    "1.5#2 and 1.6#2) as 60- and 180-day WAITING PERIODS. They are cover windows: how long",
+    "before admission and after discharge expenses are paid. Read as waiting periods they",
+    "would block every claim in the first six months. These cases check that they don't,",
+    "and that the real windows (1.5 and 1.6) still decide the questions they should.",
+    "",
+    "Conventions: this policy has no compulsory co-payment, so a payable claim is",
+    "`covered` (the optional Aggregate Deductible is assumed not chosen). Ids with '#' are",
+    "repeats of a number, from citation_ids() in app/pipeline/scenario.py. The 30-day",
+    "initial waiting period is Excl03: M27 made the segmenter split Section C at its IRDAI",
+    "codes and use the code as the id. The cases were first written citing '1#4', the id",
+    "it had before that split; only the id was renamed, no expectation changed.",
+    "",
+    "The last two cases were added during M27, after the segmenter began splitting",
+    "Section C into Excl01/02/03 and before any run of them: they check the split did not",
+    "lose the two bars it separated. Ids Excl01 and Excl02 are the IRDAI codes the",
+    "policy prints, which the segmenter now uses as these clauses' ids."
+  ],
+  "cases": [
+    {
+      "id": "hdfc-typhoid-45-days",
+      "scenario": "I was admitted to hospital with typhoid 45 days after buying this policy. It is my first health insurance.",
+      "expected_verdict": "covered",
+      "must_cite": [
+        "Excl03"
+      ],
+      "must_not_cite": [
+        "1.5#2",
+        "1.6#2"
+      ],
+      "why": "The 30-day initial waiting period (Section C 1.c, in Excl03) is served at 45 days, and typhoid is not on the specified disease list. Nothing else applies."
+    },
+    {
+      "id": "hdfc-dengue-four-months",
+      "scenario": "Four months after taking this policy I was hospitalised for five days with dengue. I had no insurance before.",
+      "expected_verdict": "covered",
+      "must_cite": [],
+      "must_not_cite": [
+        "1.5#2",
+        "1.6#2"
+      ],
+      "why": "Four months serves the 30-day initial waiting period; dengue is neither pre-existing nor on the specified disease list."
+    },
+    {
+      "id": "hdfc-typhoid-20-days",
+      "scenario": "I was admitted to hospital with typhoid 20 days after buying this policy. It is my first health insurance.",
+      "expected_verdict": "not_covered",
+      "must_cite": [
+        "Excl03"
+      ],
+      "why": "An illness within 30 days of the first policy is excluded (Section C 1.c, in Excl03), with no prior cover to waive it and no accident."
+    },
+    {
+      "id": "hdfc-accident-ten-days",
+      "scenario": "I fractured my leg in a road accident ten days after buying this policy and was admitted to hospital for surgery.",
+      "expected_verdict": "covered",
+      "must_cite": [],
+      "must_not_cite": [
+        "1.5#2",
+        "1.6#2"
+      ],
+      "why": "The 30-day initial waiting period exempts accidents, and nothing else applies to an accidental fracture."
+    },
+    {
+      "id": "hdfc-medicines-after-discharge",
+      "scenario": "I had my appendix removed in hospital last month. I have held this policy for two years. Can I claim the medicines and follow-up visits for the three months after discharge?",
+      "expected_verdict": "covered",
+      "must_cite": [
+        "1.6"
+      ],
+      "why": "Post-hospitalisation expenses are paid for up to 180 days after discharge (1.6), and the stay itself is admissible: two years serves the 30-day wait and appendicitis is not on the list."
+    },
+    {
+      "id": "hdfc-medicines-seven-months-after",
+      "scenario": "I was discharged after a hospital stay for pneumonia seven months ago. I have held this policy for three years. Can I claim the physiotherapy I am having now?",
+      "expected_verdict": "not_covered",
+      "must_cite": [
+        "1.6"
+      ],
+      "why": "Post-hospitalisation expenses are paid only up to 180 days after discharge (1.6); seven months is past it."
+    },
+    {
+      "id": "hdfc-tests-75-days-before",
+      "scenario": "I had scans and blood tests 75 days before I was admitted for a planned surgery. I have held this policy for three years. Are those tests covered?",
+      "expected_verdict": "not_covered",
+      "must_cite": [
+        "1.5"
+      ],
+      "why": "Pre-hospitalisation expenses are paid only up to 60 days before admission (1.5); 75 days is outside it."
+    },
+    {
+      "id": "hdfc-hernia-14-months",
+      "scenario": "I need surgery for a hernia that was found last month. I bought this policy 14 months ago and it is my first health insurance.",
+      "expected_verdict": "not_covered",
+      "must_cite": [
+        "Excl02"
+      ],
+      "why": "Hernia is on the specified disease/procedure list, excluded until 24 months of continuous cover (Excl02). Fourteen months have not served it, there was no prior cover, and nothing suggests an accident."
+    },
+    {
+      "id": "hdfc-diabetes-before-policy",
+      "scenario": "I have had diabetes for six years and declared it when I bought this policy a year ago. Now I am admitted to hospital because of complications of my diabetes.",
+      "expected_verdict": "not_covered",
+      "must_cite": [
+        "Excl01"
+      ],
+      "why": "Diabetes predates the policy, so it is a pre-existing disease, excluded with its direct complications until 36 months of continuous cover (Excl01). One year has not served it."
+    }
+  ]
+}

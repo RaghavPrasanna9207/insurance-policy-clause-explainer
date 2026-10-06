@@ -77,7 +77,17 @@ _RE_PAREN = re.compile(r"^\((?:[a-zA-Z]|[ivxlIVXL]+|\d+)\)\s+(?=\S)")
 # policies set the number a tab stop away from its words, and extraction
 # returns it as a line of its own - which no pattern above matches, because
 # each needs text after the number.
-_RE_MARKER_ONLY = re.compile(r"^(?:\d+(?:\.\d+)*\.?|\((?:[a-zA-Z]|[ivxlIVXL]+|\d+)\))$")
+_RE_MARKER_ONLY = re.compile(r"^(?:\d+(?:\.\d+)*\.?|\((?:[a-zA-Z]|[ivxlIVXL]+|\d+)\)|[a-z]\.)$")
+# A lettered item titled with an IRDAI exclusion code: "a. Pre-Existing
+# Diseases: Code – Excl01". HDFC letters its standard exclusions and waiting
+# periods, and "a." matched no rule, so its pre-existing, specified-disease
+# and 30-day periods ran together as one clause, read as one 36-month bar on
+# every claim. The code alone makes a bare letter safe to believe: roman
+# sub-items ("i. Expenses ...") carry none. The code becomes the clause's id;
+# it is printed in the clause, and unlike the letter it never repeats.
+# ponytail: an item whose code trails its text ("... thereof. Code – Excl12")
+# stays with the item above it; harmless so far, split it if one decides a claim.
+_RE_EXCL_ITEM = re.compile(r"^[a-z]\.\s+[^.]*?\bCode\s*[–-]?\s*Excl\s*(\d+)", re.IGNORECASE)
 # A number with no level above it, "7." or "(a)", as opposed to "4.2". Only
 # these are ambiguous: a list inside a clause is numbered 1, 2, 3 too, but no
 # list is numbered 5.1.3.
@@ -175,6 +185,8 @@ def _numbering(text: str) -> tuple[str, bool] | None:
         # Whitespace collapsed: Niva sets "List  I" with two spaces, and this
         # string becomes the id the model cites.
         return " ".join(m.group(0).split()), True
+    if m := _RE_EXCL_ITEM.match(text):
+        return f"Excl{int(m.group(1)):02d}", True
     if _RE_BARE_INT.match(text):
         return None
     if m := _RE_DECIMAL.match(text):
