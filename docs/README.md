@@ -308,6 +308,9 @@ Star's definitions page, cut into pieces for length, left one piece typed as a 3
 - **Failure 88: a hedged line changed nothing** - "if outside India, read this clause as deciding" lost to the firm lines around it; opening with the fact worked, but refused a claim treated in Chennai until the soft fallback.
 - **The fallback, and keeping the test honest** - why the Chennai trap stopped counting once the fix was designed around it, and the three fresh questions written before the fallback's code.
 
+### M26 - Quoting a real policy's list
+M23's 600-character limit kept Star's specified-disease list out of the waiting-period line, and the dengue answer applied the list to dengue. Checked against the real constraints (context window, picking step, overflow check), the limit was too cautious; raised to 2,500. Star deciding clause cited 8/10 → 9/10.
+
 ---
 
 ## Related documents

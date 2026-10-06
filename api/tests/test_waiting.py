@@ -359,7 +359,7 @@ def test_a_ligature_does_not_hide_a_list_period():
 def test_a_long_list_is_not_quoted():
     """A real clause's list can run to ~2,000 characters, outside the clause budget."""
     long = HeadedClause("3.3", [720], heading="3.3 Specified Disease Waiting Period",
-                        text="Expenses related to " + "hernia, " * 100)
+                        text="Expenses related to " + "hernia, " * 400)
     block = render(evaluate([long], days_held=600))
     assert "this clause lists. If this" in block
 

@@ -47,12 +47,14 @@ _OPENING_CHARS = 60
 # these get the narrower line; anything not recognised keeps the firm one,
 # because calling an all-illness period list-only would pay claims it bars.
 _LISTED = re.compile(r"specified|maternity", re.IGNORECASE)
-# The list is quoted into the line only up to this length. The synthetic
-# specified-disease clause is about 290 characters; Star's is about 1,970, and
-# quoting that would repeat ~560 tokens outside the clause budget.
+# The list is quoted into the line only up to this length. M23 set 600, which
+# left Star's ~1,970-character clause unquoted, and its dengue answer applied
+# the list to dengue. The ~560 tokens are room the prompt has: a policy over
+# PICK_ABOVE_TOKENS of clause text is narrowed long before the 28,672-token
+# window, and an overflow is refused by the client, never silently truncated.
 # ponytail: a longer clause keeps the unquoted line; extract just the list if
 # a real policy shows that costs answers.
-_QUOTE_LIST_CHARS = 600
+_QUOTE_LIST_CHARS = 2_500
 # A run of definitions ("X means ...") is not a waiting period, even when one
 # term it defines is. Star's definitions page, split for length, left a piece
 # defining "Specific Waiting Period" typed waiting_period with 36 months, and

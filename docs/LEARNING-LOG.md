@@ -11676,3 +11676,105 @@ in the question names a place abroad, so `abroad_clauses` returns an empty
 list and the block isn't rendered. "Pune" only matters once a place abroad
 has been found, when it switches the line to the soft one.
 </details>
+
+---
+
+# M26 — Quoting a real policy's list
+
+## The problem
+
+M23 made the waiting-period line for a list-type period (specified diseases,
+maternity) quote the clause's own list, because the model kept applying the
+list to treatments that weren't on it. It quoted only clauses of 600
+characters or less:
+
+```python
+_QUOTE_LIST_CHARS = 600
+```
+
+The synthetic clause is about 290 characters. Star Health's
+specified-disease clause, `2#2`, is about 1,970: conditions A to E about
+how the period works, then "List of specific diseases/procedures", twenty
+items under "24 Months waiting period" and two under "36 Months". So on the
+one real policy, the list was never shown in the line.
+
+The question `star-dengue-first-month` ("admitted to hospital with dengue
+fever 20 days after buying this policy") had the right verdict,
+`not_covered`, for the wrong reason, 3 samples of 3:
+
+> "The claim for dengue fever is not covered because the 24/36-month
+> specific disease waiting period for the treatment of dengue fever has not
+> yet been served."
+
+Dengue isn't on Star's list. The deciding clause is the 30-day initial
+waiting period, `3#2`.
+
+## Why 600 was too cautious
+
+M23 chose 600 to avoid crowding the prompt: the waiting-period lines sit
+outside the *clause budget*, the room the shortlist reserves for clause
+text. Checking the numbers showed the worry didn't apply:
+
+- The context window (`num_ctx` in `api/app/config.py`) is 28,672 tokens.
+- A policy with more than `PICK_ABOVE_TOKENS` (6,000) tokens of clause text
+  is narrowed by the picking step first, so a real prompt sits far below
+  the window. Star's dengue prompt is around 8,000 tokens.
+- And if a prompt ever did overflow, the client (`_check_context` in
+  `api/app/llm/client.py`) detects the truncation from Ollama's exact
+  token count, `prompt_eval_count`, and raises an error instead of
+  returning the answer. A truncated prompt is never answered silently.
+
+Star's whole clause costs about 560 extra tokens. The limit was raised to
+2,500 characters:
+
+```python
+_QUOTE_LIST_CHARS = 2_500
+```
+
+M23's alternative, extracting only the list (from "List of" onward), was
+not built. It would be more code to keep two lines of prose out of a prompt
+with plenty of room.
+
+## Measuring
+
+The request comparison (every reasoning request hashed, model stubbed)
+found **0 of 78** synthetic questions changed, none of the seven
+place questions from M25, and **1 of 10** Star questions: dengue, the only
+one with an unserved list-type period whose list was over 600 characters.
+
+Majority of three, Ollama 0.35.1:
+
+| | M25 | M26 |
+|---|---|---|
+| `star-dengue-first-month` verdict | not_covered | not_covered |
+| cites the deciding clause `3#2` | 0 of 3 | **3 of 3** |
+
+Star overall: 9 of 10 right verdicts, unchanged; answers citing the
+deciding clause **8 → 9 of 10**. The one wrong verdict left is
+`star-gallstones-no-timing` (`conditional` where the answer key says
+`insufficient_information`, with sound reasoning; see Failure 87).
+
+## The point
+
+A limit chosen to be safe should be checked against the real constraint
+once a real case runs into it. 600 was a guess at a risk; the context
+window, the picking step and the overflow check together were the actual
+protection, and they had room to spare.
+
+## Check it yourself
+
+```bash
+cd api
+.venv/Scripts/python -m pytest tests/test_waiting.py -q -k "list"
+```
+
+**Predict before you look:** with the limit at 2,500, does the synthetic
+policy's specified-disease line change at all compared with M23?
+
+<details>
+<summary>Answer</summary>
+
+No. Its clause is about 290 characters, under both limits, so it was quoted
+under M23 too. That's why the request comparison found 0 of 78 synthetic
+questions changed.
+</details>
