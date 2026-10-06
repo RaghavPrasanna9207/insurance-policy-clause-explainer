@@ -16,7 +16,7 @@ class FakeClause:
     clause_id: str
     waiting_periods_days: list[int] = field(default_factory=list)
     exceptions: list[str] = field(default_factory=list)
-    text: str = ""
+    text: str = "Waiting period"  # a real one says so; see _WAITS
 
 
 def test_an_elapsed_waiting_period_is_served():
@@ -190,7 +190,9 @@ def test_a_served_or_unknown_period_does_not_repeat_its_exception():
 # body only to say which of two periods wins.
 PED = FakeClause("1#2", [1080], text=(
     "1. Pre-Existing Diseases - Code Excl 01 A. Expenses related to the treatment of a "
-    "pre-existing disease and its direct complications shall be excluded."))
+    "pre-existing disease and its direct complications shall be excluded. C. If the Insured "
+    "Person is continuously covered without any break, then waiting period for the same "
+    "would be reduced to the extent of prior coverage."))
 LISTED = FakeClause("2#2", [720], text=(
     "2. Specified disease / procedure waiting period - Code Excl 02 A. Expenses related to "
     "the treatment of the following listed conditions shall be excluded. C. If any of the "
@@ -301,12 +303,11 @@ def test_a_condition_settled_as_new_is_not_barred_by_the_pre_existing_period():
     assert "No waiting period blocks this claim" in block
 
 
-def test_only_a_new_condition_changes_the_line():
-    """A firm "yes" line was measured to make the model refuse under unrelated
-    clauses, so "yes" and "unknown" both keep the hedged line."""
-    for predates in ("yes", "unknown"):
-        block = render(evaluate([PED], days_held=730, condition_predates_policy=predates))
-        assert "Unless the description says" in block
+def test_an_unsettled_condition_keeps_the_hedged_line():
+    """M22: "unknown" is the model's call. (A "yes" on an unserved period gets
+    the firm line since M27; see the test below.)"""
+    block = render(evaluate([PED], days_held=730, condition_predates_policy="unknown"))
+    assert "Unless the description says" in block
 
 
 @dataclass
@@ -373,3 +374,64 @@ def test_a_run_of_definitions_is_not_a_waiting_period():
         "Specific Waiting Period means a period up to 36 months ..."))
     assert evaluate([definitions], days_held=20) == []
     assert evaluate([SPECIFIED], days_held=20) != []
+
+
+def test_a_table_row_of_days_is_not_a_waiting_period():
+    """HDFC's plan-comparison table: a row of post-hospitalisation cover
+    windows, typed waiting_period, would bar every claim for 180 days."""
+    row = HeadedClause("1.6#2", [180], heading="1.6 Post-Hospitalization", text=(
+        "1.6 Post-Hospitalization 180 days 180 days 180 days (India only) 60 days"))
+    assert evaluate([row], days_held=45) == []
+    assert evaluate([SPECIFIED], days_held=45) != []
+
+
+def test_ped_heads_a_pre_existing_period():
+    """HDFC heads an option "PED waiting period modification"; read as a bar
+    on everything, it refused every claim in the first three years."""
+    option = HeadedClause("2.12", [1080], heading="2.12 PED waiting period modification",
+                          text="2.12 PED waiting period modification On availing this option ...")
+    assert evaluate([option], days_held=45)[0].pre_existing
+
+
+@dataclass
+class SectionedClause(HeadedClause):
+    section_path: str = ""
+
+
+def test_a_period_under_a_benefit_bars_only_that_benefit():
+    """HDFC: 36 months for planned treatment abroad, under an optional cover in
+    Section B, was read as "blocks" and refused an accident on day 10."""
+    benefit = SectionedClause("2.10#2", [1080], text="only for planned hospitalization ... waiting periods",
+                              section_path="SECTION B. BENEFITS")
+    general = SectionedClause("3.1", [30], text="Initial Waiting Period",
+                              section_path="SECTION 3 - WAITING PERIODS")
+    assert evaluate([benefit], days_held=10)[0].listed
+    assert not evaluate([general], days_held=10)[0].listed
+
+
+def test_a_clause_headed_as_a_waiting_period_reads_its_own_months():
+    """HDFC's specified-disease clause came back from analysis with no period,
+    so a hernia 14 months in was told no waiting period applied."""
+    specified = HeadedClause("Excl02", [], heading="b. Specified Disease/Procedure waiting period",
+                             text="excluded until the expiry of 24 months of continuous coverage")
+    unheaded = HeadedClause("1.6", [], heading="1.6 Post-Hospitalization",
+                            text="incurred upto 180 days immediately post the date of discharge")
+    assert evaluate([specified], days_held=420)[0].required_days == [720]
+    assert evaluate([unheaded], days_held=420) == []
+
+
+def test_an_unserved_period_for_a_condition_settled_as_old_blocks_firmly():
+    """Diabetes for six years, policy held one: the hedged line was paid 3 in 3."""
+    line = render(evaluate([PED], days_held=365, condition_predates_policy="yes"))
+    assert "still applies and blocks this claim" in line
+    served = render(evaluate([PED], days_held=1200, condition_predates_policy="yes"))
+    assert "still applies" not in served
+
+
+def test_only_the_list_is_quoted_when_the_clause_names_one():
+    """HDFC's whole clause, conditions and all, drowned the 30-day line beside it."""
+    clause = HeadedClause("Excl02", [720], heading="b. Specified Disease/Procedure waiting period",
+                          text="i. Expenses ... excluded until 24 months. vi. List of specific "
+                               "diseases/procedures is provided below: Hernia, Cataract")
+    listing = evaluate([clause], days_held=20)[0].listing
+    assert listing.startswith("List of specific") and "excluded until" not in listing

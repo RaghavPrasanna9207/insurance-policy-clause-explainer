@@ -186,6 +186,14 @@ def test_prose_starting_with_a_number_is_not_a_clause():
     assert _numbering("24 Months waiting period") is None
     assert _numbering("The Company shall indemnify") is None
 
+    # A lettered item is a clause only when titled with an IRDAI exclusion
+    # code (HDFC), and the code is its id; a roman sub-item or a code
+    # trailing a sentence is not.
+    assert _numbering("a. Pre-Existing Diseases: Code – Excl01") == ("Excl01", True)
+    assert _numbering("a. Investigation & Evaluation: Code Excl04") == ("Excl04", True)
+    assert _numbering("i. Expenses related to the treatment of a pre-existing disease") is None
+    assert _numbering("i. Treatment for Alcoholism ... thereof. Code – Excl12") is None
+
 
 def _document(rows: list[tuple[str, float, float, bool]]) -> "IngestResult":
     """An ingested page built by hand from (text, x, y, bold) rows, all at body size.
