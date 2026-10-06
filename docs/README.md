@@ -302,6 +302,12 @@ Star's definitions page, cut into pieces for length, left one piece typed as a 3
 
 - **Failure 87: the score fell, and the change was kept** - Star 9/10 → 8/10 verdicts: the treatment-abroad answer had been right only because of the false line. A verdict is only as good as the clause it rests on.
 
+### M25 - Treatment outside India
+"Hospitalised ... on holiday in Dubai" was never connected with Star's two-line exclusion of treatment outside India. A word lookup on the question now names the clause, in a firm line when only a place abroad is named and a soft one when India is named too. Questions about place 4/8 → 7/8; Star 9/10.
+
+- **Failure 88: a hedged line changed nothing** - "if outside India, read this clause as deciding" lost to the firm lines around it; opening with the fact worked, but refused a claim treated in Chennai until the soft fallback.
+- **The fallback, and keeping the test honest** - why the Chennai trap stopped counting once the fix was designed around it, and the three fresh questions written before the fallback's code.
+
 ---
 
 ## Related documents

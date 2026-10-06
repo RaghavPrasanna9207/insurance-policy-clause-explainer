@@ -1155,3 +1155,36 @@ def test_a_before_that_names_no_illness_settles_nothing():
     assert not stated_not_pre_existing("I have had diabetes for years and was hospitalised 8 months after buying this policy.")
     assert not stated_not_pre_existing("I was admitted with a fever.")
     assert not stated_not_pre_existing("I have had high blood pressure since before I bought the policy.")
+
+
+# --- M25: treatment outside India, read from the words --------------------
+
+ABROAD_TEXT = "22. Treatment taken outside the geographical limits of India"
+
+
+def test_a_place_abroad_names_the_clause_excluding_treatment_outside_india():
+    """M25: pneumonia "on holiday in Dubai" was never connected with Star's
+    two-line exclusion, 3 samples of 3."""
+    clauses = _policy(HOSPITAL_TEXT, ABROAD_TEXT)
+    prompt = _computed_prompt("I was hospitalised with pneumonia while on holiday in Dubai.", clauses)
+    assert "OUTSIDE INDIA" in prompt and "clause 22" in prompt
+
+
+def test_the_abroad_line_is_silent_for_a_place_in_india_or_a_foreign_body():
+    clauses = _policy(HOSPITAL_TEXT, ABROAD_TEXT)
+    for question in (
+        "I was admitted in Mumbai with typhoid while travelling for work.",
+        "I had a foreign body removed from my eye.",
+        "Will the policy pay for us to stay two nights?",
+    ):
+        assert "OUTSIDE INDIA" not in _computed_prompt(question, clauses)
+
+
+def test_the_abroad_line_stays_soft_when_the_question_also_names_india():
+    """The firm line refused "fell ill on a trip to Thailand, flew home, and was
+    admitted ... in Chennai", 3 samples of 3: a valid claim refused."""
+    clauses = _policy(HOSPITAL_TEXT, ABROAD_TEXT)
+    firm = _computed_prompt("I was admitted to a hospital in Singapore.", clauses)
+    soft = _computed_prompt("I fell ill in Thailand, flew home, and was admitted in Chennai.", clauses)
+    assert "refuses this claim" in firm and "refuses this claim" not in soft
+    assert "Decide from the description WHERE" in soft

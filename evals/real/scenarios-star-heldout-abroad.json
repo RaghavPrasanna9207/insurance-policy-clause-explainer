@@ -1,0 +1,92 @@
+{
+  "_why": [
+    "HELD-OUT questions on Star Health's Arogya Sanjeevani, about where treatment happened.",
+    "Never used to choose or tune a change.",
+    "",
+    "Written for M25, before any code for it existed and before any run of these cases.",
+    "M25 points the model at the policy's 'outside India' exclusion when the person's",
+    "words mention a place or travel abroad. The case that prompted it",
+    "(`star-treatment-abroad`, pneumonia in Dubai) has been read, so these say the same",
+    "kind of thing in other words, and add two traps the change must not fall into:",
+    "travel abroad where the treatment itself happened in India.",
+    "",
+    "Same conventions as scenarios-star-arogya-sanjeevani.json: a payable claim is",
+    "`conditional` because of the 5% co-payment on every claim, and must_cite never",
+    "names that co-payment. Same author as the fix, so not fully independent.",
+    "",
+    "`star-ho-ill-in-thailand-treated-chennai` is NO LONGER CLEAN: a first firm line",
+    "refused it, and the fallback for questions that also name a place in India was",
+    "built after reading that failure. The three cases below were added then, before",
+    "the fallback's code: two more traps, and one that measures the fallback's cost",
+    "(treated abroad, but the question also mentions India)."
+  ],
+  "cases": [
+    {
+      "id": "star-ho-heart-attack-singapore",
+      "scenario": "I had a heart attack while visiting my son in Singapore and was admitted to a hospital there for five days. I have held this policy for five years.",
+      "expected_verdict": "not_covered",
+      "must_cite": [
+        "22"
+      ],
+      "why": "The treatment was taken in Singapore, outside the geographical limits of India (exclusion 22). Five years serves every waiting period, so the place of treatment is what decides it."
+    },
+    {
+      "id": "star-ho-knee-surgery-london",
+      "scenario": "I am planning to have my knee replacement done at a hospital in London next month. I have held the policy for four years.",
+      "expected_verdict": "not_covered",
+      "must_cite": [
+        "22"
+      ],
+      "why": "Planned treatment in London is outside India (exclusion 22). Joint replacement's 36-month specified disease wait is served at four years, so it is not the reason."
+    },
+    {
+      "id": "star-ho-typhoid-mumbai",
+      "scenario": "I was admitted to hospital in Mumbai with typhoid for four days while travelling for work. I have held this policy for three years.",
+      "expected_verdict": "conditional",
+      "must_cite": [],
+      "must_not_cite": [
+        "22"
+      ],
+      "why": "Mumbai is in India, so the exclusion of treatment abroad does not apply. Three years serves every waiting period, and the 5% co-payment makes a payable claim conditional."
+    },
+    {
+      "id": "star-ho-ill-in-thailand-treated-chennai",
+      "scenario": "I fell ill on a trip to Thailand, flew home, and was admitted to a hospital in Chennai for three days with a severe chest infection. I have held this policy for three years.",
+      "expected_verdict": "conditional",
+      "must_cite": [],
+      "must_not_cite": [
+        "22"
+      ],
+      "why": "The illness began abroad but the treatment was taken in Chennai, inside India; exclusion 22 is about where treatment is taken. Three years serves every waiting period, and the 5% co-payment makes it conditional."
+    },
+    {
+      "id": "star-ho-dubai-trip-treated-kochi",
+      "scenario": "I came back from a work trip to Dubai with a high fever and was admitted to a hospital in Kochi for four days. I have held this policy for three years.",
+      "expected_verdict": "conditional",
+      "must_cite": [],
+      "must_not_cite": [
+        "22"
+      ],
+      "why": "The treatment was in Kochi, inside India; the trip to Dubai only came before it. Three years serves every waiting period, and the 5% co-payment makes it conditional."
+    },
+    {
+      "id": "star-ho-bali-holiday-treated-nashik",
+      "scenario": "After returning from a holiday in Bali, I developed dengue and was hospitalised in Nashik for five days. I have held this policy for four years.",
+      "expected_verdict": "conditional",
+      "must_cite": [],
+      "must_not_cite": [
+        "22"
+      ],
+      "why": "Treated in Nashik, inside India. Four years serves every waiting period, and the 5% co-payment makes it conditional."
+    },
+    {
+      "id": "star-ho-flew-from-india-treated-toronto",
+      "scenario": "I flew from India to visit my brother in Toronto and was admitted to a hospital there with pneumonia. I have held this policy for three years.",
+      "expected_verdict": "not_covered",
+      "must_cite": [
+        "22"
+      ],
+      "why": "The treatment was in Toronto, outside India (exclusion 22). The mention of India is where the trip began, not where the treatment was."
+    }
+  ]
+}
