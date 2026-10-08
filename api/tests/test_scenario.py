@@ -1188,3 +1188,16 @@ def test_the_abroad_line_stays_soft_when_the_question_also_names_india():
     soft = _computed_prompt("I fell ill in Thailand, flew home, and was admitted in Chennai.", clauses)
     assert "refuses this claim" in firm and "refuses this claim" not in soft
     assert "Decide from the description WHERE" in soft
+
+
+# --- M30: ligatures, matched as letters --------------------------------------
+
+
+def test_a_ligature_in_the_policy_does_not_hide_a_named_word():
+    """Star and Niva set "fi" as one character (U+FB01). The word lookups keep
+    runs of a-z, so "ﬁstula" was "stula" to them and never met "fistula"."""
+    from app.pipeline.scenario import named_in_question
+
+    clauses = [_clause("3", 50, "Treatment of ﬁstula in ano is excluded."), _clause("4", 50)]
+    assert named_in_question({"procedure": "fistula surgery"}, clauses) == {"3": ["fistula"]}
+

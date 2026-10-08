@@ -38,6 +38,7 @@ inspectable null that the reasoning prompt is then told about by name.
 
 import logging
 import re
+import unicodedata
 from collections import Counter
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -572,6 +573,11 @@ def _stems(text: str) -> dict[str, str]:
     Six letters, so "Ayurvedic" meets "Ayurveda" and "accreditation" meets
     "accredited", without a stemming library for one comparison.
     """
+    # NFKC: Star and Niva set "fi", "fl" and "ff" as one character each, so
+    # "ﬁstula" was "stula" here. Normalised for matching only, not at ingest:
+    # changing the text the model reads changed its analysis of four Star
+    # clauses and cost a verdict (M30).
+    text = unicodedata.normalize("NFKC", text)
     out: dict[str, str] = {}
     for word in re.findall(r"[a-z]{5,}", text.lower()):
         if word not in _FUNCTION_WORDS:

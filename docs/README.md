@@ -325,6 +325,10 @@ HDFC still paid an illness inside its 30-day wait although the line said it "sti
 Analysis never recorded clause 1.6's window, so expenses months after discharge got no computed line. A window stated in figures is now read off a coverage clause's own words (never off the options that change it for one plan). Fresh 200-day scan fixed; HDFC 11/14.
 - **Failure 92: a firm, correct line, and an invented co-payment** - the window line said "does NOT pay", and the model built a 20% co-payment out of a sentence saying there is none.
 
+### M30 - Cleanups, part 1: ligatures in the word lookups
+The word lookups that put "the clause naming your treatment" in the prompt read "ﬁstula" as "stula". Normalised where the matching happens; 0 of 17 Star requests change, so no score moves. Also: Ollama pinned back to 0.35.1.
+- **Failure 93: the right normalisation at the wrong layer** - normalising at ingest also changed what the model reads; four Star clauses were re-analysed differently, a room-rent cap vanished, and a verdict was lost.
+
 ---
 
 ## Related documents

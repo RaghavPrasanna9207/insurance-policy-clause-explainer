@@ -12549,3 +12549,141 @@ refuse claims between 61 and 180 days after discharge on every other plan.
 The test `test_a_window_stated_in_figures_is_read_off_a_coverage_clause`
 pins it.
 </details>
+
+---
+
+# M30 — Cleanups, part 1: ligatures in the word lookups
+
+## The problem
+
+Some PDFs store "fi", "fl" and "ff" as one character each (a *ligature*;
+Concept 54 explains them from scratch). M23 found that Star's "Speciﬁed
+disease" clause never matched the pattern `specified`, and fixed it with
+Unicode NFKC normalisation inside the waiting-period check
+(`api/app/pipeline/waiting.py`). That left every other piece of code that
+pattern-matches policy text unprotected.
+
+The one that matters is the word lookup in `api/app/pipeline/scenario.py`.
+`named_in_question` and `shared_words` find clauses that use an unusual word
+from the person's question ("hernia", "caesarean") and make sure those
+clauses are in the prompt. Both build their word lists with `_stems`:
+
+```python
+for word in re.findall(r"[a-z]{5,}", text.lower()):
+```
+
+`[a-z]` keeps runs of plain letters only, and U+FB01 is not one of them. So
+"ﬁstula" splits into "stula", and a question about fistula surgery never
+meets the clause that names it.
+
+## Measured before choosing where to fix it
+
+Counting the characters NFKC would change, on every PDF the evals use:
+
+| PDF | changed characters |
+|---|---|
+| the three synthetic policies | 0 |
+| HDFC Optima Secure | 0 |
+| Niva ReAssure 2.0 | 119 (fi, fl, ff) |
+| Star Arogya Sanjeevani | 100 (fi, fl, no-break space) |
+
+So no fix can change a synthetic or HDFC answer. Only Star has eval
+questions among the two affected policies.
+
+## Failure 93: the right normalisation at the wrong layer
+
+The obvious root-cause fix was to normalise once, where text enters the
+system: in `ingest.py`, before character offsets are assigned, so the rule
+`raw_text[line.char_start:line.char_end] == line.text` still holds. One
+change, and no lookup anywhere would ever need to remember ligatures again.
+Segmentation was checked first and came out identical on all six PDFs (same
+clause count, numbers and headings).
+
+Then Star was measured, majority of three samples, against `main`:
+
+| Star | main | ingest fix |
+|---|---|---|
+| verdicts right | 9/10 | 8/10 |
+| caesarean | right 3/3 | wrong 2/3 |
+| dengue cites its waiting period 3#2 | 0/3 | 3/3 |
+
+Comparing the stored clause analyses explained it. Normalising at ingest
+changes the text **the model reads**, not just the text the code matches.
+Every Star clause containing a ligature became a new prompt and was analysed
+afresh, and four of 79 came back different. The costly one was the Table of
+Benefits row capping room rent at "2% of the Sum Insured subject to maximum
+of Rs.5000/- per day". On `main` it is a `sub_limit` with both caps. After
+the change it is `coverage` with no caps at all.
+
+That is not a bug in normalisation. It is a 7B model answering a slightly
+different input slightly differently, which is what such models do. But the
+lesson is general: **a change to shared input reaches every consumer of that
+input, including the model.** The cleanup was meant for the code's lookups.
+Fixing it upstream also re-rolled the model's reading of 38 clauses, and that
+was a much larger change than intended. Reverted.
+
+## The fix
+
+Normalise where the matching happens, and nowhere else:
+
+```python
+# api/app/pipeline/scenario.py, in _stems
+text = unicodedata.normalize("NFKC", text)
+out: dict[str, str] = {}
+for word in re.findall(r"[a-z]{5,}", text.lower()):
+```
+
+The other three patterns that read clause text were checked and left alone:
+"outside India" / "geographical limits", "rateable / contribution / other
+policy", and "Annexure N". None of them contains an f-ligature pair, so a
+ligature cannot hide them. Normalising there would protect against nothing
+seen.
+
+The test, `test_a_ligature_in_the_policy_does_not_hide_a_named_word` in
+`api/tests/test_scenario.py`, puts "ﬁstula" in a clause and asks about
+fistula surgery. It fails without the line above and passes with it.
+
+## Measuring
+
+The model's input must now be byte-identical to `main`'s. That is
+checkable without reading any answer: the cache key is a hash of the exact
+request, so an unchanged request replays and a changed one calls the model.
+Running both Star sets on the branch made **0 fresh model calls** for sample
+1 (17 questions). Nothing the eval sends changed, so no score can move.
+
+What it buys is the next real policy. A question naming a treatment that the
+policy prints with a ligature will now find its clause.
+
+## An environment change found on the way
+
+Ollama had updated itself from 0.35.1 to 0.40.0. Because the runtime version
+is part of every cache key (see Failure 70), none of the stored answers
+applied any more, and every recorded score was from a version that was no
+longer running. The decision was to finish the project on 0.35.1 rather than
+re-measure everything. Ollama 0.35.1 now runs from the standalone Windows
+build (`ollama-windows-amd64.zip` from the v0.35.1 GitHub release), which
+cannot update itself, with the same `OLLAMA_FLASH_ATTENTION=1` and
+`OLLAMA_KV_CACHE_TYPE=q8_0`. Re-running Star on `main` under it reproduced
+the recorded results exactly (9/10, the same two citation misses).
+
+## Check it yourself
+
+```bash
+cd api
+.venv/Scripts/python -m pytest tests/test_scenario.py -q -k ligature
+curl -s localhost:11434/api/version     # must say 0.35.1
+```
+
+**Predict before you look:** the grounding check (`app/grounding.py`) also
+compares model text with policy text, and it already normalises with NFKC.
+Why can it normalise both sides freely, when normalising at ingest broke
+things?
+
+<details>
+<summary>Answer</summary>
+
+The grounding check normalises only its own copies, for one comparison, and
+throws them away. Nothing it does reaches a prompt. Normalising at ingest
+replaced the stored text itself, and the stored text is what the model is
+shown. Where the change is made decides who sees it.
+</details>
