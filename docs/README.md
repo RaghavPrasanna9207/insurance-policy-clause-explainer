@@ -329,6 +329,10 @@ Analysis never recorded clause 1.6's window, so expenses months after discharge 
 The word lookups that put "the clause naming your treatment" in the prompt read "ﬁstula" as "stula". Normalised where the matching happens; 0 of 17 Star requests change, so no score moves. Also: Ollama pinned back to 0.35.1.
 - **Failure 93: the right normalisation at the wrong layer** - normalising at ingest also changed what the model reads; four Star clauses were re-analysed differently, a room-rent cap vanished, and a verdict was lost.
 
+### M30 - Cleanups, part 2: HDFC's annexures, found inside "Contact Us"
+The "unanalysed ombudsman clause" was HDFC's three annexures segmented as pieces of "Contact Us"; the model looped copying the 68 non-payable items. Bold "Annexure X" lines now start a section (bold separates headings from mentions on six PDFs). Synthetic and Star unchanged; HDFC re-rolled and measured, 11/14 to 12/14.
+- **Why doubling the token limit cannot fix a loop** - a long answer needs room; a repeating one fills any room.
+
 ---
 
 ## Related documents

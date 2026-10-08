@@ -120,6 +120,14 @@ _RE_SECTION_HEAD = re.compile(
     r"^(?:SECTION|PART|CHAPTER|SCHEDULE|ANNEXURE)\s+[\dIVXL]+\b"
 )
 
+# An annexure heading in body-size type, which the styled and capitalised
+# rules both miss: HDFC's "Annexure B- Items for which Coverage is not
+# available" ran on under "2. Contact Us", and the analysis model looped on
+# it. Bold is the signal. On six PDFs every heading of this shape was bold and
+# every mention of an annexure in running text ("Annexure B to this Policy
+# incurred ...") was not.
+_RE_ANNEXURE_HEAD = re.compile(r"^annexure[\s-]+(?:[a-z]|[ivxl]+|\d+)\b", re.I)
+
 # Section names that recur across IRDAI health policies. A secondary signal for
 # policies whose headings carry neither styling nor a "SECTION n" prefix.
 _SECTION_WORDS = (
@@ -220,6 +228,8 @@ def _despaced(text: str) -> str:
 def _looks_like_section(line: Line, body_size: float) -> bool:
     """A section heading: big and bold, or an unmistakable named heading."""
     if line.size >= body_size * SECTION_SIZE_RATIO and line.bold:
+        return True
+    if line.bold and _RE_ANNEXURE_HEAD.match(line.text.strip()):
         return True
     # Fallbacks for unstyled documents. Length-capped so a shouty sentence in
     # the body cannot masquerade as a heading.

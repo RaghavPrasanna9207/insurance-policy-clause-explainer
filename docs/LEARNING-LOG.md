@@ -12687,3 +12687,172 @@ throws them away. Nothing it does reaches a prompt. Normalising at ingest
 replaced the stored text itself, and the stored text is what the model is
 shown. Where the change is made decides who sees it.
 </details>
+
+---
+
+# M30 — Cleanups, part 2: HDFC's annexures, found inside "Contact Us"
+
+## The problem
+
+M27 recorded that one HDFC clause, the insurance ombudsman's address list,
+"made the model's answer run past its token limit three times" during
+analysis, and left it unanalysed because an address list decides no claim.
+
+Looking at that clause properly showed the note had the cause wrong. The
+clause was the third length-split piece of `2. Contact Us`, and it did start
+with ombudsman addresses. But 573 characters in, it ran straight into:
+
+```
+Annexure B- Items for which Coverage is not available in the Policy (Non-Medical Expenses)
+S. NO. ITEM
+1
+BABY FOOD
+...
+68
+VASOFIX SAFETY
+```
+
+followed by the start of the plan chart (Annexure C). HDFC's three annexures
+(A, the ombudsman list; B, 68 non-payable items; C, the plan chart) had all
+been segmented as continuation pieces of "Contact Us".
+
+Sending the piece to the model once, alone, showed what happened. It typed
+the clause `exclusion` and began copying the items into its `exceptions`
+array. Then it repeated the same ten items over and over until it hit its
+output limit:
+
+```
+"BIRTH CERTIFICATE", "CERTIFICATE CHARGES", "COURIER CHARGES", ...,
+"WALKING AIDS CHARGES", "NEBULISATION KIT", "ATTENDANT CHARGES",
+"ANY KIT WITH NO DETAILS MENTIONED", "BIRTH CERTIFICATE", ...
+```
+
+This is why the client's retry was useless here. On a truncated answer it
+doubles `num_predict` (1,600, then 3,200, then 6,400 tokens), which is right
+when an answer is merely long. A model stuck in a loop fills any limit. (The
+stored analysis on `main` shows a later attempt did eventually get through,
+so the "unanalysed" note was also out of date. The segmentation defect
+underneath it was not.)
+
+## Why the segmenter missed the headings
+
+`api/app/pipeline/segment.py` starts a new section on a line that is either
+larger than body text and bold, or all capitals and shaped like a section
+heading:
+
+```python
+_RE_SECTION_HEAD = re.compile(
+    r"^(?:SECTION|PART|CHAPTER|SCHEDULE|ANNEXURE)\s+[\dIVXL]+\b"
+)
+```
+
+HDFC's headings fail all three tests. They are body-size type (11.04pt, the
+same as the text), in mixed case ("Annexure"), and labelled with letters
+(A, B, C) where the pattern accepts only digits and roman numerals.
+
+## Measured before writing the rule
+
+Every line starting with "Annexure", across all six PDFs the evals use:
+
+| PDF | page | bold | line |
+|---|---|---|---|
+| HDFC | 0 | no | Annexure A / B / C (contents page) |
+| HDFC | 15 | no | Annexure B to this Policy incurred in relation to a claim ... |
+| HDFC | 31 | no | ANNEXURE B and also available at www.hdfcergo.com. |
+| HDFC | 45 | **yes** | Annexure A |
+| HDFC | 48 | **yes** | Annexure B- Items for which Coverage is not available ... |
+| HDFC | 49 | **yes** | Annexure C - Plan Chart: |
+| Niva | 19 | **yes** | Annexure I - The expenses that are not covered ... |
+| Niva | 21 | **yes** | Annexure II - List of Insurance Ombudsmen |
+| Star | 8 | no | Annexure-A. The list of expenses that are |
+
+Every real heading is bold. Every mention inside running text is not. Weight
+separates them perfectly, and the wording alone could not: "Annexure B to
+this Policy" starts exactly like "Annexure B- Items".
+
+## The fix
+
+```python
+# api/app/pipeline/segment.py
+_RE_ANNEXURE_HEAD = re.compile(r"^annexure[\s-]+(?:[a-z]|[ivxl]+|\d+)\b", re.I)
+
+def _looks_like_section(line: Line, body_size: float) -> bool:
+    if line.size >= body_size * SECTION_SIZE_RATIO and line.bold:
+        return True
+    if line.bold and _RE_ANNEXURE_HEAD.match(line.text.strip()):
+        return True
+    ...
+```
+
+Comparing segmentation before and after on all six PDFs:
+
+- **Synthetic (×3) and Star: byte-identical.** None of their eval requests
+  can change.
+- **HDFC:** "Contact Us" drops from 2,985 characters to 664. Annexure A
+  (two pieces), B (the 68 items, nothing else) and C become their own
+  sections. The 20 plan-chart rows after it ("1.1 Hospitalization ...")
+  were filed under "SECTION D. GENERAL TERMS AND CLAUSES" and are now under
+  "Annexure C - Plan Chart", which is what they are.
+- **Niva:** "List IV" and the ombudsman list move out of clause 6.2.9
+  ("Assignment") into Annexures I and II. Niva has no eval questions.
+
+The test `test_a_bold_annexure_heading_starts_a_section_and_a_mention_does_not`
+in `api/tests/test_segment.py` rebuilds the HDFC arrangement line by line:
+a bold heading that must split, and a plain-type "Annexure B to this
+Policy" mention that must not.
+
+## The cost: a re-roll of HDFC, measured
+
+The analysis prompt identifies each clause by its position in the document
+(`### CLAUSE id=92`) and names its section. Splitting one clause into three
+moves every later clause's position by two, and the plan-chart rows changed
+section. So about 23 HDFC clauses were analysed afresh, the same kind of
+change that cost a verdict in part 1 (Failure 93). It had to be measured.
+
+The clause analyses that changed, matched on text since ids moved: five
+plan-chart rows. Two of them (1.5 and 1.6, the 60- and 180-day windows) came
+back with different `waiting_periods_days`. That cannot reach a waiting-
+period line: `waiting.py` drops any clause that never says "wait", the rule
+M27 added for exactly these rows. The other three are type flips on HDFC's
+optional benefits (2.3, 2.4, 2.5). All 115 clauses are now analysed; Annexure
+B is an `exclusion`.
+
+HDFC, majority of three, `main` against the branch:
+
+| HDFC | main | branch |
+|---|---|---|
+| verdicts right | 11/14 | 12/14 |
+| gastroenteritis-three-weeks | wrong 3/3 | right 3/3 |
+| typhoid-20-days | wrong 3/3 | wrong 2/3 |
+| malaria-25-days | right 3/3 | right 2/3 |
+| failed quotations per sample | 10-12 | 5-9 |
+
+No case got worse by majority. Every HDFC request changed (the clause ids
+moved), so this is honestly a re-roll, and one that came out ahead. The
+gain on gastroenteritis is not claimed as caused by the annexures. Which of
+the changed inputs moved it was not isolated, and with every request
+changed, nothing could isolate it. What the measurement does establish is
+that the correct segmentation costs nothing.
+
+## Check it yourself
+
+```bash
+cd api
+.venv/Scripts/python -m pytest tests/test_segment.py -q -k annexure_heading
+```
+
+**Predict before you look:** the client doubles `num_predict` when an answer
+is cut off mid-JSON. For which kind of over-long answer does that help, and
+for which is it wasted?
+
+<details>
+<summary>Answer</summary>
+
+It helps when the answer is simply long, for example a clause with many
+genuine exceptions: a bigger limit lets it finish. It is wasted on a
+repetition loop. A model repeating the same ten items has no end to reach,
+so it fills 1,600 tokens, then 3,200, then 6,400, and fails three times
+having spent the most time on the attempts that could never succeed. The
+cure for a loop is a better input (here, a clause that is one list rather
+than three unrelated things), not a larger limit.
+</details>

@@ -459,3 +459,24 @@ def test_merging_a_leadin_respects_the_size_cap(golden_pdf: Path):
     assert all(len(s.text) <= MAX_CLAUSE_CHARS for s in merged)
     for s in merged:
         assert raw[s.char_start : s.char_end] == s.text
+
+
+# M30: HDFC sets its annexures in bold body-size type, labelled with letters,
+# and the non-payable items list ran on under "2. Contact Us".
+_ANNEXURE_AFTER_A_CLAUSE = [
+    ("2. Contact Us", 43, 100, True),
+    ("Email: bimalokpal.thane@cioins.co.in", 43, 120, False),
+    ("Annexure B- Items for which Coverage is not available in the Policy (Non-Medical Expenses)", 43, 140, True),
+    ("BABY FOOD", 43, 160, False),
+    ("Annexure B to this Policy incurred in relation to a claim admissible under", 43, 180, False),
+]
+
+
+def test_a_bold_annexure_heading_starts_a_section_and_a_mention_does_not():
+    segments = segment(_document(_ANNEXURE_AFTER_A_CLAUSE))
+
+    assert "BABY FOOD" not in segments[0].text
+    annexure = [s for s in segments if "BABY FOOD" in s.text]
+    assert len(annexure) == 1 and annexure[0].section_path.startswith("Annexure B")
+    # The plain-type mention stays in the text it belongs to.
+    assert "Annexure B to this Policy" in annexure[0].text
