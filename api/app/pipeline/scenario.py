@@ -1339,6 +1339,28 @@ def find_contradictions(
                     f"included in this document, so anything that depends on what "
                     f"{listed} lists cannot be checked here."
                 )
+
+    # Paying, while the person holds another policy, without citing the clause
+    # about that. Until M33 nothing here read `computed.another_policy`: the
+    # line "clause 6.6 sets what happens when another policy covers the same
+    # claim" was a request with no check behind it. Held-out, typhoid three
+    # years in with an employer's group cover paying part: answered covered,
+    # citing only 2.1. Paying verdicts only - a refused claim has nothing to
+    # share between insurers. What the clause decides is left to the model: a
+    # "Contribution" clause pays a share, IRDAI's "Multiple Policies" lets the
+    # person choose. Nothing is dropped.
+    if verdict in (Verdict.COVERED, Verdict.CONDITIONAL) and computed.another_policy:
+        if not {c.clause_id for c in citations} & set(computed.another_policy):
+            named = " and ".join(computed.another_policy)
+            problems.append(
+                f"- You answered {verdict} without citing clause {named}. The person "
+                f"says another policy also covers this claim (looked up from their "
+                f"own words), and clause {named} sets what this policy pays when one "
+                f"does. Read clause {named} and put it in deciding_clauses with what "
+                f"it does to this claim. If it means this policy pays only part, the "
+                f"verdict is conditional, not covered. It refuses nothing by itself: "
+                f"do not answer not_covered because of it."
+            )
     return problems, irrelevant
 
 
