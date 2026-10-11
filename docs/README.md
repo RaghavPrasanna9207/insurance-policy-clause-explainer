@@ -339,6 +339,11 @@ The sequence check built its own, shorter prompts (no facts, no computed lines),
 ### M30 - Cleanups, part 4: "which questions did this change reach?" as one command
 `evals/compare_requests.py` lists the eval questions whose requests differ between two checkouts, without generating an answer. Replaces a throwaway script rewritten every milestone; checked against a known result (14 of 109, all HDFC). Also records why the larger "run trace" proposal was not built.
 
+### M31 - A line in the prompt is a request; a check in code is a rule
+Typhoid on day 20 was paid and physiotherapy at seven months half-paid, although the prompt stated the computed result for both. The consistency check never read an unserved waiting period or a cover window. Two rules added, each measured for false alarms on 109 stored answers before any model call. HDFC 12/14 to 14/14. **If you read one entry on why prompts alone are not enough, read this one.**
+- **Concept 55: precision before recall, when a check can do harm** - a rule that re-asks the model is judged first on the right answers it would disturb; one obvious rule caught 2 and disturbed 14.
+- **A correction to Failure 92** - the "invented" 20% co-payment is an example in the system prompt.
+
 ---
 
 ## Related documents
