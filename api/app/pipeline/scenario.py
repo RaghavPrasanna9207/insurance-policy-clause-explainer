@@ -1140,7 +1140,7 @@ _ADVERSE_EFFECTS = {"denies": "refused", "delays": "delayed", "reduces": "reduce
 
 
 def find_contradictions(
-    citations: list[Citation], verdict: str, computed: Computed
+    citations: list[Citation], verdict: str, computed: Computed, scenario: str = ""
 ) -> tuple[list[str], list[Citation]]:
     """Where the model's answer disagrees with what Python already worked out.
 
@@ -1221,7 +1221,38 @@ def find_contradictions(
                     f"cannot be covered."
                 )
 
-    denying = [c.clause_id for c in citations if c.effect == "denies"]
+    # Covered, inside a waiting period that bars every illness. Until M31 no
+    # branch here read a NOT_SERVED period: HDFC, typhoid on day 20, was told
+    # "Excl03 ... still applies and blocks", answered covered from the first
+    # line of the block (a wait for planned treatment abroad), and nothing
+    # asked it again. General periods only - a list-type or pre-existing one
+    # may not concern this claim, and its line says so. Whether the clause's
+    # own exception applies is language, so it is left to the model twice
+    # over: not asked when the answer cites the clause as permitting (it
+    # applied the exception - "hit by a car", citing 3.1), nor when the
+    # description uses the exception's words ("road accident").
+    # ponytail: an answer citing the clause as "permits" for an illness (HDFC
+    # malaria, day 25: "not an accident, therefore covered") is not caught;
+    # telling that from a real accident is language, not a lookup.
+    if verdict == Verdict.COVERED:
+        said = _stems(scenario).keys()
+        for check in computed.waiting:
+            if (check.status is not waiting.WaitingStatus.NOT_SERVED
+                    or check.listed or check.pre_existing):
+                continue
+            if check.exceptions and (
+                any(c.clause_id == check.clause_id and c.effect == "permits" for c in citations)
+                or any(_stems(e).keys() & said for e in check.exceptions)
+            ):
+                continue
+            problems.append(
+                f"- You answered covered, but it was calculated: {check.describe()}. "
+                f"Unless the description puts this claim within that clause's own "
+                f"exception, clause {check.clause_id} refuses it: the answer is "
+                f"not_covered, citing clause {check.clause_id}."
+            )
+
+    denying =[c.clause_id for c in citations if c.effect == "denies"]
     reducing = [c.clause_id for c in citations if c.effect == "reduces"]
     if denying and reducing and verdict != Verdict.NOT_COVERED:
         problems.append(
@@ -1445,7 +1476,7 @@ async def run_scenario(
     # 5e: consistency. The answer is checked against what Python already
     # worked out, and a contradiction gets one retry with the calculation in
     # front of the model - the same shape as the citation retry above.
-    problems, _ = find_contradictions(citations, verdict, computed)
+    problems, _ = find_contradictions(citations, verdict, computed, scenario)
     # Remembered before the retry, because the retry can drop the clause that
     # pointed to the missing list - and still not have answered the question.
     leaned_on_missing_list = verdict in (Verdict.COVERED, Verdict.CONDITIONAL) and any(

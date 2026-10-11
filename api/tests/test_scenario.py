@@ -1230,3 +1230,31 @@ def test_paying_for_an_expense_outside_its_window_is_a_contradiction():
     # The right refusal, and a payment inside the window, are left alone.
     assert find_contradictions([_citation("1.6", "denies")], "not_covered", computed(7)) == ([], [])
     assert find_contradictions([_citation("1.6", "permits")], "covered", computed(5)) == ([], [])
+
+
+def test_covered_inside_an_unserved_general_waiting_period_is_a_contradiction():
+    """`hdfc-typhoid-20-days`: told Excl03 still blocks, answered covered citing another clause."""
+    from app.pipeline.scenario import ShortlistClause, compute, find_contradictions
+
+    wait = ShortlistClause(
+        "3.1", "t:1", "3.1", "waiting_period",
+        "3.1 Initial Waiting Period Expenses related to the treatment of any illness within "
+        "30 days from the first policy commencement date shall be excluded except claims "
+        "arising due to an accident.", 1.0,
+        waiting_periods_days=[30], exceptions=["claims arising due to an accident"])
+    cover = ShortlistClause("2.1", "t:2", "2.1", "coverage", "2.1 In-patient cover.", 1.0)
+
+    def computed(days):
+        return compute({"time_since_policy_start_value": days,
+                        "time_since_policy_start_unit": "days"}, [cover, wait])
+
+    paid = [_citation("2.1", "permits")]
+    problems, irrelevant = find_contradictions(paid, "covered", computed(20), "Typhoid, day 20.")
+    assert len(problems) == 1 and "3.1" in problems[0] and "still applies" in problems[0]
+    assert irrelevant == []
+    # Served; time held unknown; a refusal; the exception applied; the exception's words used.
+    assert find_contradictions(paid, "covered", computed(45), "typhoid") == ([], [])
+    assert find_contradictions(paid, "covered", compute({}, [cover, wait]), "typhoid") == ([], [])
+    assert find_contradictions([_citation("3.1", "denies")], "not_covered", computed(20), "typhoid") == ([], [])
+    assert find_contradictions([_citation("3.1", "permits")], "covered", computed(10), "Hit by a car.") == ([], [])
+    assert find_contradictions(paid, "covered", computed(10), "Fractured my leg in a road accident.") == ([], [])
