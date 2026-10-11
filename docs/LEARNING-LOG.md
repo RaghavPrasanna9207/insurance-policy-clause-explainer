@@ -13332,3 +13332,167 @@ expense outside it is simply not paid under that clause, so any paying
 verdict contradicts it. A rule should be only as wide as the fact it
 enforces.
 </details>
+
+---
+
+# M32 — The right verdict for the wrong reason
+
+## The problem
+
+`star-dengue-first-month` asks: "I was admitted to hospital with dengue
+fever 20 days after buying this policy. I had no health insurance before
+it." Star's clause `3#2` bars illness claims in the first 30 days, so the
+answer is `not_covered`, citing 3#2.
+
+The verdict had been right since M16. Since M27 the citation was not. The
+stored answer:
+
+> verdict: not_covered — cites `1#2` (effect "delays")
+> "The claim for dengue fever is not covered because it falls under the
+> pre-existing disease exclusion. Clause 1#2 ... expenses related to the
+> treatment of a Pre-Existing Disease (PED) ... are excluded until the
+> expiry of 36 months ..."
+
+Nobody described a pre-existing disease. The extracted fact
+`pre_existing_condition` is `unknown`. And the prompt carried the computed
+line for the clause that does decide it:
+
+```
+- clause 3#2 (30-day waiting period - Code Excl 03): requires 1 month,
+  policy held 20 days -> this waiting period still applies and blocks
+  treatment covered by THIS clause, EXCEPT ... "claims arising due to an
+  accident". ...
+```
+
+**Why a right verdict with a wrong citation matters here.** This tool's
+promise is not "will it be paid" but "which words in your policy decide
+it". Someone told their dengue claim fails as a pre-existing disease will
+go and argue, correctly, that it was not pre-existing. The scorer counts
+this as a correct verdict; it is a wrong answer to the question the person
+actually has.
+
+HDFC's `hdfc-gastroenteritis-three-weeks` does the same thing: refused,
+3 of 3, under a list of specified diseases that does not name
+gastroenteritis, with the 30-day clause never cited.
+
+## The fix: the mirror of M31's rule
+
+M31 added a rule to `find_contradictions` (`api/app/pipeline/scenario.py`)
+for `covered` inside an unserved general waiting period. This is the same
+gap seen from the other verdict:
+
+```python
+if verdict == Verdict.NOT_COVERED:
+    said = _stems(scenario).keys()
+    cited = {c.clause_id for c in citations}
+    for check in computed.waiting:
+        if (check.status is not waiting.WaitingStatus.NOT_SERVED
+                or check.listed or check.pre_existing or check.clause_id in cited
+                or any(_stems(e).keys() & said for e in check.exceptions)):
+            continue
+        problems.append(
+            f"- You answered not_covered without citing clause {check.clause_id}, "
+            f"but it was calculated: {check.describe()}. ..."
+        )
+```
+
+Refused, a general period unserved, and that clause absent from the
+citations: ask once more. It is not asked when the question uses the
+exception's words, because a refused *accident* claim rests on some other
+clause. Nothing is dropped, and the wording allows a second clause to stay
+if it really refuses the claim.
+
+Following Concept 55 (M31), it was measured for false alarms before any
+model call. Run over the stored answers of all 109 questions with the model
+stubbed out, it asks something new for exactly two: the dengue and
+gastroenteritis cases. No other answer is touched.
+
+## Measured
+
+Every question with an unserved general waiting period (the only ones the
+rule can reach), majority of three, Ollama 0.35.1:
+
+| case | before | after |
+|---|---|---|
+| star-dengue-first-month | cites 1#2, never 3#2 (0/3) | cites 3#2, 3/3 |
+| hdfc-gastroenteritis-three-weeks | cites Excl02, never Excl03 (0/3) | cites Excl03, 3/3 |
+| hdfc-typhoid-20-days, hdfc-malaria-25-days | | verdicts unchanged |
+| both accident cases | covered | covered |
+
+Full runs afterwards: synthetic main set **37/40** (36 before; the
+`initial-waiting-period` case is now right), HDFC unchanged at 14/14 (its four
+reachable cases re-run), Star **8/10**.
+
+`initial-waiting-period` deserves a caution. One run after M31 had it wrong
+2 of 3. Three runs after this change had it right 9 of 9. This rule acts
+only on `not_covered` answers, so it cannot be what turned a `covered` into
+a refusal. The improvement is measured and not explained.
+
+## Failure 94: "unanimous, 3 of 3" was not a stable answer
+
+Star was 9/10 in the README, with the note that "all 10 questions gave the
+same verdict in all three samples". Today's full Star run came back 8/10:
+`star-caesarean` (a caesarean, which Star's maternity exclusion refuses)
+was `conditional` in 2 of 3.
+
+The new rule cannot reach that question; it has no unserved general
+waiting period. So the first thought was noise. It was checked instead of
+assumed, on the merged `main` and on this branch, two runs each: wrong 2 of
+3, four times out of four. Not noise in the usual sense: the fresh samples
+were wrong **every time**.
+
+Then what had changed since the 3/3 baseline three days earlier? Each
+candidate was ruled out by looking:
+
+| candidate | checked how | result |
+|---|---|---|
+| the request text | `compare_requests.py`, and sample 1 replays from cache | identical |
+| server settings | `server.log`: flash attention, KV cache type, layers on GPU, context | identical |
+| GPU driver | `nvidia-smi`, driver date | unchanged since January |
+| a reboot | last boot time | none; only the Ollama process was new |
+
+The only difference left was that the Ollama server had been started
+afresh. So the server was restarted once more and the question asked again.
+All fresh samples of this one question, with one unchanged request:
+
+| when | fresh samples right |
+|---|---|
+| 8 October (the recorded 3/3) | 2 of 2 |
+| 11 October, before the restart | 0 of 8 |
+| 11 October, after the restart | 1 of 4 |
+
+Three right out of fourteen. The case is unstable and usually wrong, and
+the recorded "unanimous" result was two lucky draws.
+
+**The lesson is about what three samples are.** Majority-of-three treats
+the samples as three independent opinions. They are not fully independent:
+they come from one server process, minutes apart, and here eight in a row
+agreed with each other and disagreed with the two from three days before.
+Agreement inside one run shows the answer is stable *in that run*. It does
+not show the answer is stable. A case should be called settled only when
+it agrees across runs made on different days or after a restart.
+
+This does not undo the method. Comparing changed requests, majority of
+three, is still far better than single runs. It bounds what "unanimous"
+can claim, and the README now says 8/10 with this case named.
+
+## Check it yourself
+
+```bash
+cd api
+.venv/Scripts/python -m pytest tests/test_scenario.py -q -k ignores_an_unserved
+```
+
+**Predict before you look:** the scorer marked the dengue answer correct
+for five milestones while it cited the wrong clause. Which number in the
+eval output would have shown the problem all along?
+
+<details>
+<summary>Answer</summary>
+
+Citation recall, and the "citation problems" list under it: "star-dengue-
+first-month: missing 3#2 in 3/3". Verdict accuracy cannot see a wrong
+reason; it only compares the verdict word. That is why the answer key
+carries `must_cite` as well as `expected_verdict`, and why the README
+reports "cites the clause that decides them" as its own row.
+</details>

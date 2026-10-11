@@ -1258,3 +1258,29 @@ def test_covered_inside_an_unserved_general_waiting_period_is_a_contradiction():
     assert find_contradictions([_citation("3.1", "denies")], "not_covered", computed(20), "typhoid") == ([], [])
     assert find_contradictions([_citation("3.1", "permits")], "covered", computed(10), "Hit by a car.") == ([], [])
     assert find_contradictions(paid, "covered", computed(10), "Fractured my leg in a road accident.") == ([], [])
+
+
+def test_a_refusal_that_ignores_an_unserved_general_waiting_period_is_asked_again():
+    """`star-dengue-first-month`: refused as a pre-existing disease nobody
+    described, with the 30-day clause that decides it never cited."""
+    from app.pipeline.scenario import ShortlistClause, compute, find_contradictions
+
+    wait = ShortlistClause(
+        "3", "t:1", "3", "waiting_period",
+        "3. 30-day waiting period Expenses related to the treatment of any illness within "
+        "30 days from the first policy commencement date shall be excluded except claims "
+        "arising due to an accident.", 1.0,
+        waiting_periods_days=[30], exceptions=["claims arising due to an accident"])
+    ped = ShortlistClause("1", "t:2", "1", "exclusion", "1. Pre-Existing Diseases.", 1.0)
+    computed = compute({"time_since_policy_start_value": 20,
+                        "time_since_policy_start_unit": "days"}, [ped, wait])
+
+    problems, irrelevant = find_contradictions(
+        [_citation("1", "delays")], "not_covered", computed, "Dengue fever on day 20.")
+    assert len(problems) == 1 and "without citing clause 3" in problems[0]
+    assert irrelevant == []
+    # Cited, whatever the effect; and an accident, which that clause does not refuse.
+    assert find_contradictions(
+        [_citation("3", "requires")], "not_covered", computed, "Dengue fever on day 20.") == ([], [])
+    assert find_contradictions(
+        [_citation("1", "denies")], "not_covered", computed, "Injured in a road accident.") == ([], [])
