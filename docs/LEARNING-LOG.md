@@ -13496,3 +13496,238 @@ reason; it only compares the verdict word. That is why the answer key
 carries `must_cite` as well as `expected_verdict`, and why the README
 reports "cites the clause that decides them" as its own row.
 </details>
+
+---
+
+# M33 — Three more candidates for the consistency check: two built, one refused
+
+## The problem
+
+M31 and M32 fixed three wrong answers the same way: the code had already
+worked out a result and written it into the prompt, the model ignored it,
+and a rule was added to `find_contradictions`
+(`api/app/pipeline/scenario.py`) so that such an answer is asked again
+once with the result in front of it. Three more known misses looked like
+candidates for the same treatment:
+
+1. **Star, a caesarean.** Star's clause 18 excludes maternity. Expected
+   `not_covered`. Unstable and usually wrong (`conditional`); Failure 94 in
+   M32 measured 3 right of 14 fresh samples.
+2. **Another policy also covers the claim.** Held-out batch 3, 0 of 3. The
+   contribution clause (6.6) was thought to be ignored in all three.
+3. **Thyroid and back trouble.** Held-out batch 4. Thought to be refused
+   under a waiting period for listed diseases that lists neither.
+
+Each was investigated separately, from stored answers, before any rule was
+written. The first lesson is how much of the description above was wrong.
+
+## What the investigations found
+
+**The three "contribution" cases are three different problems.**
+
+| case | what the stored answer does | cause |
+|---|---|---|
+| `ho3-group-cover-shares-bill` | `covered`, cites only 2.1 | the prompt line naming 6.6 has no check behind it |
+| `ho3-two-policies-appendix` | `not_covered`, cites the pre-existing bar | invents a pre-existing disease |
+| `ho3-switched-from-old-insurer` | `insufficient_information` | not a contribution case: the lookup correctly stays silent; fact extraction missed "Last year ... bought this policy", so the time held is unknown |
+
+A batch score of 0/3 had been read as one failure three times. Only the
+first is the gap a consistency rule can close.
+
+**Thyroid and back trouble are also two problems.** Thyroid is answered
+`conditional` ("will be paid after the waiting period is completed"),
+citing the listed-disease clause 3.3: the model applied the arithmetic and
+never compared thyroid with the list quoted in the same line. Back trouble
+has nothing to do with 3.3, which is served after two years; it is refused
+under the pre-existing bar, and its expected verdict is
+`insufficient_information`, not covered.
+
+**The caesarean is an exclusion read backwards.** The wrong answers are not
+in the cache (the stored first answer is right), so a few fresh ones were
+generated. One in full:
+
+> verdict: covered — cites 18 (permits)
+> "You are covered for the caesarean delivery. Clause 18 (18) explicitly
+> excludes 'Medical treatment expenses traceable to childbirth (including
+> complicated deliveries and caesarean sections incurred during
+> hospitalization) except ectopic pregnancy.' Since this exclusion does not
+> apply to caesarean sections, the claim is covered."
+
+It finds the right clause, quotes the words that name the claim, and
+concludes the opposite. What happens next explains why nothing caught it.
+Star takes a 5% co-payment from every claim, so `covered` triggers the
+existing "a reduction applies" retry. The retry request carries only the
+nudge, not the first answer, and the nudge talks only about the
+co-payment. The model answers:
+
+> "The claim is conditional because a 5% co-payment applies to every claim
+> this policy pays. The waiting periods and exclusions do not block this
+> claim ..."
+
+`conditional`, citing clause 9 as "reduces", is exactly what a correct
+answer to a payable Star claim looks like. No rule can tell it from one.
+The retry had laundered a wrong answer into a plausible one.
+
+## Rule 1, built: a paying answer that ignores the other-policy clause
+
+```python
+if verdict in (Verdict.COVERED, Verdict.CONDITIONAL) and computed.another_policy:
+    if not {c.clause_id for c in citations} & set(computed.another_policy):
+        problems.append(...)   # names the clause; "It refuses nothing by itself"
+```
+
+Paying verdicts only: a refused claim has nothing to share between
+insurers. Over the stored answers of all 109 questions it re-asks one, the
+group-cover case. Only 3 of the 109 mention a second policy at all, which
+is thin evidence, and is recorded as such.
+
+Measured, majority of three: `ho3-group-cover-shares-bill` covered →
+conditional citing 6.6, 3 of 3. Held-out 3 goes from 0/3 to 1/3, which is
+its ceiling for this kind of fix.
+
+## Rule 2, built: covered, citing an exclusion that names the treatment
+
+A new computed result, `Computed.excluding`: the exclusions that use an
+unusual word from the procedure or condition the person named (the existing
+`named_in_question` lookup), unless the description uses the words of the
+clause's own exception.
+
+```python
+if verdict == Verdict.COVERED:
+    timed = {c.clause_id for c in computed.waiting}
+    for clause_id in dict.fromkeys(c.clause_id for c in citations):
+        words = computed.excluding.get(clause_id)
+        if words and clause_id not in timed:
+            problems.append(
+                f"- You answered covered and cited clause {clause_id}. Clause "
+                f"{clause_id} is an EXCLUSION: everything it lists is NOT paid. ..."
+            )
+```
+
+It acts on the *first* answer, before the co-payment retry can launder it.
+Over the 109 stored answers it re-asks none (the stored caesarean answer is
+right). On fresh wrong samples the retry answered `not_covered` citing 18,
+4 of 4.
+
+## Failure 95: zero false alarms on stored answers, six of six on fresh ones
+
+The line `timed = ...` was not in the first version. That version passed
+every check that could be made without the model: no stored answer
+re-asked, tests green. Then it was measured live on the six questions whose
+precondition it meets, and `hdfc-medicines-five-months-after` (medicines
+five months after a kidney infection; expected `covered`) dropped from 3/3
+to 2/3. After a server restart, watching each sample:
+
+```
+-> covered [('Excl02', 'reduces')]
+RE-ASKED: ... You answered covered and cited clause Excl02. Clause Excl02 is an EXCLUSION ...
+-> not_covered [('Excl01', 'denies')]
+FINAL: insufficient_information
+```
+
+Six fresh samples of six. A correct answer, re-asked and refused.
+
+Two accidents met. `Excl02` is HDFC's specified-disease *waiting period*,
+which analysis typed `exclusion`. And "infection" is rare enough in that
+policy that the word lookup counted Excl02 as naming the person's
+condition. The model's fresh answer in that session happened to cite Excl02
+loosely as "reduces", which the stored answer did not.
+
+The fix is the `timed` line: a clause with a waiting-period check is
+decided by the waiting-period arithmetic, never by this rule. That is a
+reason, not a patch for one clause id. Re-measured on all six reachable
+questions in the restarted server session: 3/3 on every one. (The other
+five had also been 3/3 under the first version, in the session before.)
+A full Star run afterwards: 9 of 10 verdicts, 10 of 10 unanimous, 9 of 10
+citing the deciding clause.
+
+**What this teaches about Concept 55.** Replaying a rule over stored
+answers finds the false alarms those particular answers contain. It cannot
+find the ones a different sample would contain, and M32's Failure 94
+showed samples differ from one server session to the next. So the
+procedure has three steps, not two:
+
+1. replay over stored answers (free, catches the obvious);
+2. list every question whose *precondition* the rule meets, whatever its
+   stored answer (free);
+3. sample exactly those live, in more than one server session.
+
+Step 3 is what caught this. A rule's reach is defined by its precondition,
+not by what the last run happened to answer.
+
+## Rule 3, refused: a listed waiting period that does not name the condition
+
+The natural rule for thyroid: an answer citing a list-type waiting period
+adversely, when the code found no word of the person's condition in that
+clause, is asked again ("nothing you described is on that list"). Narrowed
+far enough, it catches thyroid with no false alarm on the 109.
+
+It was not built, because that zero is not evidence. The rule leans on the
+same word lookup, used the other way round: *no* shared word is taken to
+mean *not on the list*. That was tested directly, with conditions each
+policy's list really does bar, written in everyday words:
+
+| policy, clause | lookup connects | lookup misses, although the list bars it |
+|---|---|---|
+| synthetic 3.3 | 5 of 11 | removal of the uterus, new hip, tonsils removed, sinusitis ... |
+| synthetic 3.4 (maternity) | 3 of 6 | gave birth, caesarean, abortion |
+| Star 2#2 | 10 of 19 | kidney stones, gallstones, slipped disc, haemorrhoids ... |
+| HDFC Excl02 | 8 of 16 | kidney stones, gallstones, knee replacement, piles ... |
+
+26 of 52 missed. For any of them inside the wait, the rule would tell the
+model something false, and push a correct refusal toward `covered`: the one
+direction this product must not err in. The eval sets contain exactly one
+question of that kind (`maternity-too-early`), and it escapes the rule only
+because the model happened to label its citation "requires" and not
+"denies".
+
+A rule for the pre-existing pattern (back trouble, the appendix case) was
+measured too: 2 wrong answers caught, 2 correct refusals disturbed.
+Refused.
+
+The asymmetry between Rule 2 and Rule 3 is the point. Both use the same
+crude lookup. Rule 2 acts when a word *is* shared, and a false match costs
+a re-ask that leans toward refusing. Rule 3 would act when a word is *not*
+shared, and a false non-match leans toward paying. The same tool is safe in
+one direction and not in the other.
+
+To make Rule 3 buildable: first add eval questions for listed conditions in
+other words (kidney stones at 14 months, and so on), written before any
+run, then replay.
+
+## Left open
+
+- Clause 18's extracted exceptions are wrong. The prompt prints under it
+  "EXCEPTIONS - this clause does NOT apply when: due to an accident; lawful
+  medical termination of pregnancy during the Policy Period". Neither is an
+  exception to the maternity exclusion, and the real one, ectopic
+  pregnancy, is missing. This may be what invites "this exclusion does not
+  apply". Fixing it changes the clause analysis and reaches other cases, so
+  it is its own measured change.
+- A first answer of `conditional` on the caesarean would not be caught by
+  Rule 2.
+- `ho3-two-policies-appendix`, `ho3-switched-from-old-insurer`, thyroid and
+  back trouble are unchanged.
+
+## Check it yourself
+
+```bash
+cd api
+.venv/Scripts/python -m pytest tests/test_scenario.py -q -k "other_policy_clause or names_the_procedure"
+```
+
+**Predict before you look:** Rule 2 fires only on `covered`. The wrong
+caesarean answers the eval recorded were all `conditional`. How can a rule
+that never looks at `conditional` answers fix them?
+
+<details>
+<summary>Answer</summary>
+
+The `conditional` was never the model's first answer. Its first answer was
+`covered`; the existing co-payment retry then turned that into
+`conditional`. The rule adds its problem line to that same retry, so the
+one re-ask now says both "a co-payment applies" and "the clause you cited
+is an exclusion". Fixing an answer at the point where it first goes wrong
+is easier than recognising it after another step has made it look
+reasonable.
+</details>
