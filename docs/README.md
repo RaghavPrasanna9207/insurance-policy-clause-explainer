@@ -344,6 +344,10 @@ Typhoid on day 20 was paid and physiotherapy at seven months half-paid, although
 - **Concept 55: precision before recall, when a check can do harm** - a rule that re-asks the model is judged first on the right answers it would disturb; one obvious rule caught 2 and disturbed 14.
 - **A correction to Failure 92** - the "invented" 20% co-payment is an example in the system prompt.
 
+### M32 - The right verdict for the wrong reason
+Star refused a dengue claim on day 20 as a pre-existing disease nobody described, and never cited the 30-day clause that decides it. The mirror of M31's rule asks again when a refusal ignores an unserved general waiting period. Dengue and HDFC gastroenteritis now cite the deciding clause 3 of 3; main set 37/40.
+- **Failure 94: "unanimous, 3 of 3" was not a stable answer** - one Star question was right in every sample on one day and wrong in 11 of 12 three days later, with the request, settings and driver all unchanged. What three samples from one run can and cannot show.
+
 ---
 
 ## Related documents

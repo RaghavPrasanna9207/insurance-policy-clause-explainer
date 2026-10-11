@@ -1252,7 +1252,33 @@ def find_contradictions(
                 f"not_covered, citing clause {check.clause_id}."
             )
 
-    denying =[c.clause_id for c in citations if c.effect == "denies"]
+    # The mirror of the rule above: refused, inside a general waiting period
+    # the answer never mentions. The verdict is right and the reason is not.
+    # Star, dengue on day 20, was refused as a pre-existing disease nobody
+    # described; HDFC, gastroenteritis at three weeks, under a list of
+    # specified diseases that does not name it. Both were told the 30-day
+    # clause "still applies and blocks" and cited something else, so the
+    # person is shown the wrong clause to read. Not asked when the description
+    # uses the exception's words: a refusal of an accident claim rests on
+    # some other clause. Nothing is dropped; another clause may refuse it too.
+    if verdict == Verdict.NOT_COVERED:
+        said = _stems(scenario).keys()
+        cited = {c.clause_id for c in citations}
+        for check in computed.waiting:
+            if (check.status is not waiting.WaitingStatus.NOT_SERVED
+                    or check.listed or check.pre_existing or check.clause_id in cited
+                    or any(_stems(e).keys() & said for e in check.exceptions)):
+                continue
+            problems.append(
+                f"- You answered not_covered without citing clause {check.clause_id}, "
+                f"but it was calculated: {check.describe()}. Unless the description "
+                f"puts this claim within that clause's own exception, clause "
+                f"{check.clause_id} is a reason this claim is refused and must be in "
+                f"deciding_clauses. Cite another clause as well only if that clause "
+                f"refuses THIS claim on what the person actually described."
+            )
+
+    denying = [c.clause_id for c in citations if c.effect == "denies"]
     reducing = [c.clause_id for c in citations if c.effect == "reduces"]
     if denying and reducing and verdict != Verdict.NOT_COVERED:
         problems.append(
