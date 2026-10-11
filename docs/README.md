@@ -336,6 +336,9 @@ The "unanalysed ombudsman clause" was HDFC's three annexures segmented as pieces
 ### M30 - Cleanups, part 3: the determinism check now asks what the eval asks
 The sequence check built its own, shorter prompts (no facts, no computed lines), so it measured the stability of questions the eval never asks. It now calls `run_scenario`, the eval's own function. Proven by cache lookup: 0 of 16 requests matched the eval's before, 20 of 20 after. First real result: 2 of 8 cases differ between two passes.
 
+### M30 - Cleanups, part 4: "which questions did this change reach?" as one command
+`evals/compare_requests.py` lists the eval questions whose requests differ between two checkouts, without generating an answer. Replaces a throwaway script rewritten every milestone; checked against a known result (14 of 109, all HDFC). Also records why the larger "run trace" proposal was not built.
+
 ---
 
 ## Related documents

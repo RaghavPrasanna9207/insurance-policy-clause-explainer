@@ -12969,3 +12969,139 @@ what the eval scores for those cases, so their stability is part of the
 eval's stability. A check that skipped them was measuring the first draft of
 an answer the eval never used.
 </details>
+
+---
+
+# M30 — Cleanups, part 4: "which questions did this change reach?" as one command
+
+## The problem
+
+A 7B model does not answer the same prompt identically twice (part 3 of M30
+measured it: 2 of 8 questions change between two passes). So after a code
+change, re-running every eval question tells you little: real effects and
+noise arrive mixed together.
+
+The method this project has used since M18 avoids that. The answer cache is
+keyed on the exact request, so a question whose request did not change
+replays its stored answer and **cannot have moved**. Only the questions
+whose requests changed need re-measuring, three samples each. Every
+milestone since has reported a line like "6 of 78 requests change".
+
+Producing that line was a throwaway script each time, rewritten from memory,
+and twice in M30 alone. A measurement the whole method rests on should not
+depend on a script nobody kept.
+
+## What was considered and not built
+
+The architecture review before M19 proposed something larger under the
+name "run trace": have `run_scenario` return, with every answer, a record
+of which steps reached the model, which clauses were picked and the prompt
+sent. Its motive was a real wart. The eval decides whether an answer was
+fresh by reading a process-wide counter of model calls before and after:
+
+```python
+# evals/run_scenario_eval.py
+await extract_facts(case["scenario"])       # warms the cache, outside the count
+calls_before = client.model_calls
+result = await run_scenario(case["scenario"], clauses, resample=resample)
+fresh = client.model_calls > calls_before
+```
+
+That counter also counts the clause-picking call on long policies, so an
+answer can be called fresh when only its pick was regenerated.
+
+It was not built. The error runs one way only: it can call a replayed answer
+fresh, never a fresh one replayed, so it cannot hide a change. Fixing it
+means changing the function every answer passes through, for a tidier
+internal reading of something already known. The recurring cost was
+elsewhere, in the comparison between two versions of the code.
+
+## What was built
+
+`evals/compare_requests.py`, run from the repo root with a second checkout
+of the code to compare against:
+
+```bash
+git worktree add ../baseline main
+python evals/compare_requests.py ../baseline
+```
+
+For each checkout it runs every question in every case file through the
+real `run_scenario`, with the model call replaced by a spy:
+
+```python
+async def spy(messages, schema, **kwargs):
+    if schema is scenario.FACTS_SCHEMA:
+        stage = "facts"
+    elif "clause_ids" in schema.get("properties", {}):
+        stage = "pick"
+    else:
+        seen.setdefault("reason", _digest(messages, schema))
+        return {"verdict": "insufficient_information", "reasoning": "", "deciding_clauses": []}
+    seen.setdefault(stage, _digest(messages, schema))
+    return await real(messages, schema, **kwargs)
+```
+
+Three design points:
+
+- **The reasoning call never reaches the model.** Its request is hashed and
+  a stub answer is returned. The stub is `insufficient_information`
+  because that is the one verdict the pipeline accepts without citations,
+  so it triggers no retry.
+- **Facts and picks are real calls.** They have to be: the reasoning
+  request is built from their answers. Normally they replay from the cache.
+  If a change altered *their* request, the model is asked, and the report
+  prints how many calls that took.
+- **Each checkout runs in its own process.** Both contain a package called
+  `app`, and Python can hold only one module of a given name at a time.
+
+## Checked against a known answer
+
+The tool was first run on a comparison whose result was already known from
+the hand measurements in parts 1 and 2: the M30 branch against `main`.
+
+```
+evals/golden/scenarios.json: 0 of 40 cases changed
+evals/golden/scenarios-heldout.json: 0 of 16 cases changed
+evals/golden/scenarios-heldout-2.json: 0 of 13 cases changed
+evals/golden/scenarios-heldout-3.json: 0 of 3 cases changed
+evals/golden/scenarios-heldout-4.json: 0 of 6 cases changed
+evals/real/scenarios-star-arogya-sanjeevani.json: 0 of 10 cases changed
+evals/real/scenarios-star-heldout-abroad.json: 0 of 7 cases changed
+evals/real/scenarios-hdfc-optima-secure.json: 14 of 14 cases changed
+    hdfc-typhoid-45-days: pick, reason
+    ...
+14 of 109 cases send a different request.
+model calls made to work this out: baseline 0, this checkout 0
+```
+
+Twelve seconds, no model calls, and the same answer as by hand: the
+ligature fix changes nothing, and the annexure fix reaches every HDFC
+question and no other. It also says *how* HDFC changed: the fact requests
+are the same, and the pick and reasoning requests differ, which is what
+moving clause ids would do.
+
+## Check it yourself
+
+```bash
+cd api && .venv/Scripts/python -m pytest tests/test_eval_history.py -q -k request_comparison
+```
+
+**Predict before you look:** the tool reports only the *first* reasoning
+request of each case. Part 3 of M30 showed that some cases send a second
+one, a retry. Why can this tool not report retries, when the determinism
+check can?
+
+<details>
+<summary>Answer</summary>
+
+A retry is sent only when the first answer comes back without citations or
+contradicts a computed line, and its text includes a nudge that depends on
+what went wrong. So the retry request is a function of the model's answer.
+This tool never gets an answer: that is the point of it. The determinism
+check does call the model, so it sees the retries. The first request is
+nearly always enough, because the retry repeats it and adds the nudge. The
+one change this tool cannot see is a rewording of the nudge text itself
+(`CITATION_NUDGE`, `CONSISTENCY_NUDGE` in `scenario.py`): after one of
+those, re-measure every case that retries.
+</details>

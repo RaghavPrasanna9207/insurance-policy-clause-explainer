@@ -290,3 +290,20 @@ def test_a_forbidden_clause_counts_only_when_used_against_the_claim():
     assert relied_on([Citation("5.3", "q", "requires")], {"5.3"}) == []
     assert relied_on([Citation("5.3", "q", "reduces")], {"5.3"}) == ["5.3"]
     assert relied_on([Citation("2.1", "q", "denies")], {"5.3"}) == []
+
+
+def test_request_comparison_names_the_stage_that_changed(capsys):
+    """M30: a case counts as changed if any request it sends differs, and the
+    report says which - a changed fact request is a different change from a
+    changed reasoning request."""
+    from compare_requests import report
+
+    base = {"set.json": {"a": {"facts": "1", "reason": "2"}, "b": {"facts": "3", "reason": "4"}},
+            "_model_calls": 0}
+    new = {"set.json": {"a": {"facts": "1", "reason": "2"}, "b": {"facts": "3", "reason": "X"},
+                        "c": {"facts": "5", "reason": "6"}},
+           "_model_calls": 0}
+
+    assert report(base, new) == 1
+    out = capsys.readouterr().out
+    assert "1 of 3 cases changed, 1 new" in out and "b: reason" in out
