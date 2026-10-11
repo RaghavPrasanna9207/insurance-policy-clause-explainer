@@ -1034,6 +1034,29 @@ class Computed:
     another_policy: list[str] = field(default_factory=list)
     # Clauses excluding treatment outside India, when the person names a place abroad.
     abroad: list[str] = field(default_factory=list)
+    # Exclusion id -> the words of the described procedure or condition it uses.
+    excluding: dict[str, list[str]] = field(default_factory=dict)
+
+
+def naming_exclusions(
+    facts: dict[str, Any], clauses: list[ShortlistClause], scenario: str
+) -> dict[str, list[str]]:
+    """Exclusions that name what the person described, unless the description
+    uses the words of the clause's own exception.
+
+    Generic words do not count as using them: Star's maternity exclusion has
+    the extracted exception "... during the Policy Period", which met "I have
+    held the policy for five years" and would have switched the check off for
+    the one case it exists for.
+    """
+    said = _stems(scenario).keys() - _stems(" ".join(reduction._GENERIC_WORDS)).keys()
+    by_id = {c.clause_id: c for c in clauses}
+    return {
+        clause_id: words
+        for clause_id, words in named_in_question(facts, clauses).items()
+        if by_id[clause_id].clause_type == "exclusion"
+        and not any(_stems(e).keys() & said for e in by_id[clause_id].exceptions)
+    }
 
 
 def compute(
@@ -1064,6 +1087,7 @@ def compute(
         ),
         another_policy=another_policy_clauses(scenario, clauses),
         abroad=abroad_clauses(scenario, clauses),
+        excluding=naming_exclusions(facts, clauses, scenario),
     )
 
 
@@ -1278,6 +1302,36 @@ def find_contradictions(
                 f"refuses THIS claim on what the person actually described."
             )
 
+    # Covered, citing an exclusion that names the described treatment: the
+    # exclusion read backwards. Star, a caesarean: "Clause 18 explicitly
+    # excludes ... caesarean sections ... Since this exclusion does not apply
+    # to caesarean sections, the claim is covered." The co-payment line above
+    # was the only problem raised, and it moved the answer to conditional
+    # citing only clause 9 - which no rule can tell from a real Star answer.
+    # Not asked when the description uses the words of the clause's own
+    # exception (reconstructive surgery "after a burn"): whether an exception
+    # applies is language. Nothing is dropped.
+    #
+    # Never a clause with a waiting-period check. HDFC's specified-disease
+    # waiting period is typed `exclusion`, and "infection" in a question about
+    # medicines after a kidney infection matched it by accident: a correct
+    # covered, citing it loosely as "reduces", was re-asked and refused, six
+    # fresh samples of six. A period that ends is decided by the arithmetic
+    # above, not by this rule.
+    if verdict == Verdict.COVERED:
+        timed = {c.clause_id for c in computed.waiting}
+        for clause_id in dict.fromkeys(c.clause_id for c in citations):
+            words = computed.excluding.get(clause_id)
+            if words and clause_id not in timed:
+                problems.append(
+                    f"- You answered covered and cited clause {clause_id}. Clause "
+                    f"{clause_id} is an EXCLUSION: everything it lists is NOT paid. "
+                    f"It names what the person described ({', '.join(words)}). Unless "
+                    f"the description puts this claim within that clause's own "
+                    f"exception, clause {clause_id} refuses it: the answer is "
+                    f"not_covered, citing clause {clause_id} with effect denies."
+                )
+
     denying = [c.clause_id for c in citations if c.effect == "denies"]
     reducing = [c.clause_id for c in citations if c.effect == "reduces"]
     if denying and reducing and verdict != Verdict.NOT_COVERED:
@@ -1339,6 +1393,28 @@ def find_contradictions(
                     f"included in this document, so anything that depends on what "
                     f"{listed} lists cannot be checked here."
                 )
+
+    # Paying, while the person holds another policy, without citing the clause
+    # about that. Until M33 nothing here read `computed.another_policy`: the
+    # line "clause 6.6 sets what happens when another policy covers the same
+    # claim" was a request with no check behind it. Held-out, typhoid three
+    # years in with an employer's group cover paying part: answered covered,
+    # citing only 2.1. Paying verdicts only - a refused claim has nothing to
+    # share between insurers. What the clause decides is left to the model: a
+    # "Contribution" clause pays a share, IRDAI's "Multiple Policies" lets the
+    # person choose. Nothing is dropped.
+    if verdict in (Verdict.COVERED, Verdict.CONDITIONAL) and computed.another_policy:
+        if not {c.clause_id for c in citations} & set(computed.another_policy):
+            named = " and ".join(computed.another_policy)
+            problems.append(
+                f"- You answered {verdict} without citing clause {named}. The person "
+                f"says another policy also covers this claim (looked up from their "
+                f"own words), and clause {named} sets what this policy pays when one "
+                f"does. Read clause {named} and put it in deciding_clauses with what "
+                f"it does to this claim. If it means this policy pays only part, the "
+                f"verdict is conditional, not covered. It refuses nothing by itself: "
+                f"do not answer not_covered because of it."
+            )
     return problems, irrelevant
 
 

@@ -348,6 +348,11 @@ Typhoid on day 20 was paid and physiotherapy at seven months half-paid, although
 Star refused a dengue claim on day 20 as a pre-existing disease nobody described, and never cited the 30-day clause that decides it. The mirror of M31's rule asks again when a refusal ignores an unserved general waiting period. Dengue and HDFC gastroenteritis now cite the deciding clause 3 of 3; main set 37/40.
 - **Failure 94: "unanimous, 3 of 3" was not a stable answer** - one Star question was right in every sample on one day and wrong in 11 of 12 three days later, with the request, settings and driver all unchanged. What three samples from one run can and cannot show.
 
+### M33 - Three more candidates for the consistency check: two built, one refused
+A caesarean answered by reading the maternity exclusion backwards; a group cover's share ignored; thyroid delayed by a list that does not name it. Each investigated from stored answers first, which showed that two "groups" of failures were several unrelated ones. Star 9/10, held-out 3 1/3.
+- **Failure 95: zero false alarms on stored answers, six of six on fresh ones** - a rule that passed every model-free check refused a correct HDFC answer in a new server session. A rule's reach is its precondition, not what the last run answered; the three-step procedure that follows.
+- **Why one rule was refused** - the same word lookup is safe when a match triggers a re-ask toward refusing, and unsafe when a non-match would push toward paying: it misses 26 of 52 conditions the lists really bar.
+
 ---
 
 ## Related documents

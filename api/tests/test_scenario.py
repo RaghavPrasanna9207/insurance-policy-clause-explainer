@@ -1284,3 +1284,72 @@ def test_a_refusal_that_ignores_an_unserved_general_waiting_period_is_asked_agai
         [_citation("3", "requires")], "not_covered", computed, "Dengue fever on day 20.") == ([], [])
     assert find_contradictions(
         [_citation("1", "denies")], "not_covered", computed, "Injured in a road accident.") == ([], [])
+
+
+# --- M33: more computed results the consistency check reads ----------------
+
+
+def test_a_paying_answer_that_ignores_the_other_policy_clause_is_asked_again():
+    """`ho3-group-cover-shares-bill`: covered, citing only the cover clause,
+    with the line naming 6.6 in the prompt."""
+    from app.pipeline.scenario import compute, find_contradictions
+
+    clauses = _policy(HOSPITAL_TEXT, CONTRIBUTION_TEXT)
+    question = "My employer's group insurance paid part of the bill and I am claiming the rest here."
+    computed = compute({}, clauses, question)
+    assert computed.another_policy == ["6.6"]
+    for verdict in ("covered", "conditional"):
+        problems, irrelevant = find_contradictions(
+            [_citation("1.1", "permits")], verdict, computed, question)
+        assert len(problems) == 1 and "without citing clause 6.6" in problems[0]
+        assert irrelevant == []
+    # Cited, whatever the label; a refusal, which has nothing to share; a declined answer.
+    assert find_contradictions([_citation("6.6", "delays")], "conditional", computed, question) == ([], [])
+    assert find_contradictions([_citation("1.1", "denies")], "not_covered", computed, question) == ([], [])
+    assert find_contradictions([], "insufficient_information", computed, question) == ([], [])
+    # And nobody mentioning a second policy.
+    alone = "A three-day stay with typhoid."
+    assert find_contradictions(
+        [_citation("1.1", "permits")], "covered", compute({}, clauses, alone), alone) == ([], [])
+
+
+def test_covered_citing_an_exclusion_that_names_the_procedure_is_asked_again():
+    """`star-caesarean`: "Clause 18 explicitly excludes ... caesarean sections
+    ... Since this exclusion does not apply to caesarean sections, the claim
+    is covered."""
+    from app.pipeline.scenario import ShortlistClause, compute, find_contradictions
+
+    asked = "I had a caesarean delivery last week. I have held the policy for five years."
+    maternity = ShortlistClause(
+        "18", "t:1", "18", "exclusion",
+        "18. Maternity. Medical treatment expenses traceable to childbirth (including "
+        "caesarean sections) except ectopic pregnancy", 1.0,
+        exceptions=["lawful medical termination of pregnancy during the Policy Period"])
+    computed = compute({"procedure": "caesarean delivery"}, [maternity], asked)
+    problems, irrelevant = find_contradictions(
+        [_citation("18", "permits")], "covered", computed, asked)
+    assert len(problems) == 1 and "EXCLUSION" in problems[0] and "not_covered" in problems[0]
+    assert irrelevant == []
+    # A verdict that does not pay in full is not this rule's business.
+    assert find_contradictions([_citation("18", "permits")], "conditional", computed, asked) == ([], [])
+
+    # The clause's own exception, in the person's words, is left to the model.
+    burn = "I needed reconstructive plastic surgery after a burn, certified medically necessary."
+    cosmetic = ShortlistClause(
+        "4.1", "t:2", "4.1", "exclusion", "4.1 Cosmetic or plastic surgery", 1.0,
+        exceptions=["necessitated by an Accident, Burn or Cancer"])
+    computed = compute({"procedure": "reconstructive plastic surgery"}, [cosmetic], burn)
+    assert find_contradictions([_citation("4.1", "reduces")], "covered", computed, burn) == ([], [])
+
+    # A waiting period typed as an exclusion is decided by the arithmetic, not here.
+    late = "Medicines for a kidney infection. I have held the policy for five years."
+    listed = ShortlistClause(
+        "Excl02", "t:3", "Excl02", "exclusion",
+        "b. Specified Disease/Procedure waiting period: listed conditions including "
+        "chronic infection of the ear are excluded until the expiry of 24 months.", 1.0,
+        waiting_periods_days=[720])
+    computed = compute({"condition": "kidney infection", "time_since_policy_start_value": 5,
+                        "time_since_policy_start_unit": "years"}, [listed], late)
+    assert computed.excluding == {"Excl02": ["infection"]}
+    problems, _ = find_contradictions([_citation("Excl02", "permits")], "covered", computed, late)
+    assert not any("EXCLUSION" in p for p in problems)
