@@ -789,6 +789,7 @@ def named_by_code(
     named |= set(computed.absent)
     named |= set(computed.another_policy)
     named |= set(computed.abroad)
+    named |= set(computed.intoxication)
     return named
 
 
@@ -917,6 +918,37 @@ def abroad_clauses(scenario: str, clauses: list[ShortlistClause]) -> list[str]:
     return [c.clause_id for c in clauses if _ABROAD_CLAUSE.search(c.text)]
 
 
+# The person describing drink or drugs, and the exclusion about them. Read from
+# their words like the two lookups above, and for the same reason: "drinking
+# heavily" shares no word with "the use of intoxicating substances, alcohol or
+# drugs", so no word lookup joins them, and the synthetic policy files that
+# sentence under the heading "Intentional Self-Injury". M34: a fall after
+# drinking heavily was answered covered, 3 samples of 3 - "does not fall under
+# the exclusions for intentional self-injury".
+# ponytail: the commonest words only; one not listed leaves today's behaviour.
+# Not bare "drugs" or "medicine": every claim for prescribed medicines says so.
+_MENTIONS_INTOXICATION = re.compile(
+    r"\b(?:drunk|drinking|drank|drinks?|alcohol\w*|intoxicat\w*|liquor|beers?|whisky"
+    r"|wine|under\s+the\s+influence|narcotics?|cocaine|heroin|cannabis|overdos\w*)\b",
+    re.IGNORECASE,
+)
+_INTOXICATION_CLAUSE = re.compile(
+    r"\balcohol\w*|\bintoxicat\w*|\bsubstance\s+abuse|\bnarcotic", re.IGNORECASE)
+
+
+def intoxication_clauses(scenario: str, clauses: list[ShortlistClause]) -> list[str]:
+    """Exclusions about alcohol or drugs - when the person describes drink or drugs.
+
+    Exclusions only: on the real policies the same words turn up in a list of
+    non-payable items ("ALCOHOL SWABES") and in claim paperwork ("history of
+    alcohol consumption"), neither of which refuses anything.
+    """
+    if not _MENTIONS_INTOXICATION.search(scenario):
+        return []
+    return [c.clause_id for c in clauses
+            if c.clause_type == "exclusion" and _INTOXICATION_CLAUSE.search(c.text)]
+
+
 def render_abroad(clause_ids: list[str], scenario: str) -> str:
     """The reasoning prompt's line for those clauses, opening with the place named."""
     if not clause_ids:
@@ -1034,6 +1066,8 @@ class Computed:
     another_policy: list[str] = field(default_factory=list)
     # Clauses excluding treatment outside India, when the person names a place abroad.
     abroad: list[str] = field(default_factory=list)
+    # Exclusions about alcohol or drugs, when the person describes drink or drugs.
+    intoxication: list[str] = field(default_factory=list)
     # Exclusion id -> the words of the described procedure or condition it uses.
     excluding: dict[str, list[str]] = field(default_factory=dict)
 
@@ -1087,6 +1121,7 @@ def compute(
         ),
         another_policy=another_policy_clauses(scenario, clauses),
         abroad=abroad_clauses(scenario, clauses),
+        intoxication=intoxication_clauses(scenario, clauses),
         excluding=naming_exclusions(facts, clauses, scenario),
     )
 
@@ -1415,6 +1450,30 @@ def find_contradictions(
                 f"verdict is conditional, not covered. It refuses nothing by itself: "
                 f"do not answer not_covered because of it."
             )
+
+    # Paying, for something the person says followed drink or drugs. Unlike the
+    # rules above, nothing was computed and ignored here: no line in the prompt
+    # names the clause. The check alone is added, so every first request stays
+    # as it was and only a paying answer is asked again.
+    #
+    # Asked whether or not the clause was cited. The first version skipped an
+    # answer that cited it, and in the next server session every fresh answer
+    # was "covered" citing 4.2 as "reduces": citing a clause is not applying
+    # it. Whether the injury is attributable to the drink is left to the
+    # model - the real policies exclude "Treatment for Alcoholism ... and
+    # consequences thereof", which is narrower than the synthetic wording.
+    if verdict in (Verdict.COVERED, Verdict.CONDITIONAL) and computed.intoxication:
+        named = " and ".join(computed.intoxication)
+        problems.append(
+            f"- You answered {verdict}. The person describes drink or drugs (looked "
+            f"up from their own words), and clause {named} is an EXCLUSION about "
+            f"alcohol, intoxicating substances or drugs. An exclusion does not "
+            f"reduce or delay a claim: what it covers is not paid at all. Read the "
+            f"whole of clause {named}, not only its heading. If what happened is "
+            f"attributable to what that clause excludes, the answer is not_covered, "
+            f"citing clause {named} with effect denies; if it is not, say why in "
+            f"the reasoning."
+        )
     return problems, irrelevant
 
 

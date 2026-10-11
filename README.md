@@ -190,6 +190,7 @@ No real insurer policy wordings are committed to this repository.
 | M31 | Consistency check reads unserved waiting periods and cover windows | ✅ HDFC 12/14 → 14/14; reaches 12 of 109 questions, none worse; an exception read backwards is still not caught |
 | M32 | A refusal that never cites the unserved waiting period is asked again | ✅ Star dengue and HDFC gastroenteritis cite the deciding clause 3/3; main set 37/40. ⚠️ Star 9/10 → 8/10: the caesarean case proved unstable across days (Failure 94), unrelated to the change |
 | M33 | Three more candidates for the consistency check | ✅ Star caesarean right 3/3 in two server sessions (Star 9/10, cited 9/10); held-out 3 0/3 → 1/3. ❌ a rule for listed waiting periods refused: its word lookup misses 26 of 52 conditions the lists really bar. ⚠️ the first version of one rule refused a correct HDFC answer 6/6 on fresh samples, though it passed on every stored answer (Failure 95) |
+| M34 | An injury after drinking, and the alcohol exclusion filed under another heading | ✅ `intoxication-injury` covered 3/3 → not_covered 3/3 in two server sessions; reaches 2 of 109 questions. ⚠️ the first version passed in one session and failed in the next (Failure 96). Main set not re-run in full, so the 37/40 above does not yet count it |
 
 Evaluation is the point, not an afterthought: model and prompt changes in this project are justified by measured numbers on the golden set, never by impressions. See [Results](#results) and [`evals/REPORT.md`](evals/REPORT.md).
 

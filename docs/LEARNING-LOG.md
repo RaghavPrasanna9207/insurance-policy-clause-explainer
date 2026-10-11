@@ -13731,3 +13731,190 @@ is an exclusion". Fixing an answer at the point where it first goes wrong
 is easier than recognising it after another step has made it look
 reasonable.
 </details>
+
+---
+
+# M34 — An exclusion hidden under the wrong heading
+
+## The problem
+
+`intoxication-injury`, in the synthetic main set: "I fell down the stairs
+after drinking heavily and fractured my hip. I have held the policy five
+years." Expected `not_covered`, citing clause 4.2. The model answered
+`covered`, three samples of three. Telling someone a claim will be paid
+when it will be refused is the worst error this tool can make, so this was
+the last answer of that kind left on the list.
+
+Clause 4.2 of the synthetic policy:
+
+> **4.2 Intentional Self-Injury**
+> The Company shall not be liable for expenses arising out of or
+> attributable to any intentional self-injury, attempted suicide, or the
+> use of intoxicating substances, alcohol or drugs not prescribed by a
+> registered Medical Practitioner.
+
+The stored answer:
+
+> verdict: covered — cites 2.1 (permits)
+> "... The incident of falling down the stairs after drinking heavily does
+> not fall under the exclusions for intentional self-injury or hazardous
+> activities. ..."
+
+The model read the heading, judged correctly that a fall is not intentional
+self-injury, and stopped. The words that decide the case are the last
+third of the sentence under that heading.
+
+## Why this is not the same problem as M31 to M33
+
+In those milestones the code had already worked out the answer and written
+it in the prompt, and the model ignored it. The fix was to check that the
+answer agreed with what was computed.
+
+Here nothing was computed. The three word lookups that put "the clause
+about your situation" in front of the model all came back empty:
+
+```
+excluding: {} | named_in_question: {} | shared_words: {}
+```
+
+They work by finding a rare word shared between the question and a clause.
+"Drinking heavily" shares no word with "intoxicating substances, alcohol
+or drugs". A person and a policy describe the same thing in different
+vocabularies, and no amount of matching on the words they do use will join
+them.
+
+The project already has a pattern for exactly this, used twice: a short
+fixed list of the words people use, looked up in the question, paired with
+a pattern for the clause it concerns. "Dubai" is joined to "outside India"
+that way (M25), and "my other insurer" to the contribution clause (M21).
+Concept 52 (M21) explains why a lookup on the person's own words was
+preferred there to a new extracted fact: it is deterministic, it can be
+read, and when it fails it fails by saying nothing.
+
+## Measured before building
+
+The candidate word list was run over all 109 eval questions and the clause
+pattern over all three policies, with no model:
+
+- **Questions:** 2 of 109 match, `intoxication-injury` ("drinking") and
+  `ho2-drunk-scooter` ("drunk"). Both really are injuries while drunk, and
+  both must cite 4.2. The second is already answered correctly.
+- **Clauses:** synthetic 4.2; Star's and HDFC's standard exclusion
+  "Treatment for Alcoholism, drug or substance abuse or any addictive
+  condition and consequences thereof". Two accidental matches as well:
+  "ALCOHOL SWABES" in Star's list of non-payable items, and HDFC's
+  claim-paperwork line "History of alcohol consumption or any
+  intoxication". Neither is typed `exclusion`, so restricting the lookup to
+  exclusions removes both.
+
+Bare "drugs" and "medicine" are deliberately not in the question list:
+every claim for prescribed medicines uses them.
+
+## The fix
+
+```python
+# api/app/pipeline/scenario.py
+_MENTIONS_INTOXICATION = re.compile(
+    r"\b(?:drunk|drinking|drank|drinks?|alcohol\w*|intoxicat\w*|liquor|beers?|whisky"
+    r"|wine|under\s+the\s+influence|narcotics?|cocaine|heroin|cannabis|overdos\w*)\b",
+    re.IGNORECASE,
+)
+_INTOXICATION_CLAUSE = re.compile(
+    r"\balcohol\w*|\bintoxicat\w*|\bsubstance\s+abuse|\bnarcotic", re.IGNORECASE)
+
+def intoxication_clauses(scenario, clauses):
+    if not _MENTIONS_INTOXICATION.search(scenario):
+        return []
+    return [c.clause_id for c in clauses
+            if c.clause_type == "exclusion" and _INTOXICATION_CLAUSE.search(c.text)]
+```
+
+The result is stored on `Computed.intoxication` and read in one place,
+`find_contradictions`:
+
+```python
+if verdict in (Verdict.COVERED, Verdict.CONDITIONAL) and computed.intoxication:
+    named = " and ".join(computed.intoxication)
+    problems.append(
+        f"- You answered {verdict}. The person describes drink or drugs ... "
+        f"clause {named} is an EXCLUSION ... Read the whole of clause {named}, "
+        f"not only its heading. If what happened is attributable to what that "
+        f"clause excludes, the answer is not_covered ...; if it is not, say why ..."
+    )
+```
+
+**No line was added to the prompt.** M21 and M25 each added a prompt line,
+which changes the first request of every matching question. Since M31 the
+cheaper route has been available: leave the first request alone and only
+ask again when the answer pays. `compare_requests.py` confirms it: 0 of 109
+first requests differ from `main`. The clause is also added to
+`named_by_code`, so that on a policy too long to show whole it is always
+among the clauses the model can read.
+
+Whether the injury is "attributable" to the drink is left to the model. On
+the real policies that matters: their wording excludes *treatment for*
+alcoholism "and consequences thereof", which is narrower than the synthetic
+clause, and a lookup has no business deciding how far "consequences"
+reaches.
+
+## Failure 96: the rule that only asked when the clause was not cited
+
+The first version asked again only if the paying answer did **not cite**
+the clause, on the reasoning that an answer which cites 4.2 has considered
+it. It passed the dry run (of 109 stored answers it re-asked one, the wrong
+one) and the first live measurement: `intoxication-injury` right 3 of 3.
+
+Following Failure 95, the measurement was repeated after restarting the
+server. Wrong, 2 of 3. Watching the samples:
+
+```
+-> covered [('3.1', 'reduces'), ('4.2', 'reduces'), ('4.3', 'reduces')]
+FINAL: covered [...]
+```
+
+In that session the model's fresh answer was `covered` while citing 4.2,
+labelled as something that "reduces" the claim. The rule saw the citation
+and stayed silent. **Citing a clause is not applying it**; this model
+attaches citations and effect labels loosely, as M33 had already recorded.
+
+The rule now asks any paying answer, cited or not. In the same session:
+`covered` → asked → `not_covered`, citing 4.2 as `denies`, 4 of 4. The
+scored measurement was then run in that session and in a third after
+another restart: `intoxication-injury` right 3 of 3 in both,
+`ho2-drunk-scooter` right 3 of 3 in both.
+
+This is the second milestone running where a rule that looked finished
+after one server session failed in the next (Failure 95 was the first).
+Had the second session not been run, the README would now claim a fix that
+worked on some days.
+
+## Not measured
+
+The synthetic main set was not re-run as a whole after this change (the run
+was started and cancelled for time). The README's 37/40 is therefore the
+M32 full run and does not yet count this case. Only the two questions the
+rule can reach were measured, in the sessions described above.
+
+## Check it yourself
+
+```bash
+cd api
+.venv/Scripts/python -m pytest tests/test_scenario.py -q -k "drunken or alcohol_lookup"
+```
+
+**Predict before you look:** suppose someone on Star's policy asks about a
+fall after drinking. Star's exclusion reads "Treatment for Alcoholism, drug
+or substance abuse or any addictive condition and consequences thereof".
+What does this rule do, and what does it leave undecided?
+
+<details>
+<summary>Answer</summary>
+
+The question matches the word list and Star's clause 12 matches the clause
+pattern, so a `covered` or `conditional` answer is asked once more to read
+clause 12 and say whether the fall is attributable to what it excludes. The
+rule does not decide that. Whether a fracture from a drunken fall is a
+"consequence" of alcoholism is a question of interpretation that insurers
+and ombudsmen argue about; the code only makes sure the answer faces the
+clause instead of never mentioning it.
+</details>
