@@ -13105,3 +13105,230 @@ one change this tool cannot see is a rewording of the nudge text itself
 (`CITATION_NUDGE`, `CONSISTENCY_NUDGE` in `scenario.py`): after one of
 those, re-measure every case that retries.
 </details>
+
+---
+
+# M31 — A line in the prompt is a request; a check in code is a rule
+
+## The problem
+
+Two HDFC questions were answered wrong although the code had already
+worked out the right answer and written it into the prompt.
+
+**Typhoid on day 20.** HDFC's clause `Excl03` bars illness claims in the
+first 30 days. The waiting-period check (`api/app/pipeline/waiting.py`)
+computed "requires 1 month, policy held 20 days" and the prompt said so:
+
+```
+- clause Excl03 (c. 30-day waiting period: Code – Excl03): requires 1 month,
+  policy held 20 days -> this waiting period still applies and blocks
+  treatment covered by THIS clause, EXCEPT where the situation falls within
+  this clause's own exception: "claims arising due to an accident". ...
+```
+
+The model answered `covered`. M28 tested two explanations for this and
+refuted both.
+
+**Physiotherapy seven months after discharge.** Clause `1.6` pays
+post-hospitalisation expenses only within 180 days. The window check
+(`api/app/pipeline/window.py`) computed 210 days against 180:
+
+```
+WHEN THE EXPENSES FELL (arithmetic, not opinion).
+- OUTSIDE THE WINDOW: clause 1.6 pays only for expenses within 180 days
+  after discharge. These were 210 days after discharge, so clause 1.6 does
+  NOT pay for them.
+```
+
+The model answered `conditional`, three samples of three (Failure 92 in
+M29).
+
+## How the diagnosis was done
+
+Two investigations ran side by side, one per question, under two rules: no
+edits to the repo, and **no calls to the model**. The second rule matters.
+Part 3 of M30 measured that this model does not repeat itself, and two jobs
+sharing one GPU change each other's answers. Everything needed was already
+on disk: the answer cache holds the stored answer to every request the
+evals have sent, so the exact prompt and the exact answer for any case can
+be rebuilt and read without generating a token.
+
+## The root cause, found from both sides
+
+The pipeline has a consistency check, `find_contradictions` in
+`api/app/pipeline/scenario.py`. Its docstring states the idea:
+
+> An instruction can be ignored. A check in code cannot, and it only has to
+> compare the citations against results that already exist.
+
+When an answer contradicts a computed result, the model is asked once more
+with the contradiction in front of it. It was built for two cases: blaming a
+waiting period that has been *served*, and getting a co-payment or cap
+wrong.
+
+Both investigations ended in the same function, at the same gap. The check
+built its picture of the computed results like this:
+
+```python
+served = {c.clause_id: c for c in computed.waiting
+          if c.status is waiting.WaitingStatus.SERVED}
+ruled_out = {c.clause_id: c for c in computed.reductions
+             if c.status is reduction.ReductionStatus.DOES_NOT_APPLY}
+```
+
+`WaitingStatus.NOT_SERVED` appears nowhere in the function. `computed.windows`
+is not read at all; it is used only to render the prompt. So the two firmest
+lines the pipeline writes, "still applies and blocks" and "does NOT pay",
+were requests with nothing behind them. Everything M28 tried was a change
+to how the request was worded.
+
+What the model actually did with the typhoid question is worth seeing. The
+waiting block had six lines and the firm one was third. The stored answer
+cites only the first:
+
+> "The relevant clause is 2.10#2, which states that the waiting period for
+> 'Global Health Cover (Emergency & Planned Treatments)' only applies to
+> planned hospitalization claims ... Since your admission to the hospital
+> for typhoid is an emergency treatment, the 36-month waiting period does
+> not apply ... Therefore, the claim ... is covered."
+
+It reasoned correctly about a clause that did not matter and never
+mentioned the one that did.
+
+**A correction to Failure 92.** That entry says of the invented 20%
+co-payment: "There is no 20% anywhere in the prompt." It is absent from
+the question and the clauses, but the system prompt's own list of example
+outcomes contains it (`api/app/llm/prompts.py`):
+
+```
+"20% co-payment applies"        -> conditional. You are paid 80%.
+```
+
+The model was not inventing a number. It was reaching for an example it
+had been shown.
+
+## Concept 55: precision before recall, when a check can do harm
+
+A consistency rule re-asks the model. A re-ask is not free: this project
+has measured retries turning right answers wrong (the comment on
+`unraised_reductions` records one that "pushed right answers" off). So a
+rule must be judged first on how often it fires on answers that were
+*right*, and only then on how many wrong ones it catches. A rule that
+catches three wrong answers and disturbs ten right ones is a loss.
+
+That can be measured without the model. Each candidate rule was run over
+the stored first answer of all 109 eval questions, and every firing sorted
+by whether the stored answer was actually wrong:
+
+| candidate rule | wrong answers caught | right answers disturbed |
+|---|---|---|
+| paying verdict, every raised window OUTSIDE | 1 | 0 |
+| any citation "reduces" on a clause with no computed reduction | 2 | **14** |
+| covered, a general waiting period unserved, no guards | 3 | **2** |
+| the same, with both guards below | 2 | 0 |
+
+The second row looked like the obvious fix for the invented co-payment and
+is a bad rule: the model uses "reduces" loosely on exclusions in answers
+whose verdict is right. It was never built.
+
+## The two rules
+
+**Windows.** A paying verdict when every window raised for the expense is
+OUTSIDE:
+
+```python
+if verdict in (Verdict.COVERED, Verdict.CONDITIONAL):
+    raised = [w for w in computed.windows
+              if w.status is not window.WindowStatus.NOT_RAISED]
+    if raised and all(w.status is window.WindowStatus.OUTSIDE for w in raised):
+        problems += [...]   # one per window, quoting its computed line
+```
+
+**Waiting periods.** `covered` while a *general* waiting period is not
+served:
+
+```python
+if verdict == Verdict.COVERED:
+    said = _stems(scenario).keys()
+    for check in computed.waiting:
+        if (check.status is not waiting.WaitingStatus.NOT_SERVED
+                or check.listed or check.pre_existing):
+            continue
+        if check.exceptions and (
+            any(c.clause_id == check.clause_id and c.effect == "permits" for c in citations)
+            or any(_stems(e).keys() & said for e in check.exceptions)
+        ):
+            continue
+        problems.append(...)
+```
+
+It skips list-type and pre-existing periods, because those may not concern
+the claim at all and their own lines say so. The two guards exist because
+waiting periods except accidents, and whether something was an accident is
+language, which code should not decide. Each guard alone leaves one false
+alarm on a correct accident answer:
+
+- "I was hit by a car" shares no word with the exception "claims arising
+  out of an Accident". That answer is recognised because it cites the
+  clause as *permitting* the claim.
+- HDFC's accident answer never cites the clause, but the question says
+  "accident", which matches the exception's words.
+
+Neither rule changes a verdict. Each only makes the answer reach the
+existing one-retry step.
+
+## Measured
+
+The rules can fire only where their precondition holds. Listing those cases
+(no model needed) gives 12 of 109; the other 97 cannot be affected. All 12
+were run, majority of three, on Ollama 0.35.1:
+
+| case | before | after |
+|---|---|---|
+| hdfc-medicines-seven-months-after | wrong 3/3 | right 3/3 |
+| hdfc-typhoid-20-days | wrong 2/3 | right 3/3, citing Excl03 |
+| initial-waiting-period (synthetic) | wrong 3/3 | wrong 2/3 |
+| the other nine | right | right |
+
+HDFC as one full run: **14 of 14** (12 before), 13 unanimous.
+
+## What is still not caught
+
+On `initial-waiting-period` the first sample is fixed by the retry: asked
+again with the calculation, the model answers `not_covered` citing 3.1. The
+other two samples are wrong in a way the rule cannot see. The model cites
+the waiting-period clause as *permitting* the claim:
+
+> "The initial waiting period (Clause 3.1) does not apply as the condition
+> is not an accident."
+
+That is the exception read backwards. To the code it is indistinguishable
+from the correct "hit by a car" answer: same clause, same effect label, no
+shared word. `hdfc-malaria-25-days` does the same in one sample of three.
+Telling them apart needs to know whether an accident happened. A new fact
+field would supply that, but adding a field changes the fact request for
+all 109 questions, and M21 measured exactly that kind of change costing
+four answers. It was left, and is marked in the code with a `ponytail:`
+comment.
+
+## Check it yourself
+
+```bash
+cd api
+.venv/Scripts/python -m pytest tests/test_scenario.py -q -k "outside_its_window or unserved_general"
+```
+
+**Predict before you look:** the window rule fires on `conditional` as well
+as `covered`, but the waiting-period rule fires only on `covered`. Why not
+make the waiting-period rule fire on `conditional` too?
+
+<details>
+<summary>Answer</summary>
+
+Because of the accident exception. "Conditional: paid only if this was an
+accident" is a correct answer to a claim inside a waiting period when the
+description leaves the cause open. A window has no such exception: an
+expense outside it is simply not paid under that clause, so any paying
+verdict contradicts it. A rule should be only as wide as the fact it
+enforces.
+</details>

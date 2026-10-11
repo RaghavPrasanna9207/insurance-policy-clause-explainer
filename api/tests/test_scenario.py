@@ -1201,3 +1201,60 @@ def test_a_ligature_in_the_policy_does_not_hide_a_named_word():
     clauses = [_clause("3", 50, "Treatment of ﬁstula in ano is excluded."), _clause("4", 50)]
     assert named_in_question({"procedure": "fistula surgery"}, clauses) == {"3": ["fistula"]}
 
+
+
+# --- M31: the consistency check reads windows and unserved waits ----------
+
+
+def test_paying_for_an_expense_outside_its_window_is_a_contradiction():
+    """HDFC, physiotherapy seven months after discharge: told 1.6 "does NOT pay"
+    (210 days against 180), the answer was conditional - and nothing compared
+    the verdict with the window result."""
+    from app.pipeline.scenario import ShortlistClause, compute, find_contradictions
+
+    post = ShortlistClause(
+        "1.6", "t:1", "1.6", "coverage",
+        "1.6. Post-Hospitalization Expenses ... only if the same were incurred upto "
+        "180 days, immediately post the date of discharge from the Hospital.", 1.0)
+
+    def computed(months):
+        return compute({"expense_timing_value": months, "expense_timing_unit": "months",
+                        "expense_timing_anchor": "after_discharge"}, [post])
+
+    for cited in ([_citation("1.6", "denies")],                                # M30's stored answer
+                  [_citation("1.1.1", "permits"), _citation("1.24", "reduces")]):  # M29's
+        problems, irrelevant = find_contradictions(cited, "conditional", computed(7))
+        assert len(problems) == 1 and "OUTSIDE THE WINDOW" in problems[0]
+        assert "not_covered" in problems[0] and irrelevant == []
+    assert len(find_contradictions([_citation("1.6", "permits")], "covered", computed(7))[0]) == 1
+    # The right refusal, and a payment inside the window, are left alone.
+    assert find_contradictions([_citation("1.6", "denies")], "not_covered", computed(7)) == ([], [])
+    assert find_contradictions([_citation("1.6", "permits")], "covered", computed(5)) == ([], [])
+
+
+def test_covered_inside_an_unserved_general_waiting_period_is_a_contradiction():
+    """`hdfc-typhoid-20-days`: told Excl03 still blocks, answered covered citing another clause."""
+    from app.pipeline.scenario import ShortlistClause, compute, find_contradictions
+
+    wait = ShortlistClause(
+        "3.1", "t:1", "3.1", "waiting_period",
+        "3.1 Initial Waiting Period Expenses related to the treatment of any illness within "
+        "30 days from the first policy commencement date shall be excluded except claims "
+        "arising due to an accident.", 1.0,
+        waiting_periods_days=[30], exceptions=["claims arising due to an accident"])
+    cover = ShortlistClause("2.1", "t:2", "2.1", "coverage", "2.1 In-patient cover.", 1.0)
+
+    def computed(days):
+        return compute({"time_since_policy_start_value": days,
+                        "time_since_policy_start_unit": "days"}, [cover, wait])
+
+    paid = [_citation("2.1", "permits")]
+    problems, irrelevant = find_contradictions(paid, "covered", computed(20), "Typhoid, day 20.")
+    assert len(problems) == 1 and "3.1" in problems[0] and "still applies" in problems[0]
+    assert irrelevant == []
+    # Served; time held unknown; a refusal; the exception applied; the exception's words used.
+    assert find_contradictions(paid, "covered", computed(45), "typhoid") == ([], [])
+    assert find_contradictions(paid, "covered", compute({}, [cover, wait]), "typhoid") == ([], [])
+    assert find_contradictions([_citation("3.1", "denies")], "not_covered", computed(20), "typhoid") == ([], [])
+    assert find_contradictions([_citation("3.1", "permits")], "covered", computed(10), "Hit by a car.") == ([], [])
+    assert find_contradictions(paid, "covered", computed(10), "Fractured my leg in a road accident.") == ([], [])
