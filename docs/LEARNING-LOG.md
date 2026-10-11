@@ -12549,3 +12549,559 @@ refuse claims between 61 and 180 days after discharge on every other plan.
 The test `test_a_window_stated_in_figures_is_read_off_a_coverage_clause`
 pins it.
 </details>
+
+---
+
+# M30 — Cleanups, part 1: ligatures in the word lookups
+
+## The problem
+
+Some PDFs store "fi", "fl" and "ff" as one character each (a *ligature*;
+Concept 54 explains them from scratch). M23 found that Star's "Speciﬁed
+disease" clause never matched the pattern `specified`, and fixed it with
+Unicode NFKC normalisation inside the waiting-period check
+(`api/app/pipeline/waiting.py`). That left every other piece of code that
+pattern-matches policy text unprotected.
+
+The one that matters is the word lookup in `api/app/pipeline/scenario.py`.
+`named_in_question` and `shared_words` find clauses that use an unusual word
+from the person's question ("hernia", "caesarean") and make sure those
+clauses are in the prompt. Both build their word lists with `_stems`:
+
+```python
+for word in re.findall(r"[a-z]{5,}", text.lower()):
+```
+
+`[a-z]` keeps runs of plain letters only, and U+FB01 is not one of them. So
+"ﬁstula" splits into "stula", and a question about fistula surgery never
+meets the clause that names it.
+
+## Measured before choosing where to fix it
+
+Counting the characters NFKC would change, on every PDF the evals use:
+
+| PDF | changed characters |
+|---|---|
+| the three synthetic policies | 0 |
+| HDFC Optima Secure | 0 |
+| Niva ReAssure 2.0 | 119 (fi, fl, ff) |
+| Star Arogya Sanjeevani | 100 (fi, fl, no-break space) |
+
+So no fix can change a synthetic or HDFC answer. Only Star has eval
+questions among the two affected policies.
+
+## Failure 93: the right normalisation at the wrong layer
+
+The obvious root-cause fix was to normalise once, where text enters the
+system: in `ingest.py`, before character offsets are assigned, so the rule
+`raw_text[line.char_start:line.char_end] == line.text` still holds. One
+change, and no lookup anywhere would ever need to remember ligatures again.
+Segmentation was checked first and came out identical on all six PDFs (same
+clause count, numbers and headings).
+
+Then Star was measured, majority of three samples, against `main`:
+
+| Star | main | ingest fix |
+|---|---|---|
+| verdicts right | 9/10 | 8/10 |
+| caesarean | right 3/3 | wrong 2/3 |
+| dengue cites its waiting period 3#2 | 0/3 | 3/3 |
+
+Comparing the stored clause analyses explained it. Normalising at ingest
+changes the text **the model reads**, not just the text the code matches.
+Every Star clause containing a ligature became a new prompt and was analysed
+afresh, and four of 79 came back different. The costly one was the Table of
+Benefits row capping room rent at "2% of the Sum Insured subject to maximum
+of Rs.5000/- per day". On `main` it is a `sub_limit` with both caps. After
+the change it is `coverage` with no caps at all.
+
+That is not a bug in normalisation. It is a 7B model answering a slightly
+different input slightly differently, which is what such models do. But the
+lesson is general: **a change to shared input reaches every consumer of that
+input, including the model.** The cleanup was meant for the code's lookups.
+Fixing it upstream also re-rolled the model's reading of 38 clauses, and that
+was a much larger change than intended. Reverted.
+
+## The fix
+
+Normalise where the matching happens, and nowhere else:
+
+```python
+# api/app/pipeline/scenario.py, in _stems
+text = unicodedata.normalize("NFKC", text)
+out: dict[str, str] = {}
+for word in re.findall(r"[a-z]{5,}", text.lower()):
+```
+
+The other three patterns that read clause text were checked and left alone:
+"outside India" / "geographical limits", "rateable / contribution / other
+policy", and "Annexure N". None of them contains an f-ligature pair, so a
+ligature cannot hide them. Normalising there would protect against nothing
+seen.
+
+The test, `test_a_ligature_in_the_policy_does_not_hide_a_named_word` in
+`api/tests/test_scenario.py`, puts "ﬁstula" in a clause and asks about
+fistula surgery. It fails without the line above and passes with it.
+
+## Measuring
+
+The model's input must now be byte-identical to `main`'s. That is
+checkable without reading any answer: the cache key is a hash of the exact
+request, so an unchanged request replays and a changed one calls the model.
+Running both Star sets on the branch made **0 fresh model calls** for sample
+1 (17 questions). Nothing the eval sends changed, so no score can move.
+
+What it buys is the next real policy. A question naming a treatment that the
+policy prints with a ligature will now find its clause.
+
+## An environment change found on the way
+
+Ollama had updated itself from 0.35.1 to 0.40.0. Because the runtime version
+is part of every cache key (see Failure 70), none of the stored answers
+applied any more, and every recorded score was from a version that was no
+longer running. The decision was to finish the project on 0.35.1 rather than
+re-measure everything. Ollama 0.35.1 now runs from the standalone Windows
+build (`ollama-windows-amd64.zip` from the v0.35.1 GitHub release), which
+cannot update itself, with the same `OLLAMA_FLASH_ATTENTION=1` and
+`OLLAMA_KV_CACHE_TYPE=q8_0`. Re-running Star on `main` under it reproduced
+the recorded results exactly (9/10, the same two citation misses).
+
+## Check it yourself
+
+```bash
+cd api
+.venv/Scripts/python -m pytest tests/test_scenario.py -q -k ligature
+curl -s localhost:11434/api/version     # must say 0.35.1
+```
+
+**Predict before you look:** the grounding check (`app/grounding.py`) also
+compares model text with policy text, and it already normalises with NFKC.
+Why can it normalise both sides freely, when normalising at ingest broke
+things?
+
+<details>
+<summary>Answer</summary>
+
+The grounding check normalises only its own copies, for one comparison, and
+throws them away. Nothing it does reaches a prompt. Normalising at ingest
+replaced the stored text itself, and the stored text is what the model is
+shown. Where the change is made decides who sees it.
+</details>
+
+---
+
+# M30 — Cleanups, part 2: HDFC's annexures, found inside "Contact Us"
+
+## The problem
+
+M27 recorded that one HDFC clause, the insurance ombudsman's address list,
+"made the model's answer run past its token limit three times" during
+analysis, and left it unanalysed because an address list decides no claim.
+
+Looking at that clause properly showed the note had the cause wrong. The
+clause was the third length-split piece of `2. Contact Us`, and it did start
+with ombudsman addresses. But 573 characters in, it ran straight into:
+
+```
+Annexure B- Items for which Coverage is not available in the Policy (Non-Medical Expenses)
+S. NO. ITEM
+1
+BABY FOOD
+...
+68
+VASOFIX SAFETY
+```
+
+followed by the start of the plan chart (Annexure C). HDFC's three annexures
+(A, the ombudsman list; B, 68 non-payable items; C, the plan chart) had all
+been segmented as continuation pieces of "Contact Us".
+
+Sending the piece to the model once, alone, showed what happened. It typed
+the clause `exclusion` and began copying the items into its `exceptions`
+array. Then it repeated the same ten items over and over until it hit its
+output limit:
+
+```
+"BIRTH CERTIFICATE", "CERTIFICATE CHARGES", "COURIER CHARGES", ...,
+"WALKING AIDS CHARGES", "NEBULISATION KIT", "ATTENDANT CHARGES",
+"ANY KIT WITH NO DETAILS MENTIONED", "BIRTH CERTIFICATE", ...
+```
+
+This is why the client's retry was useless here. On a truncated answer it
+doubles `num_predict` (1,600, then 3,200, then 6,400 tokens), which is right
+when an answer is merely long. A model stuck in a loop fills any limit. (The
+stored analysis on `main` shows a later attempt did eventually get through,
+so the "unanalysed" note was also out of date. The segmentation defect
+underneath it was not.)
+
+## Why the segmenter missed the headings
+
+`api/app/pipeline/segment.py` starts a new section on a line that is either
+larger than body text and bold, or all capitals and shaped like a section
+heading:
+
+```python
+_RE_SECTION_HEAD = re.compile(
+    r"^(?:SECTION|PART|CHAPTER|SCHEDULE|ANNEXURE)\s+[\dIVXL]+\b"
+)
+```
+
+HDFC's headings fail all three tests. They are body-size type (11.04pt, the
+same as the text), in mixed case ("Annexure"), and labelled with letters
+(A, B, C) where the pattern accepts only digits and roman numerals.
+
+## Measured before writing the rule
+
+Every line starting with "Annexure", across all six PDFs the evals use:
+
+| PDF | page | bold | line |
+|---|---|---|---|
+| HDFC | 0 | no | Annexure A / B / C (contents page) |
+| HDFC | 15 | no | Annexure B to this Policy incurred in relation to a claim ... |
+| HDFC | 31 | no | ANNEXURE B and also available at www.hdfcergo.com. |
+| HDFC | 45 | **yes** | Annexure A |
+| HDFC | 48 | **yes** | Annexure B- Items for which Coverage is not available ... |
+| HDFC | 49 | **yes** | Annexure C - Plan Chart: |
+| Niva | 19 | **yes** | Annexure I - The expenses that are not covered ... |
+| Niva | 21 | **yes** | Annexure II - List of Insurance Ombudsmen |
+| Star | 8 | no | Annexure-A. The list of expenses that are |
+
+Every real heading is bold. Every mention inside running text is not. Weight
+separates them perfectly, and the wording alone could not: "Annexure B to
+this Policy" starts exactly like "Annexure B- Items".
+
+## The fix
+
+```python
+# api/app/pipeline/segment.py
+_RE_ANNEXURE_HEAD = re.compile(r"^annexure[\s-]+(?:[a-z]|[ivxl]+|\d+)\b", re.I)
+
+def _looks_like_section(line: Line, body_size: float) -> bool:
+    if line.size >= body_size * SECTION_SIZE_RATIO and line.bold:
+        return True
+    if line.bold and _RE_ANNEXURE_HEAD.match(line.text.strip()):
+        return True
+    ...
+```
+
+Comparing segmentation before and after on all six PDFs:
+
+- **Synthetic (×3) and Star: byte-identical.** None of their eval requests
+  can change.
+- **HDFC:** "Contact Us" drops from 2,985 characters to 664. Annexure A
+  (two pieces), B (the 68 items, nothing else) and C become their own
+  sections. The 20 plan-chart rows after it ("1.1 Hospitalization ...")
+  were filed under "SECTION D. GENERAL TERMS AND CLAUSES" and are now under
+  "Annexure C - Plan Chart", which is what they are.
+- **Niva:** "List IV" and the ombudsman list move out of clause 6.2.9
+  ("Assignment") into Annexures I and II. Niva has no eval questions.
+
+The test `test_a_bold_annexure_heading_starts_a_section_and_a_mention_does_not`
+in `api/tests/test_segment.py` rebuilds the HDFC arrangement line by line:
+a bold heading that must split, and a plain-type "Annexure B to this
+Policy" mention that must not.
+
+## The cost: a re-roll of HDFC, measured
+
+The analysis prompt identifies each clause by its position in the document
+(`### CLAUSE id=92`) and names its section. Splitting one clause into three
+moves every later clause's position by two, and the plan-chart rows changed
+section. So about 23 HDFC clauses were analysed afresh, the same kind of
+change that cost a verdict in part 1 (Failure 93). It had to be measured.
+
+The clause analyses that changed, matched on text since ids moved: five
+plan-chart rows. Two of them (1.5 and 1.6, the 60- and 180-day windows) came
+back with different `waiting_periods_days`. That cannot reach a waiting-
+period line: `waiting.py` drops any clause that never says "wait", the rule
+M27 added for exactly these rows. The other three are type flips on HDFC's
+optional benefits (2.3, 2.4, 2.5). All 115 clauses are now analysed; Annexure
+B is an `exclusion`.
+
+HDFC, majority of three, `main` against the branch:
+
+| HDFC | main | branch |
+|---|---|---|
+| verdicts right | 11/14 | 12/14 |
+| gastroenteritis-three-weeks | wrong 3/3 | right 3/3 |
+| typhoid-20-days | wrong 3/3 | wrong 2/3 |
+| malaria-25-days | right 3/3 | right 2/3 |
+| failed quotations per sample | 10-12 | 5-9 |
+
+No case got worse by majority. Every HDFC request changed (the clause ids
+moved), so this is honestly a re-roll, and one that came out ahead. The
+gain on gastroenteritis is not claimed as caused by the annexures. Which of
+the changed inputs moved it was not isolated, and with every request
+changed, nothing could isolate it. What the measurement does establish is
+that the correct segmentation costs nothing.
+
+## Check it yourself
+
+```bash
+cd api
+.venv/Scripts/python -m pytest tests/test_segment.py -q -k annexure_heading
+```
+
+**Predict before you look:** the client doubles `num_predict` when an answer
+is cut off mid-JSON. For which kind of over-long answer does that help, and
+for which is it wasted?
+
+<details>
+<summary>Answer</summary>
+
+It helps when the answer is simply long, for example a clause with many
+genuine exceptions: a bigger limit lets it finish. It is wasted on a
+repetition loop. A model repeating the same ten items has no end to reach,
+so it fills 1,600 tokens, then 3,200, then 6,400, and fails three times
+having spent the most time on the attempts that could never succeed. The
+cure for a loop is a better input (here, a clause that is one list rather
+than three unrelated things), not a larger limit.
+</details>
+
+---
+
+# M30 — Cleanups, part 3: the determinism check now asks what the eval asks
+
+## The problem
+
+`evals/check_determinism.py` exists because `temperature = 0` does not make
+a local model repeatable. Its most important layer is the **sequence
+check**: ask the first eight eval questions in order, twice, with the cache
+bypassed, and count how many answers differ between the two passes. That
+count is the noise floor. An eval change smaller than it means nothing.
+
+The check is only worth anything if it sends what the eval sends. It did
+not. It built its own requests:
+
+```python
+# evals/check_determinism.py, before
+nothing_computed = Computed(waiting=[], reductions=[], windows=[])
+messages, schema = reasoning_request(case["scenario"], {}, considered, nothing_computed)
+payload = await client.complete_json(messages, schema, use_cache=False)
+```
+
+Empty facts and nothing computed. The eval's real prompt carries the facts
+extracted from the question and every line code works out (waiting periods
+served or not, caps, cover windows). So the check measured the stability of
+shorter, simpler prompts. M20 found this (Failure 81), corrected the
+docstring to admit it, and left the real fix for later because it changes
+what is measured.
+
+## The fix: share the call, do not copy it a third time
+
+The obvious patch is three more lines: extract the facts, call `compute`,
+pass both in. That would be a third hand-built copy of what the pipeline
+does, and the first two both drifted. It would also still miss the retries:
+when an answer arrives with no citations, or contradicts the computed
+lines, the pipeline asks again with a nudge, and those are model calls the
+eval makes too.
+
+The eval does not build requests. It calls `run_scenario`, and for repeat
+samples it passes `resample=True`, which bypasses the cache for the
+reasoning step only (facts stay as stored, and nothing resampled is written
+back). The check now makes the same call:
+
+```python
+# evals/check_determinism.py, after
+result = await run_scenario(case["scenario"], clauses, resample=True)
+```
+
+A copy can drift from its original. A shared call cannot.
+
+## Verified without the model
+
+A claim that two things send "the same prompt" should be checked, not
+argued. The answer cache gives an exact test for free: every stored answer
+is filed under a hash of the complete request (model, messages, schema,
+options, runtime version). So a request is byte-identical to one the eval
+has sent if and only if its key is already in the cache.
+
+The model call was intercepted and each request the sequence check would
+send was looked up, with nothing reaching Ollama:
+
+| version of the check | requests | found in the eval's cache |
+|---|---|---|
+| before | 16 | **0** |
+| after | 20 | **20** |
+
+Before, not one request matched anything the eval has ever sent. After,
+every one does. The count rose from 16 to 20 because four of the sixteen
+answers trigger a retry, which the old check never performed.
+
+## The first real result
+
+On Ollama 0.35.1, `qwen2.5:7b-instruct-q4_K_M`, seed 0, temperature 0:
+
+```
+(raw JSON differed on 3/8; the count below is what the metrics would see)
+SEQUENCE (8 cases, 2 passes): 2 case(s) differ  FAIL
+    ped-waiting-not-served
+    no-timing-given
+```
+
+Two of eight real eval questions came back with a different verdict or
+different citations when the same eight were simply asked again. The
+single-prompt and analysis layers also failed, in the way Failure 24
+recorded: the first generation after a start differs from later ones.
+
+Earlier results of this check are not comparable (they measured other
+prompts), so this is the baseline from here on. What it says is not new, but
+it is now measured on the right thing: a single eval run cannot be trusted
+to within a case or two, which is the reason every comparison in this
+project since M17 is a majority of three samples and counts only the cases
+whose requests actually changed.
+
+## Check it yourself
+
+```bash
+python evals/check_determinism.py --sequence 8     # about 8 minutes, calls the model
+```
+
+**Predict before you look:** the old check sent 16 requests for 8 cases
+asked twice. The new one sends 20. No case was added. Where do the other
+four come from, and why does it matter that the check includes them?
+
+<details>
+<summary>Answer</summary>
+
+They are retries. `run_scenario` asks a second time when an answer names no
+deciding clause or contradicts a computed line. Those second answers are
+what the eval scores for those cases, so their stability is part of the
+eval's stability. A check that skipped them was measuring the first draft of
+an answer the eval never used.
+</details>
+
+---
+
+# M30 — Cleanups, part 4: "which questions did this change reach?" as one command
+
+## The problem
+
+A 7B model does not answer the same prompt identically twice (part 3 of M30
+measured it: 2 of 8 questions change between two passes). So after a code
+change, re-running every eval question tells you little: real effects and
+noise arrive mixed together.
+
+The method this project has used since M18 avoids that. The answer cache is
+keyed on the exact request, so a question whose request did not change
+replays its stored answer and **cannot have moved**. Only the questions
+whose requests changed need re-measuring, three samples each. Every
+milestone since has reported a line like "6 of 78 requests change".
+
+Producing that line was a throwaway script each time, rewritten from memory,
+and twice in M30 alone. A measurement the whole method rests on should not
+depend on a script nobody kept.
+
+## What was considered and not built
+
+The architecture review before M19 proposed something larger under the
+name "run trace": have `run_scenario` return, with every answer, a record
+of which steps reached the model, which clauses were picked and the prompt
+sent. Its motive was a real wart. The eval decides whether an answer was
+fresh by reading a process-wide counter of model calls before and after:
+
+```python
+# evals/run_scenario_eval.py
+await extract_facts(case["scenario"])       # warms the cache, outside the count
+calls_before = client.model_calls
+result = await run_scenario(case["scenario"], clauses, resample=resample)
+fresh = client.model_calls > calls_before
+```
+
+That counter also counts the clause-picking call on long policies, so an
+answer can be called fresh when only its pick was regenerated.
+
+It was not built. The error runs one way only: it can call a replayed answer
+fresh, never a fresh one replayed, so it cannot hide a change. Fixing it
+means changing the function every answer passes through, for a tidier
+internal reading of something already known. The recurring cost was
+elsewhere, in the comparison between two versions of the code.
+
+## What was built
+
+`evals/compare_requests.py`, run from the repo root with a second checkout
+of the code to compare against:
+
+```bash
+git worktree add ../baseline main
+python evals/compare_requests.py ../baseline
+```
+
+For each checkout it runs every question in every case file through the
+real `run_scenario`, with the model call replaced by a spy:
+
+```python
+async def spy(messages, schema, **kwargs):
+    if schema is scenario.FACTS_SCHEMA:
+        stage = "facts"
+    elif "clause_ids" in schema.get("properties", {}):
+        stage = "pick"
+    else:
+        seen.setdefault("reason", _digest(messages, schema))
+        return {"verdict": "insufficient_information", "reasoning": "", "deciding_clauses": []}
+    seen.setdefault(stage, _digest(messages, schema))
+    return await real(messages, schema, **kwargs)
+```
+
+Three design points:
+
+- **The reasoning call never reaches the model.** Its request is hashed and
+  a stub answer is returned. The stub is `insufficient_information`
+  because that is the one verdict the pipeline accepts without citations,
+  so it triggers no retry.
+- **Facts and picks are real calls.** They have to be: the reasoning
+  request is built from their answers. Normally they replay from the cache.
+  If a change altered *their* request, the model is asked, and the report
+  prints how many calls that took.
+- **Each checkout runs in its own process.** Both contain a package called
+  `app`, and Python can hold only one module of a given name at a time.
+
+## Checked against a known answer
+
+The tool was first run on a comparison whose result was already known from
+the hand measurements in parts 1 and 2: the M30 branch against `main`.
+
+```
+evals/golden/scenarios.json: 0 of 40 cases changed
+evals/golden/scenarios-heldout.json: 0 of 16 cases changed
+evals/golden/scenarios-heldout-2.json: 0 of 13 cases changed
+evals/golden/scenarios-heldout-3.json: 0 of 3 cases changed
+evals/golden/scenarios-heldout-4.json: 0 of 6 cases changed
+evals/real/scenarios-star-arogya-sanjeevani.json: 0 of 10 cases changed
+evals/real/scenarios-star-heldout-abroad.json: 0 of 7 cases changed
+evals/real/scenarios-hdfc-optima-secure.json: 14 of 14 cases changed
+    hdfc-typhoid-45-days: pick, reason
+    ...
+14 of 109 cases send a different request.
+model calls made to work this out: baseline 0, this checkout 0
+```
+
+Twelve seconds, no model calls, and the same answer as by hand: the
+ligature fix changes nothing, and the annexure fix reaches every HDFC
+question and no other. It also says *how* HDFC changed: the fact requests
+are the same, and the pick and reasoning requests differ, which is what
+moving clause ids would do.
+
+## Check it yourself
+
+```bash
+cd api && .venv/Scripts/python -m pytest tests/test_eval_history.py -q -k request_comparison
+```
+
+**Predict before you look:** the tool reports only the *first* reasoning
+request of each case. Part 3 of M30 showed that some cases send a second
+one, a retry. Why can this tool not report retries, when the determinism
+check can?
+
+<details>
+<summary>Answer</summary>
+
+A retry is sent only when the first answer comes back without citations or
+contradicts a computed line, and its text includes a nudge that depends on
+what went wrong. So the retry request is a function of the model's answer.
+This tool never gets an answer: that is the point of it. The determinism
+check does call the model, so it sees the retries. The first request is
+nearly always enough, because the retry repeats it and adds the nudge. The
+one change this tool cannot see is a rewording of the nudge text itself
+(`CITATION_NUDGE`, `CONSISTENCY_NUDGE` in `scenario.py`): after one of
+those, re-measure every case that retries.
+</details>

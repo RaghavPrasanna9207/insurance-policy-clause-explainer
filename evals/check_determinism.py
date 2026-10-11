@@ -47,7 +47,9 @@ from app.config import settings  # noqa: E402
 from app.llm import client  # noqa: E402
 from app.pipeline.analyze import analyze  # noqa: E402
 from app.pipeline.ingest import ingest  # noqa: E402
-from app.pipeline.scenario import Computed, reasoning_request, shortlist  # noqa: E402
+from app.pipeline.scenario import (  # noqa: E402
+    Computed, reasoning_request, run_scenario, shortlist,
+)
 from app.pipeline.segment import segment  # noqa: E402
 
 GOLDEN_PDF = REPO_ROOT / "evals" / "golden" / "synthetic-health-policy.pdf"
@@ -130,26 +132,29 @@ async def check_sequence(clauses, cases, count: int) -> bool:
     cache bypassed, and compares pass 1 against pass 2 case by case - the
     ordering `run_scenario_eval.py` asks in.
 
-    NOT THE EVAL'S EXACT PROMPTS. Each request carries the case's words and
-    the clauses, but no extracted facts and no computed waiting-period,
-    window or reduction blocks, so it is shorter than what the eval sends.
-    Kept that way so this check's results stay comparable with its earlier
-    runs; sending the eval's real prompts is a separate, measured change.
+    THE EVAL'S OWN CALL, NOT A COPY OF IT. Each case goes through
+    `run_scenario(..., resample=True)`, the function the eval calls for its
+    repeat samples: stored facts, the computed blocks, the reasoning step
+    asked afresh, and any retry it triggers. This check twice built its own
+    requests instead, and both times they drifted from the eval's (no facts,
+    no computed blocks) while the docstring went on claiming otherwise. A
+    shared call cannot drift. Results from before M30 measured those shorter
+    prompts and are not comparable with results from this version.
     """
-    considered = shortlist(clauses)
-    nothing_computed = Computed(waiting=[], reductions=[], windows=[])
     chosen = cases[:count]
 
     async def one_pass(label: str) -> list[str]:
         out = []
         for i, case in enumerate(chosen, 1):
-            messages, schema = reasoning_request(
-                case["scenario"], {}, considered, nothing_computed
-            )
-            payload = await client.complete_json(
-                messages, schema, use_cache=False
-            )
-            out.append(_canonical(payload))
+            result = await run_scenario(case["scenario"], clauses, resample=True)
+            out.append(_canonical({
+                "verdict": result.verdict,
+                "reasoning": result.reasoning,
+                "deciding_clauses": [
+                    {"clause_id": c.clause_id, "quote": c.quote, "effect": c.effect}
+                    for c in result.citations
+                ],
+            }))
             print(f"  seq {label} {i}/{len(chosen)}: {case['id']}", flush=True)
         return out
 

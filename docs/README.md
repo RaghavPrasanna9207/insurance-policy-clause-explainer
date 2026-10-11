@@ -325,6 +325,20 @@ HDFC still paid an illness inside its 30-day wait although the line said it "sti
 Analysis never recorded clause 1.6's window, so expenses months after discharge got no computed line. A window stated in figures is now read off a coverage clause's own words (never off the options that change it for one plan). Fresh 200-day scan fixed; HDFC 11/14.
 - **Failure 92: a firm, correct line, and an invented co-payment** - the window line said "does NOT pay", and the model built a 20% co-payment out of a sentence saying there is none.
 
+### M30 - Cleanups, part 1: ligatures in the word lookups
+The word lookups that put "the clause naming your treatment" in the prompt read "ﬁstula" as "stula". Normalised where the matching happens; 0 of 17 Star requests change, so no score moves. Also: Ollama pinned back to 0.35.1.
+- **Failure 93: the right normalisation at the wrong layer** - normalising at ingest also changed what the model reads; four Star clauses were re-analysed differently, a room-rent cap vanished, and a verdict was lost.
+
+### M30 - Cleanups, part 2: HDFC's annexures, found inside "Contact Us"
+The "unanalysed ombudsman clause" was HDFC's three annexures segmented as pieces of "Contact Us"; the model looped copying the 68 non-payable items. Bold "Annexure X" lines now start a section (bold separates headings from mentions on six PDFs). Synthetic and Star unchanged; HDFC re-rolled and measured, 11/14 to 12/14.
+- **Why doubling the token limit cannot fix a loop** - a long answer needs room; a repeating one fills any room.
+
+### M30 - Cleanups, part 3: the determinism check now asks what the eval asks
+The sequence check built its own, shorter prompts (no facts, no computed lines), so it measured the stability of questions the eval never asks. It now calls `run_scenario`, the eval's own function. Proven by cache lookup: 0 of 16 requests matched the eval's before, 20 of 20 after. First real result: 2 of 8 cases differ between two passes.
+
+### M30 - Cleanups, part 4: "which questions did this change reach?" as one command
+`evals/compare_requests.py` lists the eval questions whose requests differ between two checkouts, without generating an answer. Replaces a throwaway script rewritten every milestone; checked against a known result (14 of 109, all HDFC). Also records why the larger "run trace" proposal was not built.
+
 ---
 
 ## Related documents
