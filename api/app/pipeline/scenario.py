@@ -1231,6 +1231,29 @@ def find_contradictions(
             f"refused claim has nothing to reduce. Decide first whether it is refused."
         )
 
+    # Paying, in full or in part, for an expense the window arithmetic puts
+    # outside every window raised for it. Until M31 no window result was read
+    # here at all, so the OUTSIDE line was an instruction with no check behind
+    # it. Measured on HDFC, physiotherapy seven months after discharge against
+    # 1.6's 180 days: told "clause 1.6 does NOT pay", the answer was
+    # conditional - once behind a 20% co-payment no clause states, once calling
+    # the window a waiting period that "has not yet elapsed". Only a paying
+    # verdict is asked about, and not when some window does cover the expense.
+    # Nothing is dropped: the citations may well be right.
+    if verdict in (Verdict.COVERED, Verdict.CONDITIONAL):
+        raised = [w for w in computed.windows
+                  if w.status is not window.WindowStatus.NOT_RAISED]
+        if raised and all(w.status is window.WindowStatus.OUTSIDE for w in raised):
+            problems += [
+                f"- You answered {verdict}, which means these expenses are paid, "
+                f"but it was calculated: {w.describe()} That is not a waiting "
+                f"period that will pass and not a reduction: an expense outside "
+                f"the window is not paid under that clause at all. Unless a "
+                f"different clause in the list pays for these expenses, the "
+                f"verdict is not_covered."
+                for w in raised
+            ]
+
     # Paying a claim on the strength of a clause that points to a list this
     # document does not contain. Measured on `day-care-not-listed`: day care is
     # paid for treatment "listed in Annexure II", there is no Annexure II, and

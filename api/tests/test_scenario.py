@@ -1201,3 +1201,32 @@ def test_a_ligature_in_the_policy_does_not_hide_a_named_word():
     clauses = [_clause("3", 50, "Treatment of ﬁstula in ano is excluded."), _clause("4", 50)]
     assert named_in_question({"procedure": "fistula surgery"}, clauses) == {"3": ["fistula"]}
 
+
+
+# --- M31: the consistency check reads windows and unserved waits ----------
+
+
+def test_paying_for_an_expense_outside_its_window_is_a_contradiction():
+    """HDFC, physiotherapy seven months after discharge: told 1.6 "does NOT pay"
+    (210 days against 180), the answer was conditional - and nothing compared
+    the verdict with the window result."""
+    from app.pipeline.scenario import ShortlistClause, compute, find_contradictions
+
+    post = ShortlistClause(
+        "1.6", "t:1", "1.6", "coverage",
+        "1.6. Post-Hospitalization Expenses ... only if the same were incurred upto "
+        "180 days, immediately post the date of discharge from the Hospital.", 1.0)
+
+    def computed(months):
+        return compute({"expense_timing_value": months, "expense_timing_unit": "months",
+                        "expense_timing_anchor": "after_discharge"}, [post])
+
+    for cited in ([_citation("1.6", "denies")],                                # M30's stored answer
+                  [_citation("1.1.1", "permits"), _citation("1.24", "reduces")]):  # M29's
+        problems, irrelevant = find_contradictions(cited, "conditional", computed(7))
+        assert len(problems) == 1 and "OUTSIDE THE WINDOW" in problems[0]
+        assert "not_covered" in problems[0] and irrelevant == []
+    assert len(find_contradictions([_citation("1.6", "permits")], "covered", computed(7))[0]) == 1
+    # The right refusal, and a payment inside the window, are left alone.
+    assert find_contradictions([_citation("1.6", "denies")], "not_covered", computed(7)) == ([], [])
+    assert find_contradictions([_citation("1.6", "permits")], "covered", computed(5)) == ([], [])
