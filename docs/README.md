@@ -333,6 +333,9 @@ The word lookups that put "the clause naming your treatment" in the prompt read 
 The "unanalysed ombudsman clause" was HDFC's three annexures segmented as pieces of "Contact Us"; the model looped copying the 68 non-payable items. Bold "Annexure X" lines now start a section (bold separates headings from mentions on six PDFs). Synthetic and Star unchanged; HDFC re-rolled and measured, 11/14 to 12/14.
 - **Why doubling the token limit cannot fix a loop** - a long answer needs room; a repeating one fills any room.
 
+### M30 - Cleanups, part 3: the determinism check now asks what the eval asks
+The sequence check built its own, shorter prompts (no facts, no computed lines), so it measured the stability of questions the eval never asks. It now calls `run_scenario`, the eval's own function. Proven by cache lookup: 0 of 16 requests matched the eval's before, 20 of 20 after. First real result: 2 of 8 cases differ between two passes.
+
 ---
 
 ## Related documents

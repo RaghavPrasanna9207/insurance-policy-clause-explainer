@@ -12856,3 +12856,116 @@ having spent the most time on the attempts that could never succeed. The
 cure for a loop is a better input (here, a clause that is one list rather
 than three unrelated things), not a larger limit.
 </details>
+
+---
+
+# M30 — Cleanups, part 3: the determinism check now asks what the eval asks
+
+## The problem
+
+`evals/check_determinism.py` exists because `temperature = 0` does not make
+a local model repeatable. Its most important layer is the **sequence
+check**: ask the first eight eval questions in order, twice, with the cache
+bypassed, and count how many answers differ between the two passes. That
+count is the noise floor. An eval change smaller than it means nothing.
+
+The check is only worth anything if it sends what the eval sends. It did
+not. It built its own requests:
+
+```python
+# evals/check_determinism.py, before
+nothing_computed = Computed(waiting=[], reductions=[], windows=[])
+messages, schema = reasoning_request(case["scenario"], {}, considered, nothing_computed)
+payload = await client.complete_json(messages, schema, use_cache=False)
+```
+
+Empty facts and nothing computed. The eval's real prompt carries the facts
+extracted from the question and every line code works out (waiting periods
+served or not, caps, cover windows). So the check measured the stability of
+shorter, simpler prompts. M20 found this (Failure 81), corrected the
+docstring to admit it, and left the real fix for later because it changes
+what is measured.
+
+## The fix: share the call, do not copy it a third time
+
+The obvious patch is three more lines: extract the facts, call `compute`,
+pass both in. That would be a third hand-built copy of what the pipeline
+does, and the first two both drifted. It would also still miss the retries:
+when an answer arrives with no citations, or contradicts the computed
+lines, the pipeline asks again with a nudge, and those are model calls the
+eval makes too.
+
+The eval does not build requests. It calls `run_scenario`, and for repeat
+samples it passes `resample=True`, which bypasses the cache for the
+reasoning step only (facts stay as stored, and nothing resampled is written
+back). The check now makes the same call:
+
+```python
+# evals/check_determinism.py, after
+result = await run_scenario(case["scenario"], clauses, resample=True)
+```
+
+A copy can drift from its original. A shared call cannot.
+
+## Verified without the model
+
+A claim that two things send "the same prompt" should be checked, not
+argued. The answer cache gives an exact test for free: every stored answer
+is filed under a hash of the complete request (model, messages, schema,
+options, runtime version). So a request is byte-identical to one the eval
+has sent if and only if its key is already in the cache.
+
+The model call was intercepted and each request the sequence check would
+send was looked up, with nothing reaching Ollama:
+
+| version of the check | requests | found in the eval's cache |
+|---|---|---|
+| before | 16 | **0** |
+| after | 20 | **20** |
+
+Before, not one request matched anything the eval has ever sent. After,
+every one does. The count rose from 16 to 20 because four of the sixteen
+answers trigger a retry, which the old check never performed.
+
+## The first real result
+
+On Ollama 0.35.1, `qwen2.5:7b-instruct-q4_K_M`, seed 0, temperature 0:
+
+```
+(raw JSON differed on 3/8; the count below is what the metrics would see)
+SEQUENCE (8 cases, 2 passes): 2 case(s) differ  FAIL
+    ped-waiting-not-served
+    no-timing-given
+```
+
+Two of eight real eval questions came back with a different verdict or
+different citations when the same eight were simply asked again. The
+single-prompt and analysis layers also failed, in the way Failure 24
+recorded: the first generation after a start differs from later ones.
+
+Earlier results of this check are not comparable (they measured other
+prompts), so this is the baseline from here on. What it says is not new, but
+it is now measured on the right thing: a single eval run cannot be trusted
+to within a case or two, which is the reason every comparison in this
+project since M17 is a majority of three samples and counts only the cases
+whose requests actually changed.
+
+## Check it yourself
+
+```bash
+python evals/check_determinism.py --sequence 8     # about 8 minutes, calls the model
+```
+
+**Predict before you look:** the old check sent 16 requests for 8 cases
+asked twice. The new one sends 20. No case was added. Where do the other
+four come from, and why does it matter that the check includes them?
+
+<details>
+<summary>Answer</summary>
+
+They are retries. `run_scenario` asks a second time when an answer names no
+deciding clause or contradicts a computed line. Those second answers are
+what the eval scores for those cases, so their stability is part of the
+eval's stability. A check that skipped them was measuring the first draft of
+an answer the eval never used.
+</details>
