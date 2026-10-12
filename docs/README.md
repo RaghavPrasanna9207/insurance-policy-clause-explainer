@@ -358,6 +358,12 @@ A fall "after drinking heavily" was answered covered: the sentence excluding alc
 - **Failure 96: the rule that only asked when the clause was not cited** - right 3/3 in one server session, wrong 2/3 in the next, where the model said covered while citing the exclusion as "reduces". Citing a clause is not applying it.
 - **Follow-up, Failure 97: a total that did not move hid four cases that did** - the full run after M34 scored 37/40 again: two cases gained, two lost, on identical requests. One loss was noise (right 3 of 3 minutes later); the other is a hole in M31's rule that trusts the label "permits", recorded and left open. Why runs are compared case by case, never by the total.
 
+### M35 - The label "permits" is the model's opinion of its own answer
+A chest infection two weeks into the policy was paid because the check stood down whenever the model labelled the waiting-period clause "permits". The rule: a check may read the verdict and the citations, never the model's description of its own reasoning. Also a second rule for a definite verdict on a waiting period nobody can time (Star gallstones).
+- **Failure 98: the re-ask worded as a correction** - "You answered covered, but ..." refused a person hit by a car, 4 of 4. The same content as a two-way question kept that answer and fixed the wrong ones.
+- **Failure 99: correcting a fact made the answer worse** - working out "held 2 years" from two stated ages turned "cannot tell" into a refusal under the pre-existing-disease clause, 3 of 3. Reverted.
+- **Investigated and left alone** - five open cases, each with the candidate rule and the number that ruled it out.
+
 ---
 
 ## Related documents

@@ -14072,3 +14072,292 @@ excepts accidents. The other test looks for a word of the exception
 ("accident") in the question, and the person wrote "hit by a car". The same
 gap between a person's words and a policy's words that M34 was about.
 </details>
+
+---
+
+# M35 — The label "permits" is the model's opinion of its own answer
+
+## The problem
+
+The synthetic policy's clause 3.1 refuses any illness in the first 30 days,
+"except claims arising out of an Accident". The eval question
+`initial-waiting-period` is "I got a bad chest infection two weeks after my
+policy started and was admitted to hospital." The right answer is
+`not_covered`, citing 3.1.
+
+The code works this out before the model is asked. It extracts "2 weeks",
+compares it with 30 days, and writes into the prompt that clause 3.1 "still
+applies". Since M31 there has also been a check after the answer, in
+`find_contradictions` in `api/app/pipeline/scenario.py`: if the answer is
+`covered` while a general waiting period is computed as not served, the
+model is asked once more.
+
+The full run of the main set after M34 had this case wrong, `covered`, 2
+samples of 3, and three more samples on its own gave:
+
+```
+-> covered [('3.1', 'permits')]
+FINAL: covered [('3.1', 'permits')]      (3 of 3, never asked again)
+```
+
+The check did not fire. This is the rule as it stood:
+
+```python
+if check.exceptions and (
+    any(c.clause_id == check.clause_id and c.effect == "permits" for c in citations)
+    or any(_stems(e).keys() & said for e in check.exceptions)
+):
+    continue
+```
+
+Two ways to be let through. The second: the question uses a word of the
+clause's exception ("road accident"). The first: the answer cites the
+waiting-period clause with the effect label "permits". That was added for
+`accident-in-initial-period`, "I was hit by a car ten days after my policy
+started", which is correctly `covered` and never uses the word "accident".
+The reasoning was: if the model says 3.1 permits the claim, it has applied
+the exception.
+
+On the chest infection the model says exactly that, and is wrong. HDFC's
+malaria on day 25 was covered the same way ("not an accident, therefore
+covered", citing the clause as permitting).
+
+## Why the skip was wrong
+
+Every citation the model returns carries an effect label chosen from a
+fixed list (`permits`, `denies`, `reduces`, `delays`, `requires`). The label
+is constrained to be one of those words. Nothing constrains it to be true.
+It is the model's own summary of what it did with the clause, and the check
+exists because the model's account of the policy cannot be taken on trust.
+A check that stands down when the model labels its answer correct is not a
+check.
+
+This is the third time the same mistake has been found in this file:
+
+- M33: `covered` while citing an exclusion that names the treatment.
+- M34, Failure 96: a rule that stayed silent when the alcohol exclusion was
+  *cited*; the model cited it as "reduces" and still paid.
+- Here: a rule that stays silent when the clause is *labelled* "permits".
+
+**The transferable rule: a check on a model's answer may read the verdict,
+and may read which clauses are cited, but must never take the model's
+description of its own reasoning as evidence that the reasoning was done.**
+
+## The fix, and Failure 98 on the way
+
+Deleting the first test means the rule now asks about every `covered`
+answer inside an unserved general waiting period unless the question itself
+uses the exception's words. That includes the correct "hit by a car"
+answer, so what the re-ask says matters.
+
+**Every case the rule can reach** was listed first, with no model: the
+questions for which the code computes an unserved general waiting period.
+Seven of the 109:
+
+| case | expected | exception word in the question |
+|---|---|---|
+| `initial-waiting-period` (chest infection, 2 weeks) | not_covered | no |
+| `accident-in-initial-period` (hit by a car, day 10) | covered | no |
+| `star-dengue-first-month` | not_covered | no |
+| `hdfc-typhoid-20-days` | not_covered | no |
+| `hdfc-malaria-25-days` | not_covered | no |
+| `hdfc-gastroenteritis-three-weeks` | not_covered | no |
+| `hdfc-accident-ten-days` ("a road accident") | covered | yes, never asked |
+
+**First wording (Failure 98).** The re-ask was written as a correction:
+
+> You answered covered, but it was calculated: [3.1 still applies]. Inside
+> that period clause 3.1 pays only for: claims arising out of an Accident.
+> If what the person described is that, keep covered and say so in the
+> reasoning. An illness, infection, fever or disease is not that: the
+> answer is then not_covered, citing clause 3.1 with effect denies.
+
+Fresh samples:
+
+```
+initial-waiting-period       covered -> asked -> not_covered   4 of 4  (fixed)
+hdfc-malaria-25-days         covered -> asked -> not_covered   3 of 3  (fixed)
+accident-in-initial-period   covered -> asked -> not_covered   4 of 4  (BROKEN)
+```
+
+A person hit by a car was now refused. The message opens with "You answered
+covered, but", ends with "the answer is then not_covered", and puts the way
+out in a subordinate clause in the middle. A 7B model asked again reads the
+shape of the message, and the shape said "you were wrong".
+
+**Second wording.** The same content as a question with two outcomes of
+equal weight, and no statement that the first answer was wrong:
+
+```python
+# api/app/pipeline/scenario.py, in find_contradictions
+problems.append(
+    f"- It was calculated: {check.describe()}. Inside that period clause "
+    f"{check.clause_id} pays for one thing only: "
+    f"{'; '.join(check.exceptions)}. Decide which of these the person "
+    f"described. (a) An injury from a sudden outside event, such as a "
+    f"crash, a fall or a blow, is an accident: the answer stays covered. "
+    f"(b) An illness, infection, fever or disease is not an accident: the "
+    f"answer is not_covered, citing clause {check.clause_id} with effect "
+    f"denies. Say which in the reasoning."
+)
+```
+
+A clause with no extracted exception keeps the old flat wording ("clause X
+refuses it").
+
+One honest limit: the sentence under (a) describes an accident, because
+"accident" is the exception in all three policies this project has read.
+The exception's own words are quoted from the clause, but a policy whose
+waiting period excepted something else would get an (a) that does not fit
+it. The check would still ask; the hint would be off.
+
+## Measured
+
+Each reachable case, three samples, in two separate server sessions (the
+server was restarted between them, because of Failure 94: answers from this
+model differ between sessions).
+
+| case | before | session 1 | session 2 |
+|---|---|---|---|
+| `initial-waiting-period` | wrong 3/3 | right 3/3 | right 3/3 |
+| `hdfc-malaria-25-days` | wrong (covered) | right 2/3 | right 3/3 |
+| `accident-in-initial-period` | right | right 3/3 | right 3/3 |
+| `hdfc-accident-ten-days` | right | right 3/3 | right 3/3 |
+| `star-dengue-first-month` | right | right 3/3 | right 3/3 |
+| `hdfc-typhoid-20-days` | right | right 3/3 | right 3/3 |
+| `hdfc-gastroenteritis-three-weeks` | right | right 3/3 | right 3/3 |
+
+No line was added to the prompt, so `evals/compare_requests.py` reports 0
+of 109 first requests changed: no other question can be affected.
+
+## A second rule: a definite verdict on a waiting period nobody can time
+
+`star-gallstones-no-timing`, on Star's real wording: "I need my gallbladder
+removed because of gallstones. How much of it will the policy pay?" Gall
+bladder stones carry a 24-month waiting period and the person has not said
+how long they have held the policy. Expected `insufficient_information`.
+
+The stored answer was `conditional`, with this reasoning:
+
+> it is unclear whether this waiting period has been served. If [it has]
+> ... paid at 95% ... If not ... not be covered.
+
+The reasoning is correct and is the definition of
+`insufficient_information`. Only the verdict label is wrong, and nothing
+asked about it. The rule added:
+
+```python
+if verdict != Verdict.INSUFFICIENT_INFORMATION:
+    unknown = {
+        c.clause_id: c for c in computed.waiting
+        if c.status is waiting.WaitingStatus.UNKNOWN and not c.pre_existing
+    }
+    for citation in citations:
+        check = unknown.get(citation.clause_id)
+        if citation.effect in _ADVERSE_EFFECTS and check is not None:
+            problems.append(...)   # "the answer is insufficient_information,
+                                   #  still citing clause X ... Answer otherwise
+                                   #  only if some other clause refuses outright."
+```
+
+It fires only when the answer **itself cites** the untimed clause as
+working against the claim. That looks like the mistake this entry is about,
+trusting the model's label, and the difference is worth stating. The
+"permits" skip used the label as a reason to *stop checking*. This rule
+uses the label as a reason to *start*: the model has said the clause stands
+in the way, the code knows the clause cannot be timed, and the two together
+are a contradiction with a definite verdict. If the label is wrong, the
+cost is one extra question, not a missed error.
+
+A wider rule, "any paying verdict while any waiting period is untimed", was
+rejected: two eval questions give no timing and are correctly payable.
+
+Reach: 12 of 109 questions have such a waiting period. On stored answers
+the rule re-asks one, the gallstones case. All 12 were sampled live:
+
+| | session 1 | session 2 |
+|---|---|---|
+| `star-gallstones-no-timing` | wrong → right 3/3 | right 2/3 |
+| the other 11 | unchanged (9 right, 2 wrong as before) | unchanged, the same 9 right and 2 wrong |
+
+The two that stay wrong are `ho2-gallbladder-no-timing` (the same mistake,
+but it cites only the co-payment clause, so the rule has nothing to hold)
+and `ho3-switched-from-old-insurer` (below).
+
+## Failure 99: correcting a fact made the answer worse
+
+`copay-applies-emergency`: "I took this policy out when I was 70 and I am
+72 now. I was admitted with pneumonia last month." Expected `conditional`
+(a 20% co-payment applies above 60 at inception). The model answers
+`insufficient_information`, 3 of 3.
+
+The cause looked simple. Fact extraction returns both ages and no duration,
+correctly, since none is stated. So every waiting period reads "how long
+the policy has been held was NOT STATED", and "cannot tell" is a fair
+reading of that prompt. The fix tried was eleven lines: when both ages are
+given and no duration, held = 72 − 70 = 2 years. Subtraction is the code's
+job, not the model's. It changes one question's request out of 109.
+
+Result, 3 of 3:
+
+> not_covered, citing 3.2 — "the 36-month pre-existing disease waiting
+> period (clause 3.2) has not yet been served. The policy has been held for
+> only 2 years"
+
+Nobody said the pneumonia was pre-existing. With no duration, the model had
+no number to compare with 36 months and declined to answer. Given the
+number, it compared it with the first waiting period it could, and refused.
+An answer of "cannot tell" became a wrong refusal, which is a worse error:
+the person is told a payable claim will not be paid.
+
+The change was reverted. **A correct fact handed to a weak reasoner is not
+automatically an improvement; it is new material for the reasoner's
+existing fault.** The fault here, refusing under the pre-existing-disease
+clause when nothing pre-existing was described, is the oldest unsolved one
+in this project, and a rule against it was measured and refused in M33 (it
+caught 2 wrong answers and disturbed 2 right ones).
+
+## Investigated and left alone
+
+Five other open cases were examined from stored answers with no model, each
+with a candidate rule replayed over all 109 questions.
+
+| case | what goes wrong | why no rule was built |
+|---|---|---|
+| `ped-waiting-served` (unstable) | first answer sometimes refuses under the cosmetic exclusion | the only rule that reaches it re-asks 9 answers, 7 of them right |
+| `ho3-two-policies-appendix` | refuses as pre-existing; nobody said so | a rule exists, but it acts when a list of "history" words is *absent*; on 28 phrasings written beforehand it missed 7. The shape refused in M33 |
+| `ho3-switched-from-old-insurer` | "last year" is not extracted as a duration | "last year" can mean three weeks ago; reading it as one year would mark the 30-day wait served, an error toward paying |
+| `breach-of-law` (unstable) | "arrested for shoplifting" shares no word with the breach-of-law exclusion | a word list for crimes would be fitted to one sentence, and on stored answers it changes nothing that can be measured |
+| `ambulance-admissible` | verdict right, ambulance clause never cited | citation only; the candidate rule was low confidence |
+
+## What this milestone made possible
+
+The three worst kinds of answer this tool can give are, in order: paying a
+claim the policy refuses, refusing one it pays, and a wrong citation. After
+this milestone no eval question about a general waiting period is paid
+wrongly in either session measured, on any of the three policies.
+
+## Check it yourself
+
+```bash
+cd api
+.venv/Scripts/python -m pytest tests/test_scenario.py -q -k "unserved_general or unknown_age"
+```
+
+**Predict before you look:** the new gallstones rule asks again only when
+the answer cites the untimed clause as "denies", "delays", "reduces" or
+similar. Suppose the model answers `covered` and cites that clause as
+"permits". Does the rule fire? Should it?
+
+<details>
+<summary>Answer</summary>
+
+It does not fire, and that is a known gap rather than a decision that the
+answer is fine. The code cannot tell whether the clause concerns the claim
+at all: "gallstones" shares no word with "Calculi ... Gall Bladder", so
+the word lookup that would say "this clause is about your condition" comes
+back empty. Without that, the only evidence that the clause matters is the
+model saying so. Firing on every answer that merely mentions an untimed
+waiting period would re-ask questions like "my cosmetic surgery", where the
+waiting periods are irrelevant and the answer is already right.
+</details>

@@ -17,8 +17,8 @@ Measured with `qwen2.5:7b-instruct-q4_K_M` as of M33, on three documents: a 39-c
 | Scenario verdicts — synthetic held-out batch 2 (13 cases) | **12/13** | quality |
 | Scenario verdicts — synthetic held-out batch 3 (3 cases) | **1/3** | quality |
 | Scenario verdicts — synthetic held-out batch 4 (6 cases) | **4/6** | quality |
-| Scenario verdicts — Star Health's real wording (10 cases) | **9/10** | quality |
-| Star Health cases whose answer cites the clause that decides them | **9/10** | quality |
+| Scenario verdicts — Star Health's real wording (10 cases) | **10/10** | quality |
+| Star Health cases whose answer cites the clause that decides them | **10/10** | quality |
 | Scenario verdicts — HDFC ERGO's real wording (14 cases) | **14/14** | quality |
 | **Citation detection integrity** | **1.000** | **guarantee** |
 
@@ -191,6 +191,7 @@ No real insurer policy wordings are committed to this repository.
 | M32 | A refusal that never cites the unserved waiting period is asked again | ✅ Star dengue and HDFC gastroenteritis cite the deciding clause 3/3; main set 37/40. ⚠️ Star 9/10 → 8/10: the caesarean case proved unstable across days (Failure 94), unrelated to the change |
 | M33 | Three more candidates for the consistency check | ✅ Star caesarean right 3/3 in two server sessions (Star 9/10, cited 9/10); held-out 3 0/3 → 1/3. ❌ a rule for listed waiting periods refused: its word lookup misses 26 of 52 conditions the lists really bar. ⚠️ the first version of one rule refused a correct HDFC answer 6/6 on fresh samples, though it passed on every stored answer (Failure 95) |
 | M34 | An injury after drinking, and the alcohol exclusion filed under another heading | ✅ `intoxication-injury` covered 3/3 → not_covered 3/3 in two server sessions; reaches 2 of 109 questions. ⚠️ the first version passed in one session and failed in the next (Failure 96). Full run afterwards: still 37/40, but not the same 37 - this case and one other gained, two lost with identical requests (Failure 97). One of the two, a chest infection in the 30-day waiting period, is a real hole in M31's rule, left open |
+| M35 | The label "permits" is not proof an exception was applied; a definite verdict on a waiting period nobody can time | ✅ chest infection at two weeks wrong 3/3 → right 3/3 and HDFC malaria on day 25 right in both of two server sessions; Star gallstones fixed (Star 10/10, changed cases only). All 18 reachable questions sampled twice, none worse. ⚠️ the first wording of the re-ask refused a person hit by a car 4/4 (Failure 98). ❌ deriving time held from two ages turned a "cannot tell" into a false refusal 3/3 and was reverted (Failure 99). Five other open cases investigated and left alone, with reasons |
 
 Evaluation is the point, not an afterthought: model and prompt changes in this project are justified by measured numbers on the golden set, never by impressions. See [Results](#results) and [`evals/REPORT.md`](evals/REPORT.md).
 

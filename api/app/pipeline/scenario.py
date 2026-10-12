@@ -1286,29 +1286,42 @@ def find_contradictions(
     # line of the block (a wait for planned treatment abroad), and nothing
     # asked it again. General periods only - a list-type or pre-existing one
     # may not concern this claim, and its line says so. Whether the clause's
-    # own exception applies is language, so it is left to the model twice
-    # over: not asked when the answer cites the clause as permitting (it
-    # applied the exception - "hit by a car", citing 3.1), nor when the
-    # description uses the exception's words ("road accident").
-    # ponytail: an answer citing the clause as "permits" for an illness (HDFC
-    # malaria, day 25: "not an accident, therefore covered") is not caught;
-    # telling that from a real accident is language, not a lookup.
+    # own exception applies is language, so the model decides it: not asked
+    # when the description uses the exception's words ("road accident"), and
+    # otherwise asked with the exception quoted.
+    #
+    # Until M35 an answer citing the clause as "permits" was not asked either,
+    # on the reasoning that it had applied the exception ("hit by a car",
+    # citing 3.1). A chest infection at two weeks and HDFC's malaria on day 25
+    # were covered the same way, 3 samples of 3: the label is the model's
+    # description of its own answer, and that is what is being checked.
     if verdict == Verdict.COVERED:
         said = _stems(scenario).keys()
         for check in computed.waiting:
             if (check.status is not waiting.WaitingStatus.NOT_SERVED
                     or check.listed or check.pre_existing):
                 continue
-            if check.exceptions and (
-                any(c.clause_id == check.clause_id and c.effect == "permits" for c in citations)
-                or any(_stems(e).keys() & said for e in check.exceptions)
-            ):
+            if any(_stems(e).keys() & said for e in check.exceptions):
                 continue
+            if not check.exceptions:
+                problems.append(
+                    f"- You answered covered, but it was calculated: {check.describe()}. "
+                    f"Clause {check.clause_id} refuses it: the answer is not_covered, "
+                    f"citing clause {check.clause_id} with effect denies."
+                )
+                continue
+            # A question with both outcomes spelled out. Worded as a correction
+            # ("the answer is then not_covered") it turned "hit by a car" into
+            # a refusal, 4 samples of 4.
             problems.append(
-                f"- You answered covered, but it was calculated: {check.describe()}. "
-                f"Unless the description puts this claim within that clause's own "
-                f"exception, clause {check.clause_id} refuses it: the answer is "
-                f"not_covered, citing clause {check.clause_id}."
+                f"- It was calculated: {check.describe()}. Inside that period clause "
+                f"{check.clause_id} pays for one thing only: "
+                f"{'; '.join(check.exceptions)}. Decide which of these the person "
+                f"described. (a) An injury from a sudden outside event, such as a "
+                f"crash, a fall or a blow, is an accident: the answer stays covered. "
+                f"(b) An illness, infection, fever or disease is not an accident: the "
+                f"answer is not_covered, citing clause {check.clause_id} with effect "
+                f"denies. Say which in the reasoning."
             )
 
     # The mirror of the rule above: refused, inside a general waiting period
@@ -1474,6 +1487,38 @@ def find_contradictions(
             f"citing clause {named} with effect denies; if it is not, say why in "
             f"the reasoning."
         )
+
+    # A definite verdict resting on a waiting period nobody can time. The
+    # person never said how long they have held the policy, so the clause's
+    # line reads "NOT STATED ... cannot be determined" - and Star, gallstones,
+    # cited 2#2 as "delays", wrote "it is unclear whether this waiting period
+    # has been served. If [it] has been served, the claim will be paid at 95%
+    # ... If [not], the claim will not be covered", and answered conditional.
+    # That reasoning is the definition of insufficient_information. Only an
+    # answer that itself cites the clause as working against the claim is
+    # asked: which clause concerns this treatment is language, and the word
+    # lookup cannot say ("gallstones" shares no word with "Calculi ... Gall
+    # Bladder"). Not a pre-existing diseases period - its line already says it
+    # may not concern the claim. Nothing is dropped: the citation is right.
+    if verdict != Verdict.INSUFFICIENT_INFORMATION:
+        unknown = {
+            c.clause_id: c for c in computed.waiting
+            if c.status is waiting.WaitingStatus.UNKNOWN and not c.pre_existing
+        }
+        for citation in citations:
+            check = unknown.get(citation.clause_id)
+            if citation.effect in _ADVERSE_EFFECTS and check is not None:
+                problems.append(
+                    f"- You answered {verdict} and cited clause {citation.clause_id} as "
+                    f"a reason this claim is {_ADVERSE_EFFECTS[citation.effect]}, but "
+                    f"it was calculated: {check.describe()}. If clause "
+                    f"{citation.clause_id} concerns what the person described, whether "
+                    f"this claim is paid turns on a fact they did not give: the answer "
+                    f"is insufficient_information, still citing clause "
+                    f"{citation.clause_id}, with the missing fact in "
+                    f"missing_information. Answer otherwise only if some other clause "
+                    f"refuses this claim outright."
+                )
     return problems, irrelevant
 
 
