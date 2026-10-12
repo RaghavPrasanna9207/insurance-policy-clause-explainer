@@ -356,6 +356,7 @@ A caesarean answered by reading the maternity exclusion backwards; a group cover
 ### M34 - An exclusion hidden under the wrong heading
 A fall "after drinking heavily" was answered covered: the sentence excluding alcohol sits under the heading "Intentional Self-Injury", and "drinking" shares no word with "alcohol". A word lookup on the question, checked only when the answer pays; no prompt line added, so no first request changes.
 - **Failure 96: the rule that only asked when the clause was not cited** - right 3/3 in one server session, wrong 2/3 in the next, where the model said covered while citing the exclusion as "reduces". Citing a clause is not applying it.
+- **Follow-up, Failure 97: a total that did not move hid four cases that did** - the full run after M34 scored 37/40 again: two cases gained, two lost, on identical requests. One loss was noise (right 3 of 3 minutes later); the other is a hole in M31's rule that trusts the label "permits", recorded and left open. Why runs are compared case by case, never by the total.
 
 ---
 
