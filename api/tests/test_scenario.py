@@ -1252,11 +1252,14 @@ def test_covered_inside_an_unserved_general_waiting_period_is_a_contradiction():
     problems, irrelevant = find_contradictions(paid, "covered", computed(20), "Typhoid, day 20.")
     assert len(problems) == 1 and "3.1" in problems[0] and "still applies" in problems[0]
     assert irrelevant == []
-    # Served; time held unknown; a refusal; the exception applied; the exception's words used.
+    # Served; time held unknown; a refusal; the exception's words used.
     assert find_contradictions(paid, "covered", computed(45), "typhoid") == ([], [])
     assert find_contradictions(paid, "covered", compute({}, [cover, wait]), "typhoid") == ([], [])
     assert find_contradictions([_citation("3.1", "denies")], "not_covered", computed(20), "typhoid") == ([], [])
-    assert find_contradictions([_citation("3.1", "permits")], "covered", computed(10), "Hit by a car.") == ([], [])
+    # M35: the label "permits" on the clause is not proof the exception was applied.
+    # A chest infection was covered that way; it is asked, as a two-way question.
+    asked, _ = find_contradictions([_citation("3.1", "permits")], "covered", computed(14), "A chest infection.")
+    assert len(asked) == 1 and "(a)" in asked[0] and "claims arising due to an accident" in asked[0]
     assert find_contradictions(paid, "covered", computed(10), "Fractured my leg in a road accident.") == ([], [])
 
 
@@ -1401,3 +1404,41 @@ def test_the_alcohol_lookup_ignores_prescribed_drugs_and_non_exclusions():
     assert intoxication_clauses(drunk, swabs + _exclusions(INTOXICATION_TEXT)) == ["4.2"]
     assert intoxication_clauses(
         "My doctor prescribed drugs and medicines after discharge.", _exclusions(INTOXICATION_TEXT)) == []
+
+
+# --- M35: a definite verdict on a waiting period nobody can time ---
+
+SPECIFIED_TEXT = (
+    "2 Specified disease / procedure waiting period Expenses related to the treatment of the "
+    "following listed Conditions shall be excluded until the expiry of 24 months of continuous "
+    "coverage: Calculi in urinary system, Gall Bladder and Bile duct."
+)
+
+
+def test_a_verdict_citing_a_waiting_period_of_unknown_age_is_asked_again():
+    """`star-gallstones-no-timing`: no policy age given, 2#2 cited as "delays",
+    "it is unclear whether this waiting period has been served" - and conditional."""
+    from app.pipeline.scenario import ShortlistClause, compute, find_contradictions
+
+    clauses = [
+        ShortlistClause("2", "t:1", "2", "waiting_period", SPECIFIED_TEXT, 1.0,
+                        waiting_periods_days=[720]),
+        ShortlistClause("3.2", "t:2", "3.2", "waiting_period", PED_TEXT, 1.0,
+                        waiting_periods_days=[1080]),
+    ]
+    unstated = compute({"condition": "gallstones"}, clauses)
+    problems, irrelevant = find_contradictions([_citation("2", "delays")], "conditional", unstated)
+    assert len(problems) == 1 and "NOT STATED" in problems[0]
+    assert "insufficient_information, still citing clause 2" in problems[0]
+    assert irrelevant == []  # the citation is right; only the verdict is asked about
+    # The honest answer is left alone, and so is a citation that works against nothing.
+    assert find_contradictions(
+        [_citation("2", "delays")], "insufficient_information", unstated) == ([], [])
+    assert find_contradictions([_citation("2", "permits")], "covered", unstated) == ([], [])
+    # A pre-existing diseases period may not concern the claim at all: its line says so.
+    assert find_contradictions([_citation("3.2", "delays")], "not_covered", unstated) == ([], [])
+    # With the policy age stated the period is decided, and this rule has nothing to say.
+    stated = compute(
+        {"time_since_policy_start_value": 1, "time_since_policy_start_unit": "years"}, clauses)
+    assert not any("NOT STATED" in p for p in find_contradictions(
+        [_citation("2", "delays")], "not_covered", stated)[0])
