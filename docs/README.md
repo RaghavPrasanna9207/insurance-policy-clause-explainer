@@ -363,6 +363,7 @@ A chest infection two weeks into the policy was paid because the check stood dow
 - **Failure 98: the re-ask worded as a correction** - "You answered covered, but ..." refused a person hit by a car, 4 of 4. The same content as a two-way question kept that answer and fixed the wrong ones.
 - **Failure 99: correcting a fact made the answer worse** - working out "held 2 years" from two stated ages turned "cannot tell" into a refusal under the pre-existing-disease clause, 3 of 3. Reverted.
 - **Investigated and left alone** - five open cases, each with the candidate rule and the number that ruled it out.
+- **Follow-up: the full run, 38/40** - compared case by case with the run before it; one case that was called noise turns out to be wrong in every full run and right on its own.
 
 ---
 

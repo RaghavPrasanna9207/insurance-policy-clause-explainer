@@ -14361,3 +14361,95 @@ model saying so. Firing on every answer that merely mentions an untimed
 waiting period would re-ask questions like "my cosmetic surgery", where the
 waiting periods are irrelevant and the answer is already right.
 </details>
+
+---
+
+# M35 follow-up — The full run: 38/40, and a correction about "noise"
+
+## The problem
+
+M35 changed two rules in the consistency check
+(`find_contradictions` in `api/app/pipeline/scenario.py`) and measured only
+the 18 eval questions those rules can reach. The README's headline for the
+40 synthetic main questions, 37/40, came from the full run made before M35.
+The M34 follow-up entry showed why a headline must not be updated by
+arithmetic ("37 plus the one fixed"): that run kept its total while four
+answers changed underneath it. So the main set was run again in full.
+
+## The run
+
+```bash
+api/.venv/Scripts/python evals/run_scenario_eval.py --no-report --repeats 3
+```
+
+```
+majority verdict accuracy : 38/40 = 0.950
+unanimous cases           : 36/40
+per sample: 0.925, 0.950, 0.925
+```
+
+Case by case against the previous full run (after M34), as that entry said
+runs must be compared:
+
+| case | run after M34 | this run |
+|---|---|---|
+| `initial-waiting-period` (chest infection at two weeks) | wrong, covered 2/3 | **right, 3/3** (the M35 fix) |
+| `copay-applies-emergency` | wrong 3/3 | wrong 3/3 |
+| `breach-of-law` | wrong, covered 2/3 | wrong, covered 2/3 |
+| the other 37 | right | right |
+
+Nothing else moved. Three cases are right by 2 of 3 instead of 3 of 3
+(`ped-waiting-served`, `oral-chemo-limit`, `day-care-not-listed`), the same
+three as in the run before.
+
+## A correction: `breach-of-law` is not noise
+
+The M34 follow-up entry called this case noise, on this evidence: wrong 2
+of 3 inside the full run, right 3 of 3 when sampled alone minutes later in
+the same server session. Here it is wrong 2 of 3 inside a full run again,
+in a different server session.
+
+Wrong in two full runs out of two, right whenever asked alone, is a
+pattern, not noise. The question is "I was injured while being arrested for
+shoplifting and needed hospital treatment"; the expected answer is
+`not_covered` under the breach-of-law exclusion, clause 4.4. What differs
+between the two settings is only what the server was asked beforehand. The
+request sent for this question is byte-for-byte the same.
+
+That should not matter to a model run at temperature 0 with a fixed seed,
+and it does. The likely mechanism is the server's reuse of work from the
+previous request (it keeps the processed prefix of the last prompt and
+continues from it, with this project's setting of an 8-bit cache), which
+makes the arithmetic, and so occasionally the chosen word, depend on the
+request before. That was not tested here and is stated as a guess.
+
+What it means in practice:
+
+- The eval's first sample of each question replays a stored answer; samples
+  two and three are generated fresh, in whatever order the run reaches
+  them. A full run is therefore the harder and more honest test: it is
+  closer to a server that has been answering other people's questions.
+- "Right 3 of 3 when sampled alone" (the measurement used to accept a fix
+  since M33) can overstate. For M35 it did not: the fixed case is right in
+  the full run as well.
+- This case stays open. A word lookup for it was considered and rejected in
+  M35 as fitted to one sentence; that judgement is unchanged.
+
+## Where the main set stands
+
+38 of 40. The two misses: a co-payment case answered "cannot tell" (M35's
+Failure 99 records the fix that made it worse), and this one. Neither tells
+a person that a refused claim will be paid on every sample; `breach-of-law`
+does on two of three, and is the worst answer left in the main set.
+
+The headline remains a score on questions the system was tuned against. The
+number to quote is still the held-out one, as the project README explains.
+
+## Check it yourself
+
+```bash
+api/.venv/Scripts/python evals/run_scenario_eval.py --no-report --repeats 3 --only breach-of-law
+```
+
+Then compare with the same case inside the full run. If the two disagree,
+that is the effect described above, reproduced.
