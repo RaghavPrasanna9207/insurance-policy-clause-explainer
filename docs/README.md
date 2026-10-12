@@ -383,6 +383,9 @@ Star's maternity exclusion is printed with an exception it does not have. A thre
 - **Why the check was not widened** - the word lookup it would rely on names an exclusion in 5 questions and is right about one.
 - **Follow-up: every set run in full, in one session** - 100 of 109, every total as the README had it, and the same nine misses by name. The hand-kept list of open cases had lost three, two of them refused claims answered as paid (a war injury, treatment in Toronto). Why the report says 37/40 and the README 39/40.
 
+### M39 - The app, used once from start to finish in a browser
+Upload, analysis, the ranked clause map, a clause's detail panel and three questions with known answers, driven in Chrome. It works; a short entry. Read it for what a browser showed that no eval score does: a stated time that had gone stale, a right verdict explained with the wrong clause, the schema's own label leaking into text meant for a person, and the app and the eval keeping separate answer caches.
+
 ---
 
 ## Related documents

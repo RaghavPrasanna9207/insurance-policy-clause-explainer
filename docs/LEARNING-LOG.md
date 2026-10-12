@@ -15446,3 +15446,156 @@ figure as "the cases the authors know about are handled". The honest
 headline is 100 of 109 with nine named failures, two of which pay a claim
 the policy refuses.
 </details>
+
+---
+
+# M39 — The app, used once from start to finish in a browser
+
+## The problem
+
+Everything measured since M17 was measured through the eval harness:
+Python scripts that call the pipeline's functions directly. The web
+application, the thing a person would actually use, had not been opened in
+a browser since its screens were built. The harness and the app share the
+pipeline but not the path to it. The app adds an upload endpoint, a
+background task, a status endpoint the page polls, a database, and a React
+front end. Thirty milestones of prompt and rule changes went through the
+first path and none through the second.
+
+So this milestone changes almost nothing and checks one thing: does the
+whole product still work when a person uses it?
+
+## What was done
+
+The API (`uvicorn app.main:app`, port 8000) and the front end (`npm run
+dev` in `web/`) were started, with Ollama 0.35.1 running, and the app was
+driven in Chrome: real clicks, a real file upload, typed questions. A
+recording of the session was saved as a GIF.
+
+One practical note: Vite's default port, 5173, was already taken by another
+project on this machine, so the front end came up on 5174. The first page
+loaded was therefore someone else's login screen. Read the port Vite
+prints; do not assume it.
+
+| step | expected | seen |
+|---|---|---|
+| Landing page | upload box, disclaimer | both present |
+| Upload `evals/golden/synthetic-health-policy.pdf` | redirect to the policy page, progress shown | "Reading 40 clauses", then "Read N of 40 clauses" with a percentage that only rises |
+| Analysis finishes | clause map | 40 clauses, 5 pages, "23 clauses in this policy could reduce or deny a claim" |
+| Ranking | worst first, each with a number and a label | 6.1 Notice of Claim, impact 85, "Easy to miss"; then 6.2 (83), 6.3 (82) |
+| Filters | one per clause type, with counts | Never covered 8, Something you must do 7, Not covered yet 4, Payout cap 4, Admin 6, Covered 6, Defined term 5 (sums to 40) |
+| Open a clause | plain-English version beside the policy's own words | side panel with both, the page number, the character offsets, and how the score was reached |
+| Typefaces | policy text in Source Serif 4, the app's own words in Instrument Sans | confirmed from the browser's computed styles, not by eye |
+| Severity | never colour alone | every impact bar carries its number and a text label |
+| Disclaimer | on every screen | landing, progress and policy pages |
+| Browser console | no errors | none |
+
+Three questions were then typed into "Check your own situation", each one
+an eval question with a known answer:
+
+| question | expected | shown |
+|---|---|---|
+| "I was injured while being arrested for shoplifting and needed hospital treatment. I have held the policy six years." | not_covered | **Not covered** — "On the wording below, this policy would not pay." |
+| "I was hit by a car ten days after my policy started and was hospitalised." | covered | **Likely covered** — "Nothing in this policy appears to block it, on what you described." |
+| "Does this policy cover my car being stolen from the hospital car park?" | insufficient_information | **Your policy doesn't settle this** — "Rather than guess, here is what would be needed to answer." |
+
+Each answer came back in 10 to 20 seconds with its reasoning, the list of
+facts the person did not mention, and the deciding clauses quoted in the
+policy's typeface with their page numbers.
+
+The product works end to end.
+
+## What the browser showed that the eval does not
+
+**1. A stated time that was wrong.** The landing page said "A 40-clause
+policy takes about two minutes to read." This run took about five: 32 of 40
+clauses were done roughly four minutes after the upload. The sentence was
+written when clauses were analysed several to a request; they were later
+analysed one at a time (`analyze_batch_size: int = 1` in
+`api/app/config.py`) because that measured more accurate, and the
+progress screen says so ("Each clause is read individually ... slower ...
+and measurably more accurate"). The landing page was never updated. Fixed:
+
+```tsx
+// web/src/routes/Upload.tsx
+A 40-clause policy takes about five minutes to read. The model runs locally, so the
+speed depends on your machine, not on a queue.
+```
+
+A small thing, and exactly the kind no eval can catch: a number in the
+interface that was true when it was written.
+
+**2. The shoplifting answer is right for the wrong clause, visibly.** The
+verdict was "Not covered", which is correct. The reason shown was:
+
+> ... falls under the exclusion in Clause 4.2 (4.2 Intentional
+> Self-Injury) ... Since the injury was intentional, the claim is not
+> covered.
+
+The clause that actually refuses it is 4.4, breach of law. Nobody injured
+themselves on purpose. In an eval table this is a line reading "missing
+4.4"; M37 recorded it as a citation fault and left it, because the attempt
+to fix it turned a correct refusal into a payment (Failure 102). On the
+screen it is a paragraph telling a person their injury was self-inflicted.
+The verdict score counts this answer as correct. Reading it as a user would
+is a different experience from reading the score, and it is worth doing
+once for that reason alone.
+
+**3. The model's vocabulary leaks.** The third answer ends "Therefore, the
+verdict is insufficient_information." That is the schema's internal label,
+written by the model into text meant for a person. The heading above it
+translates the label properly ("Your policy doesn't settle this"); the
+reasoning underneath is the model's own words and nothing translates
+those. Not fixed: the reasoning is shown as the model wrote it, and
+rewriting model text in code is a step this project has avoided.
+
+**4. The app and the eval do not share stored answers.** The eval had
+analysed this exact PDF many times, and every model answer is stored in a
+cache keyed by the exact request, so the upload might have been expected
+to finish in seconds. It took five minutes because the cache file's
+location is a relative path, `data/llm_cache.db`. The eval is run from the
+repository root and the API from `api/`, so there are two files:
+`data/llm_cache.db` and `api/data/llm_cache.db`. Nothing is wrong with
+either. It does mean the clause analysis the browser showed was generated
+afresh and is not guaranteed to be the one the eval scored. Left as it is:
+moving the file would change where a running installation keeps its data,
+for no gain a user would see.
+
+## Not checked
+
+- The real insurer PDFs through the browser (they are large; the Star and
+  HDFC wordings take much longer to analyse and were measured through the
+  harness).
+- The light ("paper") theme, a phone-width layout, and keyboard-only use.
+- Uploading something that is not a policy.
+
+## Check it yourself
+
+```bash
+# terminal 1 (Ollama must be running)
+cd api && .venv/Scripts/python.exe -m uvicorn app.main:app
+# terminal 2
+cd web && npm run dev          # read the port it prints
+```
+
+Upload `evals/golden/synthetic-health-policy.pdf` and ask the shoplifting
+question.
+
+**Predict before you look:** the eval harness and the web app call the same
+`run_scenario` function with the same question and the same policy. Will
+the browser show the same answer the eval recorded for that question?
+
+<details>
+<summary>Answer</summary>
+
+Not necessarily, and here it did not: the eval's fresh samples of this
+question mostly cite 4.4 after the M36 check asks again, and the browser's
+answer cited 4.2. Two things differ. The app keeps its own cache (finding
+4), so it analysed the uploaded PDF afresh; if even one clause's summary
+or extracted detail came out differently, the prompt differs, and a
+different prompt is a different answer. And M36 showed this very
+question's answer depends on what the
+server answered just before it. The same function is not the same request,
+and the same request is not always the same answer. The eval measures the
+pipeline; it does not replay what a particular user will see.
+</details>
