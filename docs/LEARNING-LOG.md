@@ -15280,3 +15280,169 @@ parts. No eval question tests it; it is recorded here so that the next
 person to touch `verify_exception` knows the bracket was the smaller of two
 problems.
 </details>
+
+---
+
+# M38 follow-up — Every set run in full, in one session
+
+## The problem
+
+The project README quotes a score for eight sets of questions: 40 main
+questions and four held-out batches on the synthetic policy, two sets on
+Star Health's wording, and one on HDFC ERGO's. Only the main set had been
+run in full since the last code change (M36). The others had last been run
+in full around M33. Every change after that left the first request of all
+109 questions byte-identical, and each question a change could reach was
+sampled again, so the README rows were "the last full run, with the
+re-measured cases updated". The README said so in a caveat paragraph.
+
+That is a defensible way to keep numbers current, and it is still an
+inference. Failure 97 (M34 follow-up) is the reason not to rest on it: a
+full run after a one-case fix came back with the same total and four
+different answers inside it. And the committed `evals/REPORT.md` was six
+days and ten prompt versions old (`v55`, against the code's `v65`).
+
+## The run
+
+All eight sets, three samples each, majority scored, one after another in a
+single new server session of Ollama 0.35.1, code at M36
+(`v65-own-offence`). 109 questions, 327 answers, 43 minutes.
+
+```bash
+P="api/.venv/Scripts/python evals/run_scenario_eval.py --no-report --repeats 3"
+$P --heldout 1      # and 2, 3, 4
+$P --policy samples/real/star-arogya-sanjeevani.pdf --cases evals/real/scenarios-star-arogya-sanjeevani.json
+$P --policy samples/real/star-arogya-sanjeevani.pdf --cases evals/real/scenarios-star-heldout-abroad.json
+$P --policy samples/real/hdfc-optima-secure.pdf     --cases evals/real/scenarios-hdfc-optima-secure.json
+$P                  # the 40 main questions
+```
+
+| set | README before | this run | all 3 samples agree |
+|---|---:|---:|---:|
+| main (40) | 39/40 | 39/40 | 37 |
+| held-out 1 (16) | 14/16 | 14/16 | 14 |
+| held-out 2 (13) | 12/13 | 12/13 | 13 |
+| held-out 3 (3) | 1/3 | 1/3 | 3 |
+| held-out 4 (6) | 4/6 | 4/6 | 5 |
+| Star (10) | 10/10 | 10/10 | 9 |
+| Star, treatment abroad (7) | not in the README | 6/7 | 7 |
+| HDFC (14) | 14/14 | 14/14 | 13 |
+| **total** | | **100/109** | 101 |
+
+Every total is the one the README already carried. After Failure 97 a
+matching total is not accepted as "nothing moved", so the misses were
+compared by name.
+
+## The nine wrong answers, by name
+
+| question | expected | answered | |
+|---|---|---|---|
+| `copay-applies-emergency` | conditional | insufficient_information 3/3 | known; M35, M36, M37 |
+| `ho-war-injury` | not_covered | **covered** 3/3 | known since the first held-out run; see below |
+| `ho-short-procedure` | insufficient_information | conditional 2/3 | known since M22 |
+| `ho2-gallbladder-no-timing` | insufficient_information | conditional 3/3 | known; M37 |
+| `ho3-two-policies-appendix` | conditional | not_covered 3/3 | known; M37 |
+| `ho3-switched-from-old-insurer` | covered | insufficient_information 3/3 | known; M37 |
+| `ho4-thyroid-after-cover` | covered | not_covered 2/3 | known; M37 |
+| `ho4-back-trouble-on-and-off` | insufficient_information | not_covered 3/3 | known; M37 |
+| `star-ho-flew-from-india-treated-toronto` | not_covered | **conditional** 3/3 | known since the abroad batch was written |
+
+No question that was right before is wrong now, and none that was wrong is
+right. This time the unchanged totals do mean unchanged answers.
+
+## A correction to M37: the open list was nine, not six
+
+M37 described "the remaining wrong answers" as one main-set miss and five
+held-out misses, plus two citation faults. The table above has nine wrong
+verdicts. Three were left off M37's list: `ho-war-injury`,
+`ho-short-procedure` and the Toronto question. They were not new; each is
+recorded in earlier entries. They were missing
+because M37's list was assembled from the cases recent milestones had been
+working on, not from a full run.
+
+Two of the three are the kind of error that matters most, a claim the
+policy refuses being answered as paid:
+
+- **`ho-war-injury`**: "I was injured by shelling while visiting a border
+  town during a war and had to be hospitalised." Clause 4.8 excludes war.
+  Answered `covered`, 3 of 3, never citing 4.8. This is the same gap as M34
+  (drinking / "intoxicating substances") and M36 (shoplifting / "breach of
+  law"), except that here the question even uses the clause's own word,
+  "war".
+- **Toronto**: Star's exclusion 22 refuses treatment outside India.
+  Answered `conditional`, 3 of 3.
+
+M36's entry said "No main-set question is now known to be answered
+`covered` when the policy refuses it." That sentence is true and its
+qualifier, "main-set", was doing more work than a reader would guess. On
+the held-out questions, the ones this system was never tuned on, two refused
+claims are still answered as paid.
+
+No fix was attempted here. Both belong to the family M37 concluded cannot be
+closed by another check-and-ask-again rule with this model, and both are
+added to the list of questions to put to a stronger one.
+
+**The lesson is about lists, not about these cases.** A list of open
+problems kept by hand drifts toward whatever was worked on last. The full
+run is the only list that is complete, which is the practical reason to
+keep running it even when every change has been measured on its own.
+
+## One number that was wrong
+
+The README had "Star Health cases whose answer cites the clause that
+decides them: 10/10". In this run `star-weekend-trek` (a leg broken on an
+amateur trek; expected `conditional`) has the right verdict in all three
+samples and in none of them cites clause 9, the adventure-sports exclusion
+whose "as a professional" wording is what makes the claim payable. The row
+is now 9/10.
+
+Other answers that are right without citing the deciding clause, 3 of 3:
+`ambulance-admissible` (2.5), `ho-cancer-reconstruction` (4.1),
+`ho-planned-notice-late` (6.1), `ho4-acute-no-history` (2.1),
+`hdfc-typhoid-45-days`, `hdfc-tests-75-days-before`,
+`hdfc-medicines-five-months-after`. A verdict score does not see any of
+these. A person reading such an answer is told the right outcome and
+pointed at the wrong paragraph, or at none.
+
+## What was changed
+
+- `evals/REPORT.md` regenerated (`python evals/run_all.py`), now stamped
+  `v65-own-offence`.
+- README: the Star citation row is 9/10; the caveat about which numbers
+  come from a full run is replaced by one sentence saying all of them do;
+  the count of known wrong verdicts is stated as 9 of 109.
+
+**Why the report says 37/40 and the README says 39/40.** They measure
+different things and both are right. The report is one sample: each
+question's *stored* answer, replayed. The README's figure is the majority
+of three samples, two of them generated afresh. Two main-set questions
+have a stored answer that is wrong and fresh answers that are right. The
+single-sample figure is the stricter one, and the gap between the two is
+itself a measurement of how much this model's answers vary.
+
+## Check it yourself
+
+```bash
+python evals/run_all.py          # replays the cache; a few seconds
+```
+
+Then open `evals/REPORT.md` and find `ho-war-injury`.
+
+**Predict before you look:** the main set scores 39/40 and held-out batches
+3 and 4 together score 5/9. Both were written by the same person for the
+same policy. What is the most likely reason for the difference, and which
+number should a stranger believe?
+
+<details>
+<summary>Answer</summary>
+
+The main set is the one the system was built against: for forty
+milestones, every rule and prompt line was kept only if those questions did
+not get worse. Batches 3 and 4 were written later, each to probe one new
+mechanism from an angle the mechanism had not been tuned for, so they are
+both harder and unseen. A stranger should believe the held-out figure as
+the estimate of what happens on their own question, and read the main
+figure as "the cases the authors know about are handled". The honest
+headline is 100 of 109 with nine named failures, two of which pay a claim
+the policy refuses.
+</details>

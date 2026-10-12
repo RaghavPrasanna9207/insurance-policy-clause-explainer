@@ -381,6 +381,7 @@ The remaining wrong answers attempted once more, each candidate tested on the ev
 Star's maternity exclusion is printed with an exception it does not have. A three-line fix to the exception check removes exactly that one line across three policies, and was reverted.
 - **Failure 103: the answer was right because of the false line** - with it, the model's wrong first answer cites the exclusion and a check catches it (right 3 of 3); without it, the model ignores the exclusion and promises a caesarean at 95% (wrong 3 of 3). A right answer is not evidence of a right process.
 - **Why the check was not widened** - the word lookup it would rely on names an exclusion in 5 questions and is right about one.
+- **Follow-up: every set run in full, in one session** - 100 of 109, every total as the README had it, and the same nine misses by name. The hand-kept list of open cases had lost three, two of them refused claims answered as paid (a war injury, treatment in Toronto). Why the report says 37/40 and the README 39/40.
 
 ---
 
