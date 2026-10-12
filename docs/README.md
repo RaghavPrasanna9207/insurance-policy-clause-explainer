@@ -353,6 +353,10 @@ A caesarean answered by reading the maternity exclusion backwards; a group cover
 - **Failure 95: zero false alarms on stored answers, six of six on fresh ones** - a rule that passed every model-free check refused a correct HDFC answer in a new server session. A rule's reach is its precondition, not what the last run answered; the three-step procedure that follows.
 - **Why one rule was refused** - the same word lookup is safe when a match triggers a re-ask toward refusing, and unsafe when a non-match would push toward paying: it misses 26 of 52 conditions the lists really bar.
 
+### M34 - An exclusion hidden under the wrong heading
+A fall "after drinking heavily" was answered covered: the sentence excluding alcohol sits under the heading "Intentional Self-Injury", and "drinking" shares no word with "alcohol". A word lookup on the question, checked only when the answer pays; no prompt line added, so no first request changes.
+- **Failure 96: the rule that only asked when the clause was not cited** - right 3/3 in one server session, wrong 2/3 in the next, where the model said covered while citing the exclusion as "reduces". Citing a clause is not applying it.
+
 ---
 
 ## Related documents

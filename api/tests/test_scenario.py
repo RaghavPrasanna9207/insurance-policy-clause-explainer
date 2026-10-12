@@ -1353,3 +1353,51 @@ def test_covered_citing_an_exclusion_that_names_the_procedure_is_asked_again():
     assert computed.excluding == {"Excl02": ["infection"]}
     problems, _ = find_contradictions([_citation("Excl02", "permits")], "covered", computed, late)
     assert not any("EXCLUSION" in p for p in problems)
+
+
+# --- M34: drink or drugs, and the exclusion about them ----------------------
+
+INTOXICATION_TEXT = (
+    "4.2 Intentional Self-Injury The Company shall not be liable for expenses arising out "
+    "of or attributable to any intentional self-injury, attempted suicide, or the use of "
+    "intoxicating substances, alcohol or drugs not prescribed by a registered Medical Practitioner."
+)
+
+
+def _exclusions(*texts):
+    from app.pipeline.scenario import ShortlistClause
+
+    return [ShortlistClause(t.split()[0], f"t:{i}", t.split()[0], "exclusion", t, 1.0)
+            for i, t in enumerate(texts)]
+
+
+def test_a_paying_answer_about_a_drunken_injury_must_face_the_alcohol_exclusion():
+    """`intoxication-injury`: a fall "after drinking heavily" was covered,
+    because the sentence about alcohol sits under "Intentional Self-Injury"."""
+    from app.pipeline.scenario import compute, find_contradictions
+
+    clauses = _policy(HOSPITAL_TEXT) + _exclusions(INTOXICATION_TEXT)
+    question = "I fell down the stairs after drinking heavily and fractured my hip."
+    computed = compute({}, clauses, question)
+    assert computed.intoxication == ["4.2"]
+    problems, irrelevant = find_contradictions(
+        [_citation("1.1", "permits")], "covered", computed, question)
+    assert len(problems) == 1 and "clause 4.2 is an EXCLUSION" in problems[0]
+    assert irrelevant == []
+    # Citing the clause is not applying it: covered, 4.2 labelled "reduces", is still asked.
+    cited, _ = find_contradictions([_citation("4.2", "reduces")], "covered", computed, question)
+    assert len(cited) == 1
+    # A refusal is left alone; so is a sober fall.
+    assert find_contradictions([_citation("4.2", "denies")], "not_covered", computed, question) == ([], [])
+    sober = "I fell down the stairs and fractured my hip."
+    assert compute({}, clauses, sober).intoxication == []
+
+
+def test_the_alcohol_lookup_ignores_prescribed_drugs_and_non_exclusions():
+    from app.pipeline.scenario import intoxication_clauses
+
+    swabs = _policy("LIST IV non-payable items: 15 ALCOHOL SWABES 16 SCRUB SOLUTION")
+    drunk = "I crashed my scooter while drunk."
+    assert intoxication_clauses(drunk, swabs + _exclusions(INTOXICATION_TEXT)) == ["4.2"]
+    assert intoxication_clauses(
+        "My doctor prescribed drugs and medicines after discharge.", _exclusions(INTOXICATION_TEXT)) == []
