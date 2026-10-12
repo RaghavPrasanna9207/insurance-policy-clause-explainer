@@ -377,6 +377,11 @@ The remaining wrong answers attempted once more, each candidate tested on the ev
 - **Failure 102: right in one session, and paying a refused claim in the next** - a fix for a wrongly cited clause turned a correct refusal (bungee jumping) into "covered". A re-ask is a push: ask which way the answer moves if the model simply gives way.
 - **What the four attempts have in common** - the model cannot tell old illness from new without an expected word, agrees a condition is on a list that omits it, and takes whichever option changes its answer.
 
+### M38 - A false line removed from the prompt, and the answer got worse
+Star's maternity exclusion is printed with an exception it does not have. A three-line fix to the exception check removes exactly that one line across three policies, and was reverted.
+- **Failure 103: the answer was right because of the false line** - with it, the model's wrong first answer cites the exclusion and a check catches it (right 3 of 3); without it, the model ignores the exclusion and promises a caesarean at 95% (wrong 3 of 3). A right answer is not evidence of a right process.
+- **Why the check was not widened** - the word lookup it would rely on names an exclusion in 5 questions and is right about one.
+
 ---
 
 ## Related documents

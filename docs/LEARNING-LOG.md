@@ -15067,3 +15067,216 @@ under 4.4, only ask whether it might be, and a model that gives way to a
 question with nothing computed behind it can land anywhere, including on
 "covered".
 </details>
+
+---
+
+# M38 — A false line removed from the prompt, and the answer got worse
+
+## The problem
+
+For every clause, the analysis step asks the model for the clause's
+*exceptions*: the cases in which the clause does not apply ("cosmetic
+surgery is excluded **unless** necessitated by an accident"). When a person
+later asks a question, each clause is printed in the prompt with a line
+under it: "EXCEPTIONS - this clause does NOT apply when: ...". That line is
+written by this program, not by the model, so a wrong one is a falsehood the
+program itself asserts.
+
+On Star Health's Arogya Sanjeevani wording, exclusion 18 (maternity) reads:
+
+```
+18.  Maternity - Code Excl 18
+a. Medical treatment expenses traceable to childbirth (including complicated
+   deliveries and caesarean sections incurred during hospitalization) except
+   ectopic pregnancy
+b. Expenses towards miscarriage (unless due to an accident) and lawful
+   medical termination of pregnancy during the Policy Period
+```
+
+The exceptions stored for it are:
+
+```
+"due to an accident"
+"lawful medical termination of pregnancy during the Policy Period"
+```
+
+The second is wrong. Termination of pregnancy is something the clause
+*excludes*; it is on the list of things not paid. And the one real exception
+in part (a), ectopic pregnancy, is missing: the model never returned it.
+
+## Why the wrong one gets through
+
+Extracted exceptions are already checked in code, because the model was
+measured returning wrong ones (5 of 8 on the synthetic policy, when the
+check was first written). The check, in `api/app/grounding.py`:
+
+```python
+def verify_exception(span: str, source_text: str) -> bool:
+    ...
+    while start != -1:
+        sentence_so_far = _SENTENCE_END.split(haystack[:start])[-1]
+        if _MARKER.search(sentence_so_far):
+            return True
+```
+
+An exception is accepted if its words appear in the clause **and** an
+exception word ("unless", "except", "other than", ...) comes before it in
+the same sentence. In part (b) there is an "unless" earlier in the sentence.
+But it sits inside brackets, "(unless due to an accident)", and the brackets
+have closed before "lawful medical termination" begins. A word inside a
+closed bracket governs only what is inside the bracket.
+
+## The fix that was tried
+
+Before looking for an exception word, delete every bracket that has already
+opened and closed:
+
+```python
+_CLOSED_BRACKET = re.compile(r"\([^()]*\)")
+...
+        if _MARKER.search(_CLOSED_BRACKET.sub(" ", sentence_so_far)):
+```
+
+"due to an accident" still passes, because its own bracket is still open at
+the point where it starts.
+
+**Measured without the model.** The check runs on the stored analysis, so
+its effect on all three policies can be listed with no model call:
+
+```
+exceptions before: 17, across 13 clauses in three policies
+exceptions after : 16
+dropped          : Star 18, "lawful medical termination of pregnancy during the Policy Period"
+```
+
+Exactly the one wrong exception goes, and nothing else. A test written from
+clause 18's text passed. `evals/compare_requests.py` reported that 2 of the
+109 eval questions would send a different first request: `star-caesarean`
+and `star-gallstones-no-timing`, the two whose prompts include clause 18.
+
+By every check that needs no model, this is a correct change.
+
+## Failure 103: the answer was right because of the false line
+
+`star-caesarean`: "I had a caesarean delivery last week and was in hospital
+for four days. I have held the policy for five years." Expected
+`not_covered` under clause 18. Three fresh samples each way, in one server
+session:
+
+```
+WITHOUT the fix (the false exception still printed)
+   first answer:  covered, citing 18
+                  "Clause 18 explicitly excludes '... caesarean sections ...
+                   except ectopic pregnancy.' Since this exclusion does not
+                   apply to caesarean sections, the claim is covered."
+   asked again -> not_covered, citing 18 as denies               3 of 3  RIGHT
+
+WITH the fix
+   first answer:  conditional, citing 9 only
+                  "You are covered for the caesarean delivery, but a 5%
+                   co-payment applies."
+   not asked again                                               3 of 3  WRONG
+```
+
+`star-gallstones-no-timing` was unchanged, right 3 of 3.
+
+**The model's first answer is wrong both ways.** With the false line, it is
+wrong in a shape the program recognises: it says `covered` and cites an
+exclusion that names what the person described, and a rule added in M33
+asks about exactly that. Without the false line, the model does not mention
+clause 18 at all. It answers `conditional`, cites only the co-payment
+clause, and nothing in `find_contradictions`
+(`api/app/pipeline/scenario.py`) asks about a paying answer that simply
+ignores an exclusion.
+
+So the correct result on this question was never the model reading clause
+18 correctly. It was a wrong reading that happened to trip a check.
+Removing a falsehood from the prompt removed the trip.
+
+**Could the check be widened to catch the new shape?** The rule would be: a
+paying answer, while the code's word lookup says some exclusion names what
+the person described, is asked about that exclusion whether or not it is
+cited. Its reach was listed with no model. The lookup names an exclusion in
+5 of the 109 questions:
+
+| question | expected | exclusion "named", by which word |
+|---|---|---|
+| `star-caesarean` | not_covered | 18, "caesarean" (a correct match) |
+| `star-ho-heart-attack-singapore` | not_covered | "heart", and "attack" (the nuclear-attack exclusion) |
+| `star-ho-ill-in-thailand-treated-chennai` | conditional | "severe" |
+| `hdfc-accident-ten-days` | covered | "fractured" |
+| `hdfc-medicines-five-months-after` | covered | "infection" |
+
+One match in five is right. Three of the other four are questions whose
+correct answer pays, and each would be asked whether an unrelated exclusion
+refuses it. M35 to M37 measured what this model does when asked that: it
+mostly gives way. The existing rule requires the answer to *cite* the
+exclusion precisely because the lookup alone is this loose. The wider rule
+was not built.
+
+**The fix was reverted.** The false exception line stays in Star's clause
+18. This is the uncomfortable outcome and it is the measured one: with the
+line, the one eval question that depends on the clause is answered
+correctly; without it, a claim the policy refuses is promised at 95%.
+
+Only one server session was measured. Both arms were unanimous, and a
+change that turns a refusal into a payment in any session is not merged, so
+a second session could not have changed the decision.
+
+## What to take from this
+
+- **A right answer is not evidence of a right process.** The eval scored
+  `star-caesarean` as correct and it was, for a reason nobody would have
+  designed. M32 recorded that an improvement nobody can explain is not yet
+  an improvement. This is the same lesson from the other side: a correct
+  answer nobody has explained is not yet a strength.
+- **Checks that fire on the shape of a wrong answer depend on the wrong
+  answer keeping its shape.** Any change to the prompt, even a correction,
+  can move a wrong first answer from a shape that is caught to one that is
+  not. That is why every prompt change in this project is measured on the
+  questions whose request it alters, however obviously correct it looks.
+- This is Failure 99 (M35) in a new place. There, a correct duration handed
+  to the model produced a wrong refusal. Here, a false statement taken away
+  produced a wrong payment. **With a weak reader, whether a line in the
+  prompt is true and what it does to the answer are separate
+  measurements.**
+
+Still open, unchanged: the false exception on Star's clause 18, and the
+missing one (ectopic pregnancy). A reader able to apply clause 18 on a
+first reading would need neither the false line nor the check; whether a
+stronger model does is one of the things a hosted-model comparison would
+measure.
+
+## Check it yourself
+
+Nothing was merged, so there is no new test. To see the answer the stored
+exceptions lead to:
+
+```bash
+api/.venv/Scripts/python evals/run_scenario_eval.py --no-report --repeats 3 \
+  --only star-caesarean --policy samples/real/star-arogya-sanjeevani.pdf \
+  --cases evals/real/scenarios-star-arogya-sanjeevani.json
+```
+
+**Predict before you look:** the bracket fix would have left "due to an
+accident" as an exception of clause 18. A woman writes: "I had a caesarean
+after a car accident brought on early labour." Which half of the clause
+does her claim fall under, and what would the printed line "this clause
+does NOT apply when: due to an accident" suggest?
+
+<details>
+<summary>Answer</summary>
+
+Her claim is childbirth, part (a), whose only exception is ectopic
+pregnancy; it is refused. "Due to an accident" belongs to part (b) and
+excepts a *miscarriage* caused by an accident. But exceptions are stored
+per clause, not per lettered part, so the printed line says the whole of
+clause 18 does not apply to accidents, and the code's own test for "does
+the question use the exception's words?" would see "accident" and stand
+down. The exception is real text, in the right clause, with a real
+exception word before it, and it is still attached to the wrong thing.
+Storing exceptions per clause is too coarse for a clause with lettered
+parts. No eval question tests it; it is recorded here so that the next
+person to touch `verify_exception` knows the bracket was the smaller of two
+problems.
+</details>
