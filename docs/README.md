@@ -370,6 +370,7 @@ An injury "while being arrested for shoplifting" was paid, but only when the ser
 - **Why a question can be right alone and wrong in a full run** - reproduced: right 4 of 4 after at most one other question, wrong 6 of 7 after two or more.
 - **Failure 100: a two-way question is still not neutral** - with the refusing option listed first, an unrelated arrest turned an appendix claim into a refusal, 3 of 3. The order of the options is part of the question.
 - **Failure 101: clean on every eval question, wrong one step outside** - a rule whose precondition matches only the case it was built for has not been tested at all. Five questions written beside it showed it paying claims it should refuse.
+- **Follow-up: the full run, 39/40** - one answer changed from the run before, the one the fix was for; what the score does and does not mean.
 
 ---
 
