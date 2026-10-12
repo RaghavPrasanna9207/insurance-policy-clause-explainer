@@ -1442,3 +1442,63 @@ def test_a_verdict_citing_a_waiting_period_of_unknown_age_is_asked_again():
         {"time_since_policy_start_value": 1, "time_since_policy_start_unit": "years"}, clauses)
     assert not any("NOT STATED" in p for p in find_contradictions(
         [_citation("2", "delays")], "not_covered", stated)[0])
+
+
+# --- the person's own offence, and the breach-of-law exclusion ---
+
+BREACH_TEXT = (
+    "4.4 Breach of Law\nExpenses for treatment directly arising from or consequent upon any "
+    "Insured Person committing or attempting to\ncommit a breach of law with criminal intent "
+    "shall be excluded."
+)
+
+
+def test_a_paying_answer_about_the_persons_own_offence_must_face_the_breach_of_law_exclusion():
+    """`breach-of-law`: "injured while being arrested for shoplifting" was covered on
+    2 samples of 3 inside a full run, and 4.4 was never cited."""
+    from app.pipeline.scenario import compute, find_contradictions
+
+    clauses = _policy(HOSPITAL_TEXT) + _exclusions(BREACH_TEXT)
+    question = "I was injured while being arrested for shoplifting and needed hospital treatment."
+    computed = compute({}, clauses, question)
+    # The clause's own words, with the line break in the PDF closed up.
+    assert computed.breach_of_law == {"4.4": (
+        "treatment directly arising from or consequent upon any Insured Person committing "
+        "or attempting to commit a breach of law with criminal intent")}
+    problems, irrelevant = find_contradictions(
+        [_citation("1.1", "permits")], "covered", computed, question)
+    assert len(problems) == 1 and irrelevant == []
+    # Both outcomes are spelled out, the paying one first, and nothing says the answer was wrong.
+    assert "the answer stays covered" in problems[0]
+    assert "not_covered, citing clause 4.4 with effect denies" in problems[0]
+    assert problems[0].index("stays covered") < problems[0].index("not_covered")
+    assert "You answered" not in problems[0]
+    # Asked whether or not the clause was cited; a refusal is left alone.
+    assert len(find_contradictions([_citation("4.4", "reduces")], "conditional", computed, question)[0]) == 1
+    assert find_contradictions([_citation("4.4", "denies")], "not_covered", computed, question) == ([], [])
+
+
+def test_the_offence_lookup_ignores_victims_bystanders_and_non_exclusions():
+    from app.pipeline.scenario import breach_of_law_clauses
+
+    excl = _exclusions(BREACH_TEXT)
+    for own in (
+        "I broke my ankle while shoplifting.",
+        "I was caught stealing and beaten by the shopkeeper.",
+        "We were fleeing from the police when the car crashed.",
+        "I fractured my wrist during my arrest.",
+    ):
+        assert list(breach_of_law_clauses(own, excl)) == ["4.4"], own
+    for not_own in (
+        "The driver who hit me was arrested.",
+        "He was arrested after hitting me with his car.",
+        "My bag was stolen and I was injured in the struggle.",
+        "I was robbed and stabbed.",
+        "A thief pushed me down the stairs while stealing my phone.",
+        "A car fleeing from the police hit me.",
+        "My husband went into cardiac arrest.",
+        "Does this policy cover my car being stolen from the hospital car park?",
+    ):
+        assert breach_of_law_clauses(not_own, excl) == {}, not_own
+    # The same words in a clause that is not an exclusion refuse nothing.
+    assert breach_of_law_clauses("I broke my ankle while shoplifting.", _policy(BREACH_TEXT)) == {}

@@ -365,6 +365,12 @@ A chest infection two weeks into the policy was paid because the check stood dow
 - **Investigated and left alone** - five open cases, each with the candidate rule and the number that ruled it out.
 - **Follow-up: the full run, 38/40** - compared case by case with the run before it; one case that was called noise turns out to be wrong in every full run and right on its own.
 
+### M36 - The last two misses in the main set: one fixed, one deliberately left
+An injury "while being arrested for shoplifting" was paid, but only when the server had just answered other questions; and a 72-year-old's pneumonia was answered "cannot tell". The first gets a word lookup and a two-way question; the second gets a fix that worked on the eval and was refused.
+- **Why a question can be right alone and wrong in a full run** - reproduced: right 4 of 4 after at most one other question, wrong 6 of 7 after two or more.
+- **Failure 100: a two-way question is still not neutral** - with the refusing option listed first, an unrelated arrest turned an appendix claim into a refusal, 3 of 3. The order of the options is part of the question.
+- **Failure 101: clean on every eval question, wrong one step outside** - a rule whose precondition matches only the case it was built for has not been tested at all. Five questions written beside it showed it paying claims it should refuse.
+
 ---
 
 ## Related documents
