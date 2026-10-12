@@ -14453,3 +14453,290 @@ api/.venv/Scripts/python evals/run_scenario_eval.py --no-report --repeats 3 --on
 
 Then compare with the same case inside the full run. If the two disagree,
 that is the effect described above, reproduced.
+
+---
+
+# M36 — The last two misses in the main set: one fixed, one deliberately left
+
+## The problem
+
+After M35 the 40 synthetic main questions scored 38 of 40. The two misses:
+
+1. `breach-of-law`: "I was injured while being arrested for shoplifting and
+   needed hospital treatment. I have held the policy six years." Expected
+   `not_covered` under clause 4.4, which excludes "treatment directly
+   arising from or consequent upon any Insured Person committing or
+   attempting to commit a breach of law with criminal intent". Answered
+   `covered` on 2 samples of 3 in two full runs, and correctly whenever it
+   was asked on its own.
+2. `copay-applies-emergency`: "I took this policy out when I was 70 and I
+   am 72 now. I was admitted with pneumonia last month." Expected
+   `conditional` (a 20% co-payment applies above 60 at inception). Answered
+   `insufficient_information`, 3 of 3.
+
+Each was given to a separate investigation with a fixed budget of model
+calls. One came back with a fix. The other came back with a fix that worked
+on every eval question and a recommendation not to use it. Both results are
+recorded here, because the second is the more instructive.
+
+## Part 1: `breach-of-law`
+
+### Why it failed only inside a full run
+
+The request sent for this question is identical every time. What differs is
+what the server answered just before. This was reproduced directly, by
+asking chosen questions fresh and then this one:
+
+```
+0 or 1 fresh questions before it    not_covered, citing 4.4     4 of 4
+2 or more fresh questions before    covered                     6 of 7
+```
+
+The immediately preceding question alone does not do it; two or more do.
+The wrong answer reads:
+
+> covered — cites 3.1, 4.1, 5.3 as "reduces" — "... The claim is not subject
+> to any waiting periods as they do not apply to claims arising out of an
+> Accident. Additionally, the treatment does not fall under any exclusions
+> such as cosmetic surgery, intentional self-injury, or participation ..."
+
+The model lists exclusions it checked and 4.4 is not among them. Why the
+server's recent history changes which exclusions a temperature-0 model
+looks at was not investigated; the M35 follow-up entry gives a guess (reuse
+of the previous request's processed prefix) and it remains a guess. What
+matters for the design is the consequence: **an answer that is right when a
+question is asked alone and wrong when the server is busy is wrong in the
+only setting a user ever meets.** A check after the answer does not care
+why the answer was wrong.
+
+### Why no existing lookup helps
+
+The code tries to connect a question to "the clause about your situation"
+by shared rare words. "Arrested for shoplifting" shares one word with
+clause 4.4, "treatment", which 16 clauses use. This is the same gap M34 met
+with "drinking heavily" and "intoxicating substances, alcohol": a person
+and a policy describing one thing in two vocabularies.
+
+M34's answer was a short fixed list of the words people use, looked up in
+the question, paired with a pattern for the clause, and checked only when
+the answer pays. The objection to repeating that here, recorded in M35, was
+that a word list for crimes would be fitted to one sentence. Two things
+were measured to test the objection:
+
+- **The clause side is not fitted.** "Breach of law with criminal intent"
+  is the insurance regulator's standard wording. The pattern finds exactly
+  one clause in each of the three policies this project has read (synthetic
+  4.4, Star's 10, HDFC's Excl10), all typed as exclusions, and nothing
+  else.
+- **The word list was written before reading the eval questions.** Run
+  over all 109, it matches one, this case. So the eval cannot say whether
+  it fires wrongly; that had to be tested on sentences written for the
+  purpose (below).
+
+### The fix
+
+```python
+# api/app/pipeline/scenario.py
+_OFFENCE = r"(?:shoplifting|stealing|robbing|burgling|trespassing|rioting|smuggling|looting)"
+_MENTIONS_OWN_OFFENCE = re.compile(
+    r"\b(?:i|we)\s+(?:was|were|got|had\s+been)\s+(?:being\s+)?"
+    r"(?:arrested|convicted|taken\s+into\s+custody|charged\s+with|(?:caught\s+)?" + _OFFENCE + r")\b"
+    r"|\bwhile\s+(?:being\s+arrested|resisting\s+arrest)\b"
+    r"|\b(?:my|our)\s+arrest\b"
+    ...
+)
+_BREACH_OF_LAW_CLAUSE = re.compile(
+    r"(?:\btreatment\b[^.:]*?)?\bbreach\s+of\s+law\s+with\s+criminal\s+intent\b", re.IGNORECASE)
+```
+
+The first draft of the word list matched "he was arrested" and "police
+chase", which a victim or a bystander says. Every alternative is now tied
+to the first person ("I was arrested", "my arrest", "while shoplifting"),
+and "while stealing my bag" is excluded as someone else's theft. "My son
+was arrested" does not match: a gap, chosen over a false match.
+
+The result is stored on `Computed.breach_of_law` and read in one place,
+`find_contradictions`, when the verdict pays:
+
+```python
+if verdict in (Verdict.COVERED, Verdict.CONDITIONAL):
+    for clause_id, words in computed.breach_of_law.items():
+        problems.append(
+            f"- Clause {clause_id} excludes \"{words}\". The person mentions an "
+            f"arrest or an offence (looked up from their own words; a lookup "
+            f"cannot tell whether that has anything to do with this treatment). "
+            f"Decide which of these the person described. (a) What is being "
+            f"treated is an illness, or an injury from something else, or the "
+            f"person committed no offence: clause {clause_id} does not apply, "
+            f"the answer stays {verdict}, and clause {clause_id} is not cited. "
+            f"(b) The person was hurt while committing or attempting an offence "
+            f"with criminal intent, or as a direct result of it: the answer is "
+            f"not_covered, citing clause {clause_id} with effect denies. Say "
+            f"which in the reasoning."
+        )
+```
+
+No line is added to the prompt, so the first request of all 109 questions
+is unchanged (`evals/compare_requests.py`: 0 of 109).
+
+### Failure 100: a two-way question is still not neutral
+
+M35's Failure 98 found that a re-ask worded as a correction ("You answered
+covered, but ...") flips right answers, and that a two-way question does
+not. The first wording here was already a two-way question, with the
+refusing outcome listed first. Tested on a sentence written as a guard:
+
+> "I was arrested at a protest last year and released without charge. This
+> month I had my appendix removed ..."
+
+it flipped a correct `covered` to `not_covered`, 3 of 3. An appendix has
+nothing to do with an arrest a year earlier.
+
+The wording above differs in two ways: the paying outcome is listed first,
+and the message says outright that the lookup cannot tell whether the
+arrest is relevant. With it the same sentence stays `covered`, 3 of 3.
+
+**For this model the order of the options in a question is part of the
+question.** Whatever is listed last, next to the instruction to answer,
+gets the benefit of the doubt. A check that asks again has to be tested on
+right answers as carefully as on wrong ones, and "it is phrased neutrally"
+is a claim to measure, not to assume.
+
+### Measured
+
+In two separate server sessions, by asking the six questions that precede
+this one in a full run and then this one, all fresh:
+
+```
+session 1   covered -> asked -> not_covered, citing 4.4 as denies   (1 natural, 3 with the first answer forced)
+session 2   covered -> asked -> not_covered, citing 4.4 as denies   3 of 3, all natural
+```
+
+Guard sentences, which must not be refused (session 2, two samples each):
+
+| sentence | lookup fires | result |
+|---|---|---|
+| arrested at a protest last year; appendix this month | yes | covered → asked → covered, 2 of 2 |
+| "arrested by mistake and my shoulder was dislocated when the officers pulled my arm" | yes | covered → asked → **conditional, citing 4.4 as "reduces"**, 2 of 2 |
+| "my bag was stolen and I was pushed over by the thief" | no | covered, 2 of 2 |
+
+The second row is a cost and is stated as one. Nobody is refused, but a
+person wrongly arrested gets `conditional` with the breach-of-law clause
+attached as a "reduction", which is not what that clause does and not what
+the right answer is. In session 1, on a differently worded sentence about a
+wrongful arrest, the answer stayed `covered` 3 of 3. So: on a wrongful
+arrest this rule sometimes turns a right answer into a muddled one that
+still pays. That was judged an acceptable price for no longer telling a
+shoplifter the claim will be paid, and it is the reader's to judge again.
+
+### Not measured
+
+A full run of the 40 main questions was started after this change and was
+stopped at 73 of 120 samples when the computer ran short of memory. The
+README's 38/40 is therefore still the M35 full run. This case's result
+comes from the reproducing sequence above, which is the part of a full run
+that makes it fail.
+
+## Part 2: `copay-applies-emergency`, and why a working fix was refused
+
+### What goes wrong
+
+Fact extraction returns age 72, age at inception 70, and no duration,
+correctly: none is stated. Every waiting period in the prompt then reads
+"how long the policy has been held was NOT STATED", and the model answers
+that it cannot tell.
+
+M35 tried the obvious repair, working out 72 − 70 = 2 years in code, and
+reverted it (Failure 99): given "held 2 years", the model refused the claim
+under the 36-month pre-existing-disease wait, though nobody said the
+pneumonia was pre-existing.
+
+### The candidate
+
+This time the subtraction came with a rule to catch that refusal: when a
+`not_covered` answer rests on nothing but an unserved pre-existing-disease
+wait, the person has not said the illness was pre-existing, and a
+co-payment applies, ask a two-way question.
+
+On the eval it is clean:
+
+- 1 of 109 first requests changes (this case).
+- 1 of 109 questions meets the rule's precondition (this case).
+- This case: not_covered → asked → `conditional` citing 5.3, 3 of 3.
+
+By the procedure this project has used since M33 (list every case the rule
+can reach, sample each live) that is a pass, with nothing left to sample.
+
+### Failure 101: clean on every eval question, wrong one step outside
+
+Because the precondition matched only the case it was written for, the
+investigation wrote five more questions of the same shape and sampled them.
+
+| question | current code | with the candidate |
+|---|---|---|
+| "66 then, 67 now ... my old heart trouble flared up again" | insufficient_information 3/3 | **conditional 3/3** |
+| "63 then, 65 now ... the diabetes I have been managing for a long time" | not_covered (right) | **re-asked → conditional 3/3** |
+| the same, rule reworded with the refusal last | | still conditional 3/3 |
+| "66 then, 67 now ... asthma since childhood" | insufficient_information 3/3 | conditional 3/3, then not_covered after a further patch |
+| "70 then, 72 now ... cataract surgery" | conditional 3/3 | identical |
+
+An old heart condition one year into a 36-month wait, and long-standing
+diabetes at two years, are both told the claim will be paid. The first of
+those does not even involve the new rule: the derived duration alone turns
+"cannot tell" into a paying answer. Each new failure can be patched (the
+asthma row was), and each patch is another word list for how people
+describe a history, which is the shape M33 measured and refused: its word
+lookup missed 26 of 52 conditions.
+
+The candidate was not applied. Today's wrong answer for this case is
+"cannot tell", which costs the person nothing but a phone call. The
+candidate's wrong answers are "you will be paid" to people who will not be.
+
+**What this changes about the method.** "Replay over all 109, then sample
+every case that meets the precondition" was adopted because stored answers
+under-count a rule's reach. It has its own blind spot: when a rule's
+precondition is met by exactly one eval question, the eval has nothing to
+say about precision at all. A reach of 1 is not evidence of safety, it is
+absence of evidence. From here on, a rule that reaches only the case it was
+built for needs questions written for it before it is trusted, as both
+halves of this milestone did.
+
+Two smaller findings from the same work, not acted on:
+
+- Fact extraction is itself unstable on these sentences: two uncached
+  extractions of the asthma sentence disagreed about whether a duration and
+  a pre-existing condition were stated.
+- The co-payment line reads "CANNOT TELL" for a 35-year-old who gives no
+  age at inception, although anyone under 60 now was under 60 then. Fixing
+  it changes the first request of 5 questions, 2 of them currently right.
+
+## Where the main set stands
+
+One miss that is accepted: `copay-applies-emergency`, answering "cannot
+tell" where the answer is "paid, less 20%". One fixed in the setting where
+it failed, pending a full run. No main-set question is now known to be
+answered "covered" when the policy refuses it.
+
+## Check it yourself
+
+```bash
+cd api
+.venv/Scripts/python -m pytest tests/test_scenario.py -q -k "offence or breach"
+```
+
+**Predict before you look:** the word list matches "I was arrested at a
+protest last year" although the claim is for an appendix. Why is that
+acceptable here, when M33 refused a rule because its word lookup was
+unreliable?
+
+<details>
+<summary>Answer</summary>
+
+Because of what each lookup is allowed to do when it is wrong. Here a false
+match only causes a question to be asked, and only of an answer that pays;
+the model still decides, and on the protest sentence it keeps `covered`. A
+missed match leaves today's behaviour. The rule M33 refused would have used
+the *absence* of a match as a reason to push an answer toward paying, so
+every word the list did not know became a wrongly paid claim. A lookup may
+raise a question; it must never be the evidence that settles one.
+</details>

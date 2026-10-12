@@ -790,6 +790,7 @@ def named_by_code(
     named |= set(computed.another_policy)
     named |= set(computed.abroad)
     named |= set(computed.intoxication)
+    named |= set(computed.breach_of_law)
     return named
 
 
@@ -949,6 +950,46 @@ def intoxication_clauses(scenario: str, clauses: list[ShortlistClause]) -> list[
             if c.clause_type == "exclusion" and _INTOXICATION_CLAUSE.search(c.text)]
 
 
+# The person's OWN offence, said the way a person says it. "Arrested for
+# shoplifting" shares no word with "committing or attempting to commit a breach
+# of law with criminal intent", so no word lookup connects the two.
+# `breach-of-law` was answered covered on 2 samples of 3 inside two full runs.
+# ponytail: first person and the commonest words only; anything else leaves
+# today's behaviour. A victim says "arrested", "stolen" and "robbed" too
+# ("the driver who hit me was arrested", "I was robbed"), so every alternative
+# is tied to "I"/"we"/"my" or to "while ...ing", and "while stealing my bag"
+# is someone else's theft.
+_OFFENCE = r"(?:shoplifting|stealing|robbing|burgling|trespassing|rioting|smuggling|looting)"
+_MENTIONS_OWN_OFFENCE = re.compile(
+    r"\b(?:i|we)\s+(?:was|were|got|had\s+been)\s+(?:being\s+)?"
+    r"(?:arrested|convicted|taken\s+into\s+custody|charged\s+with|(?:caught\s+)?" + _OFFENCE + r")\b"
+    r"|\bwhile\s+(?:being\s+arrested|resisting\s+arrest)\b"
+    r"|\b(?:my|our)\s+arrest\b"
+    r"|\bwhile\s+" + _OFFENCE + r"\b(?!\s+(?:my|me|our|from\s+(?:me|us))\b)"
+    r"|\b(?:i|we)\s+(?:was\s+|were\s+)?(?:committing|committed)\s+(?:an?\s+)?"
+    r"(?:crime|offence|offense|theft|robbery|burglary)\b"
+    r"|\b(?:i|we)\s+(?:was\s+|were\s+)?(?:fleeing|running|ran|fled)\s+from\s+(?:the\s+)?police\b",
+    re.IGNORECASE,
+)
+# IRDAI's standard exclusion (Excl10), worded the same in every policy read so
+# far. The match is the part quoted back to the model.
+_BREACH_OF_LAW_CLAUSE = re.compile(
+    r"(?:\btreatment\b[^.:]*?)?\bbreach\s+of\s+law\s+with\s+criminal\s+intent\b", re.IGNORECASE)
+
+
+def breach_of_law_clauses(scenario: str, clauses: list[ShortlistClause]) -> dict[str, str]:
+    """Exclusion id -> its own words about a breach of law, when the person
+    describes an offence of their own."""
+    if not _MENTIONS_OWN_OFFENCE.search(scenario):
+        return {}
+    found = {}
+    for c in clauses:
+        match = _BREACH_OF_LAW_CLAUSE.search(c.text)
+        if c.clause_type == "exclusion" and match:
+            found[c.clause_id] = " ".join(match.group(0).split())
+    return found
+
+
 def render_abroad(clause_ids: list[str], scenario: str) -> str:
     """The reasoning prompt's line for those clauses, opening with the place named."""
     if not clause_ids:
@@ -1068,6 +1109,9 @@ class Computed:
     abroad: list[str] = field(default_factory=list)
     # Exclusions about alcohol or drugs, when the person describes drink or drugs.
     intoxication: list[str] = field(default_factory=list)
+    # Exclusion id -> its words about a breach of law, when the person describes
+    # an offence of their own.
+    breach_of_law: dict[str, str] = field(default_factory=dict)
     # Exclusion id -> the words of the described procedure or condition it uses.
     excluding: dict[str, list[str]] = field(default_factory=dict)
 
@@ -1122,6 +1166,7 @@ def compute(
         another_policy=another_policy_clauses(scenario, clauses),
         abroad=abroad_clauses(scenario, clauses),
         intoxication=intoxication_clauses(scenario, clauses),
+        breach_of_law=breach_of_law_clauses(scenario, clauses),
         excluding=naming_exclusions(facts, clauses, scenario),
     )
 
@@ -1487,6 +1532,29 @@ def find_contradictions(
             f"citing clause {named} with effect denies; if it is not, say why in "
             f"the reasoning."
         )
+
+    # Paying, for something the person says happened during an offence of their
+    # own. The same shape as the rule above: nothing names the clause in the
+    # prompt, so first requests are unchanged and only a paying answer is
+    # asked again, cited or not. Worded as a question with two outcomes and no
+    # "you answered X, but" (M35, Failure 98: a correction flipped a right
+    # answer 4 samples of 4). Whether there was criminal intent, and whether
+    # the treatment is consequent upon the offence, are the model's to read.
+    if verdict in (Verdict.COVERED, Verdict.CONDITIONAL):
+        for clause_id, words in computed.breach_of_law.items():
+            problems.append(
+                f"- Clause {clause_id} excludes \"{words}\". The person mentions an "
+                f"arrest or an offence (looked up from their own words; a lookup "
+                f"cannot tell whether that has anything to do with this treatment). "
+                f"Decide which of these the person described. (a) What is being "
+                f"treated is an illness, or an injury from something else, or the "
+                f"person committed no offence: clause {clause_id} does not apply, "
+                f"the answer stays {verdict}, and clause {clause_id} is not cited. "
+                f"(b) The person was hurt while committing or attempting an offence "
+                f"with criminal intent, or as a direct result of it: the answer is "
+                f"not_covered, citing clause {clause_id} with effect denies. Say "
+                f"which in the reasoning."
+            )
 
     # A definite verdict resting on a waiting period nobody can time. The
     # person never said how long they have held the policy, so the clause's
