@@ -13918,3 +13918,157 @@ rule does not decide that. Whether a fracture from a drunken fall is a
 and ombudsmen argue about; the code only makes sure the answer faces the
 clause instead of never mentioning it.
 </details>
+
+---
+
+# M34 follow-up — The full run: same total, different misses
+
+## The problem
+
+M34 added one rule to the consistency check in
+`api/app/pipeline/scenario.py`: when a person describes drink or drugs and
+the answer pays, the model is asked once more to read the policy's alcohol
+exclusion. It was measured only on the two eval questions it can reach,
+because the full run of the 40 synthetic main questions was cancelled for
+time. The project README went on quoting 37/40 from the full run made after
+M32, in which `intoxication-injury` was still wrong.
+
+The obvious expectation was that a full run would now read 38/40: the same
+score, plus the one case M34 fixed. This entry records that run. The
+expectation was wrong.
+
+## The run
+
+All 40 main questions, three samples each, scored by majority; Ollama
+0.35.1, prompt version `v63-intoxication`:
+
+```bash
+api/.venv/Scripts/python evals/run_scenario_eval.py --no-report --repeats 3
+```
+
+```
+majority verdict accuracy : 37/40 = 0.925
+unanimous cases           : 35/40
+per sample: 0.925, 0.925, 0.900
+```
+
+The total is unchanged. The cases inside it are not:
+
+| case | M32 full run | this run |
+|---|---|---|
+| `intoxication-injury` | wrong | right, 3 of 3 (the M34 fix) |
+| `ped-waiting-served` | wrong | right, 2 of 3 |
+| `copay-applies-emergency` | wrong | wrong, 3 of 3 (`insufficient_information`) |
+| `initial-waiting-period` | right | **wrong**, `covered` 2 of 3 |
+| `breach-of-law` | right | **wrong**, `covered` 2 of 3 |
+
+Two cases were gained and two lost.
+
+## Failure 97: a total that did not move hid four cases that did
+
+**Could M34 have broken the two lost cases?** No, and this can be shown
+without a model. Its rule acts only when the question matches a list of
+words for drink or drugs; 2 of the 109 eval questions do, and neither lost
+case is one of them ("a bad chest infection two weeks after my policy
+started", "injured while being arrested for shoplifting"). And M34 added no
+line to the prompt: `evals/compare_requests.py` shows 0 of 109 first
+requests differ from the code before it. The model was sent exactly what it
+was sent before.
+
+So the same requests gave different answers. That is Failure 94 (M32) again:
+only the first sample of a run replays the stored answer, the other two are
+generated afresh, and fresh answers from this model vary from one server
+session to the next.
+
+Each lost case was then sampled three more times, alone, in the same server
+session as the full run:
+
+```
+initial-waiting-period   covered, citing 3.1 as "permits"      3 of 3   (wrong)
+breach-of-law            not_covered, citing 4.4 as "denies"   3 of 3   (right)
+```
+
+**`breach-of-law` is noise.** Wrong 2 of 3 inside the full run, right 3 of 3
+on its own minutes later, same server, same request. The only difference is
+which questions had been asked before it. Why that matters to a model run at
+temperature 0 was not investigated here; what is measured is that it does.
+
+**`initial-waiting-period` is a real hole, and a known one.** The policy
+refuses illness in the first 30 days; a chest infection at two weeks is
+refused. The code calculates that and M31 added a rule to ask again when the
+answer is `covered` anyway. But that rule lets an answer through if it cites
+the waiting-period clause as *permitting* the claim:
+
+```python
+# api/app/pipeline/scenario.py, in find_contradictions
+if check.exceptions and (
+    any(c.clause_id == check.clause_id and c.effect == "permits" for c in citations)
+    or any(_stems(e).keys() & said for e in check.exceptions)
+):
+    continue
+```
+
+The skip exists for the clause's exception. Clause 3.1 does not apply to
+accidents, and the question "I was hit by a car ten days after my policy
+started" never uses the word "accident", so the second test (a word of the
+exception appearing in the question) cannot recognise it. The first test was
+the substitute: if the model itself says the clause permits the claim,
+believe it. On the chest infection the model says exactly that, wrongly, and
+is believed.
+
+M31's entry recorded this as "still not caught". M32's entry then recorded
+the case as right 9 of 9 and called the improvement "measured and not
+explained". This run is the explanation: it was never fixed, the model was
+answering differently in those sessions.
+
+It is also Failure 96 (M34) in another place. That failure was a rule that
+stayed silent because the answer *cited* the exclusion. This is a rule that
+stays silent because the answer *labels* the clause "permits". Both trust
+the model's own description of what it did, and this model attaches
+citations and effect labels loosely.
+
+## What was done, and what was not
+
+Nothing in the code changed. The README's 37/40 now comes from this run, and
+names the three misses.
+
+The hole was not closed here. Removing the "cited as permits" skip would ask
+again on every `covered` answer inside an unserved waiting period, including
+the correct ones about accidents, and whether the model then keeps a correct
+answer has to be measured on fresh samples in more than one session (the
+procedure from Failure 95) before it can be kept. That is its own piece of
+work.
+
+## What to take from this
+
+- **Compare runs case by case, never by the total.** 37/40 and 37/40 looked
+  like "nothing happened". Four of forty answers had changed.
+- **A fix is one case; a full run is forty fresh draws.** On this model a
+  full run after a one-case fix can go down as easily as up, for reasons
+  that have nothing to do with the fix. The honest reading of "37/40" is
+  "36 to 38, depending on the day", and the same four or five cases supply
+  the variation every time: `ped-waiting-served`, `initial-waiting-period`,
+  `breach-of-law`, `oral-chemo-limit`, `day-care-not-listed`.
+- **An improvement nobody can explain is not yet an improvement.** M32 wrote
+  one down honestly as unexplained. It lasted two milestones.
+
+## Check it yourself
+
+```bash
+api/.venv/Scripts/python evals/run_scenario_eval.py --no-report --repeats 3 --only initial-waiting-period,breach-of-law
+```
+
+**Predict before you look:** the rule above skips an answer that cites
+clause 3.1 as "permits". If that skip were deleted, which currently correct
+main-set case would start being asked again, and why can the other test not
+protect it?
+
+<details>
+<summary>Answer</summary>
+
+`accident-in-initial-period`: "I was hit by a car ten days after my policy
+started and was hospitalised." It is correctly `covered`, because clause 3.1
+excepts accidents. The other test looks for a word of the exception
+("accident") in the question, and the person wrote "hit by a car". The same
+gap between a person's words and a policy's words that M34 was about.
+</details>
