@@ -372,6 +372,11 @@ An injury "while being arrested for shoplifting" was paid, but only when the ser
 - **Failure 101: clean on every eval question, wrong one step outside** - a rule whose precondition matches only the case it was built for has not been tested at all. Five questions written beside it showed it paying claims it should refuse.
 - **Follow-up: the full run, 39/40** - one answer changed from the run before, the one the fix was for; what the score does and does not mean.
 
+### M37 - Eight open cases, four candidate fixes, nothing merged
+The remaining wrong answers attempted once more, each candidate tested on the eval and on questions written beside it. Read this to understand where the design stops working with a 7B model, and why.
+- **Failure 102: right in one session, and paying a refused claim in the next** - a fix for a wrongly cited clause turned a correct refusal (bungee jumping) into "covered". A re-ask is a push: ask which way the answer moves if the model simply gives way.
+- **What the four attempts have in common** - the model cannot tell old illness from new without an expected word, agrees a condition is on a list that omits it, and takes whichever option changes its answer.
+
 ---
 
 ## Related documents

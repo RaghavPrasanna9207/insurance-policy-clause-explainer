@@ -14814,3 +14814,256 @@ and wrong on the first five written beside it.
 ```bash
 api/.venv/Scripts/python evals/run_scenario_eval.py --no-report --repeats 3 --only breach-of-law,copay-applies-emergency
 ```
+
+---
+
+# M37 — Eight open cases, four candidate fixes, nothing merged
+
+## The problem
+
+After M36 the 40 synthetic main questions scored 39 of 40 and the list of
+known wrong answers was short. It fell into three groups:
+
+1. **The one main-set miss.** `copay-applies-emergency`: "I took this policy
+   out when I was 70 and I am 72 now. I was admitted with pneumonia last
+   month." Expected `conditional` (20% co-payment); answered
+   `insufficient_information`.
+2. **Five held-out misses** on the synthetic policy:
+   `ho3-two-policies-appendix`, `ho3-switched-from-old-insurer`,
+   `ho4-thyroid-after-cover`, `ho4-back-trouble-on-and-off`,
+   `ho2-gallbladder-no-timing`.
+3. **Two answers with the right verdict and the wrong clause.**
+   `ambulance-admissible` never cites the ambulance clause; the stored
+   answer to `breach-of-law` refuses a shoplifting injury under "hazardous
+   sports" (4.3) and not under breach of law (4.4).
+
+Each group was investigated separately, with a fixed budget of model calls,
+on a scratch copy of the code. Every candidate had to pass three tests
+adopted in earlier milestones: replay over the stored answers of all 109
+eval questions with the model stubbed; fresh samples of every eval question
+the rule can reach; and, since M36's Failure 101, fresh samples of
+questions written beside the rule, because a rule that reaches only the
+case it was built for has not been tested by the eval at all.
+
+Four candidates were built. None was merged. This entry records each with
+the number that ruled it out, because the reasons are the result.
+
+**Every rule in this system does one thing: under some condition, it asks
+the model its question a second time.** The code never sets a verdict. So a
+rule is only as good as the model's behaviour when asked again, and what
+this milestone measured, four times, is how often a 7B model asked "are you
+sure?" gives up an answer that was right.
+
+## 1. The co-payment case: a re-ask that tells the model the duration
+
+Two earlier attempts are in M35 (Failure 99) and M36 (Failure 101). Both
+put a derived fact, "held 2 years" from 72 − 70, into the model's first
+prompt, and both ended up paying claims that should be refused.
+
+The third attempt left the first request alone. Only when the answer is
+`insufficient_information`, a co-payment is computed as applying, and both
+ages are stated, the model is asked a two-way question: the ages mean about
+N years held; (a) a new illness with no history is `conditional` under the
+co-payment clause; (b) an illness the person already had, or a listed
+condition, still turns on the missing fact.
+
+Three wordings, each fixing the last one's failure:
+
+| question | v1 | v2 | v3 |
+|---|---|---|---|
+| eval case: pneumonia, 70→72 | conditional 3/3 | insufficient 3/3 | conditional 3/3 |
+| "my old heart trouble", 65→67 | **pays 3/3** | insufficient 3/3 | insufficient 3/3 |
+| asthma since childhood; kidney disease "for many years"; COPD flare-up | | | insufficient 3/3 each |
+| hernia operation, 61→63 | | | **pays 3/3** |
+| severe sinusitis, 61→63 | | | **pays 3/3** |
+| dengue, 68→71 (written to be fixed) | | | insufficient 3/3 |
+
+v3 separates old conditions from new ones and then pays a hernia and
+sinusitis, both of which the policy's clause 3.3 lists with a 24-month
+wait. A guard in code can catch "hernia", which appears in the clause.
+Nothing catches sinusitis: the clause says "ENT disorders". And the dengue
+question, as acute as the pneumonia one, is not fixed. The final wording
+works on the one sentence it was tuned against.
+
+Two findings from the same work that matter beyond this case:
+
+- In that server session, the unmodified code answered the eval case
+  `conditional` citing 5.3, 3 of 3, with wrong reasoning ("waiting periods
+  cannot be determined, so they do not affect this claim"). This miss is
+  session-dependent, like `breach-of-law` was.
+- On four of five new sentences, fact extraction returned a "time held" it
+  had worked out by subtracting the ages, which its prompt tells it not to
+  do. The path that Failure 99 showed to be harmful is taken by the model
+  on its own for sentences slightly different from the eval's.
+
+## 2. The five held-out misses
+
+**No single mechanism.** Three of them (`appendix`, `thyroid`, `back
+trouble`) share one: the answer rests only on a waiting period the code
+could not connect to the claim. No wording made the model tell the
+difference:
+
+- *Appendix* (refused as "pre-existing"; expected `conditional` under the
+  other-policy clause). Asked a three-way question with the refusal as the
+  option to keep: becomes `conditional` citing the pre-existing clause,
+  never the other-policy clause, 3 of 3. Still wrong.
+- *Back trouble*: stays `not_covered`, 3 of 3. The two right refusals the
+  same rule reaches also stayed, so the rule is safe and fixes nothing.
+- *Thyroid* (expected covered: thyroid is on no list). Asked whether
+  thyroid is among the conditions clause 3.3 lists: "diseases such as
+  thyroid problems", `not_covered`, 5 of 5, in either option order. The
+  model believes thyroid is on the list. The list does not contain it.
+- *Switched insurer* ("Last year I ... bought this policy"): nothing safer
+  was found than reading "last year" as one year, which can be three weeks
+  and would mark the 30-day wait served.
+
+**`ho2-gallbladder-no-timing` had a candidate.** "I need my gallbladder
+removed ... how much will the policy pay?" with no time held given;
+expected `insufficient_information`; answered `conditional`. The rule: a
+paying verdict while the general 30-day wait cannot be timed is asked a
+two-way question. On the eval: 0 first requests changed, 1 stored answer
+re-asked (the target), and the target is fixed 3 of 3.
+
+It was refused on what it does to answers that should pay:
+
+```
+"renewed every year since 2019", dengue      conditional -> insufficient   2 of 2
+broken wrist from a fall (an accident)       covered     -> insufficient   2 of 2
+copay-applies-emergency, when answered right conditional -> insufficient   1 of 1
+ho3-switched-from-old-insurer, likewise      covered     -> insufficient   1 of 1
+```
+
+Option (a), "keep the paying answer", was almost never taken, and reversing
+the order made it worse. The rule amounts to "never pay when the duration
+is missing", and two eval questions are, by their answer keys, correctly
+payable with no duration stated. It would also undo the correct answer the
+co-payment case gives in some sessions. A wider form of the same rule was
+already rejected in M35 for the same reason.
+
+## 3. The two citation faults
+
+**Ambulance: left, on reach.** The only signal is one shared word,
+"ambulance". Matching on one word reaches 79 of 109 questions and would
+re-ask 42. Restricting to words in clause headings reaches 6 and re-asks 1,
+but on the real policies the same rule matches Star's "heart attack" to its
+nuclear-attack exclusion, and no Star clause is headed "ambulance" at all.
+
+**Shoplifting cited under the wrong exclusion: built, passed, then failed.**
+The code already knows the right clause for this question (M36's lookup
+finds 4.4). The candidate mirrored it, as M32 mirrored M31: a refusal that
+does not cite the looked-up exclusion is asked which clause applies, with
+the keep-the-answer option first.
+
+Session 1, on a scratch copy:
+
+- `breach-of-law`, stored answer (4.3) → asked → cites 4.4: 3 of 3.
+- Five guard questions where the refusal is right for another reason
+  (a nose job, bungee jumping, IVF, a tooth extraction, each beside an old
+  arrest or a night of drinking): each kept its own clause, 2 of 2.
+- Two guards failed and were handled by narrowing the rule in code:
+  typhoid in the 30-day wait beside an old conviction came back as
+  "convicted of trespassing ... therefore typhoid is not covered".
+
+The patch was then applied to the real code and measured in a new server
+session, as every fix since M33 has been.
+
+## Failure 102: right in one session, and paying a refused claim in the next
+
+Session 2, same code, same questions:
+
+```
+breach-of-law, first sample:
+   not_covered [4.3]  -> asked ->  conditional, citing 4.2 as "denies"
+   "... could be considered an intentional self-injury or an attempt to
+    commit a breach of law ... the claim is not automatically covered"
+
+guard: "arrested for shoplifting two years ago. Last week I broke my leg
+        bungee jumping"
+   not_covered [4.3]  -> asked ->  covered, citing 2.1 as "permits"     2 of 2
+```
+
+The second is the worst outcome this tool can produce. Bungee jumping is
+excluded as a hazardous sport; the answer was right; the rule asked about
+an unrelated arrest; and the model answered that the claim is paid. In
+session 1 the same guard kept its clause 2 of 2.
+
+The first is the target case itself: a right verdict with the wrong clause
+became a wrong verdict.
+
+The patch was reverted. Before it, this question's fault was a citation.
+A person reading "refused, see clause 4.3" is sent to the wrong paragraph
+of a correct refusal. That is a much smaller harm than the one the fix
+introduces, and so the citation fault stays.
+
+**Why this failure is worth more than the fix would have been.** Rule by
+rule, M31 to M36 added checks that move an answer *toward refusing* or
+toward "cannot tell" when the code has computed a reason. When such a
+re-ask misfires, a payable claim is questioned. This candidate was the
+first to re-ask an answer that already refused. When that misfires, the
+only place for the answer to go is toward paying. **A re-ask is a push, and
+before adding one the question to ask is: if the model simply gives way,
+which direction does the answer move, and is that the direction of the
+cheaper mistake?** Every rule now in `find_contradictions` that re-asks a
+refusal (M32's mirror rule is the other) asks only *which clause*, in a
+situation where the code has itself computed that the claim is refused.
+This one had no such computation behind it, only a word lookup.
+
+## What was merged
+
+Nothing in the code. This entry, and a row in the project README.
+
+## What this milestone establishes
+
+The remaining wrong answers are not waiting for a cleverer rule. Four
+independent attempts, each with model calls to spend and each trying
+several wordings, ended the same way: the model can be pushed off a wrong
+answer on the sentence in front of it, and the same push moves right
+answers on the sentences next to it. That is the ceiling of the
+check-and-ask-again design with this model, reached from four sides:
+
+- it cannot tell an old illness from a new one unless the person uses a
+  word it expects (heart trouble, hernia, sinusitis);
+- it will agree that a condition is on a list that does not contain it
+  (thyroid);
+- asked a two-way question, it mostly takes the option that changes its
+  answer, in whichever order the options are put;
+- its answers to an identical request differ between server sessions, so
+  any of the above can pass on one day.
+
+What would move these cases is a stronger reader, not another rule. That
+is the hosted-model comparison this project has planned and not yet run,
+and these eight questions, with the probe sentences written for them, are
+now the test set for it.
+
+## Check it yourself
+
+Nothing was added, so there is no new test. The measurements can be
+repeated: the scratch folders of this milestone hold each candidate as a
+patch with its probe questions. The quickest one to see is the last:
+
+```bash
+api/.venv/Scripts/python evals/run_scenario_eval.py --no-report --repeats 3 --only breach-of-law
+```
+
+It prints `not_covered` with "missing 4.4" on the first sample: the
+citation fault that was left in place.
+
+**Predict before you look:** M32 added a rule that re-asks a *refusal*
+(one that ignores an unserved waiting period), and it has caused no
+trouble. The rule refused here also re-asks a refusal. What is the
+difference?
+
+<details>
+<summary>Answer</summary>
+
+What stands behind the question. M32's rule fires only when the code has
+calculated, from a stated duration and the clause's own number, that the
+waiting period bars the claim; the re-ask says so, and if the model gives
+way it gives way onto a clause that really does refuse. The answer cannot
+move toward paying, because the calculation in the message says the claim
+is barred. The rule refused here had a word match behind it ("arrested"
+appears in the question). It could not tell the model the claim is refused
+under 4.4, only ask whether it might be, and a model that gives way to a
+question with nothing computed behind it can land anywhere, including on
+"covered".
+</details>
