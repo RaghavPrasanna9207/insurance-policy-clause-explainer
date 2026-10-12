@@ -7,11 +7,11 @@ one run against the code and settings stated here.
 |---|---|
 | Model | `qwen2.5:7b-instruct-q4_K_M` |
 | Ollama | `0.35.1` |
-| Prompt version | `v55-quoted-list` |
+| Prompt version | `v65-own-offence` |
 | Decoding | num_ctx 28672, num_predict 1600, temperature 0.0, KV cache q8_0 |
 | Analysis batch size | 1 |
-| Commit | `51da3de` |
-| Generated | 2026-10-06 12:23 UTC |
+| Commit | `efd7d9d` |
+| Generated | 2026-10-12 16:39 UTC |
 | Total wall time | 1s (served from cache; a cold run takes several minutes) |
 
 The golden set is a 39-clause synthetic IRDAI-style policy authored for
@@ -26,12 +26,12 @@ cannot drift apart. No real insurer wording is used.
 |---|---:|---|
 | Clause classification (macro-F1) | **0.973** | quality |
 | Risk ranking expectations | **8/9** | quality |
-| Scenario verdict accuracy | **0.875** | quality |
+| Scenario verdict accuracy | **0.925** | quality |
 | Scenario verdict accuracy, held-out batch 1 (16 cases, read while diagnosing M14 failures - no longer clean) | **0.875** | quality |
 | Scenario verdict accuracy, held-out batch 2 (13 cases, written before running; one case read while diagnosing) | **0.923** | quality |
-| Scenario verdict accuracy, held-out batch 3 (3 cases, written for M21 before its code and before any run) | **0.000** | quality |
+| Scenario verdict accuracy, held-out batch 3 (3 cases, written for M21 before its code and before any run) | **0.333** | quality |
 | Scenario verdict accuracy, held-out batch 4 (6 cases, written for M22 before its code and before any run) | **0.667** | quality |
-| Scenario citation recall | **0.781** | quality |
+| Scenario citation recall | **0.844** | quality |
 | Scenario false citation rate | **0.000** | quality |
 | Quote fabrication rate | **0.000** | quality |
 | **Citation detection integrity** | **1.000** | **guarantee** |
@@ -102,7 +102,7 @@ inspected, so the metric tests the system rather than rationalising it.
 
 ## 3. Scenario simulator
 
-**Verdict accuracy 0.875** (35/40) · citation recall 0.781 · detection integrity 1.000
+**Verdict accuracy 0.925** (37/40) · citation recall 0.844 · detection integrity 1.000
 
 | Case | Expected | Got | Cited | Quotes verified |
 |---|---|---|---|---|
@@ -115,7 +115,7 @@ inspected, so the metric tests the system rather than rationalising it.
 | `room-rent-breach` | conditional | conditional | 5.1 | yes |
 | `senior-copay` | conditional | conditional | 5.3 | yes |
 | `adventure-sport` | not_covered | not_covered | 4.3 | yes |
-| `initial-waiting-period` | not_covered | covered ⚠ | 2.1 (missing 3.1) | yes |
+| `initial-waiting-period` | not_covered | not_covered | 3.1 | yes |
 | `accident-in-initial-period` | covered | covered | 3.1 | yes |
 | `maternity-too-early` | not_covered | not_covered | 3.4 | yes |
 | `dental-no-accident` | not_covered | not_covered | 4.6 | yes |
@@ -133,7 +133,7 @@ inspected, so the metric tests the system rather than rationalising it.
 | `cataract-sublimit-amount` | conditional | conditional | 5.4 | yes |
 | `robotic-surgery-limit` | conditional | conditional | 5.5 | yes |
 | `oral-chemo-limit` | conditional | covered ⚠ | 2.1 (missing 5.5) | yes |
-| `intoxication-injury` | not_covered | covered ⚠ | 2.1 (missing 4.2) | yes |
+| `intoxication-injury` | not_covered | not_covered | 4.2 | yes |
 | `infertility-ivf` | not_covered | not_covered | 4.1 (missing 4.5) | yes |
 | `breach-of-law` | not_covered | not_covered | 4.3 (missing 4.4) | yes |
 | `documents-late` | conditional | conditional | 6.2 | yes |
@@ -151,10 +151,8 @@ inspected, so the metric tests the system rather than rationalising it.
 
 These are not random. Read them together:
 
-- **`initial-waiting-period`** — expected `not_covered`, got `covered`. 30-day initial waiting period for illness; only an accident is carved out.
 - **`copay-applies-emergency`** — expected `conditional`, got `insufficient_information`. 70 at inception is over 60, so the 20% co-payment applies to the whole admissible claim. Two years held clears the 30-day initial waiting period, and pneumonia is not in the specified-disease list.
 - **`oral-chemo-limit`** — expected `conditional`, got `covered`. Oral chemotherapy is named in the modern treatment limit, restricted to 50% of sum insured per policy year.
-- **`intoxication-injury`** — expected `not_covered`, got `covered`. Expenses attributable to the use of alcohol are excluded outright, and no waiting period or cap enters into it.
 - **`day-care-not-listed`** — expected `insufficient_information`, got `covered`. In-patient cover needs more than twenty four consecutive hours, so 2.1 does not apply. Day care cover applies only to treatments listed in Annexure II, and this document does not contain that annexure - so whether a six-hour drip qualifies cannot be answered from what is here.
 
 Most require either date arithmetic (is 5 years more than 36 months?)
@@ -163,7 +161,7 @@ Accident"). That is multi-hop reasoning over interacting rules, which
 is where a 7B model is weakest.
 
 Single-clause classification scores macro-F1 0.973. Combining three interacting rules
-scores 0.875. **The gap between those two
+scores 0.925. **The gap between those two
 numbers is the finding**, and it is the case for measuring a hosted
 frontier model on this same set before assuming a bigger model is or
 is not worth it.
@@ -187,8 +185,7 @@ the majority-of-three figures.
 **Batch 2** (written before running; one case read while diagnosing): verdict accuracy 0.923 (12/13), citation recall 1.000, detection integrity 1.000
 - `ho2-gallbladder-no-timing`: expected `insufficient_information`, got `conditional`
 
-**Batch 3** (written for M21 before its code and before any run): verdict accuracy 0.000 (0/3), citation recall 0.000, detection integrity 1.000
-- `ho3-group-cover-shares-bill`: expected `conditional`, got `covered`
+**Batch 3** (written for M21 before its code and before any run): verdict accuracy 0.333 (1/3), citation recall 0.333, detection integrity 1.000
 - `ho3-two-policies-appendix`: expected `conditional`, got `not_covered`
 - `ho3-switched-from-old-insurer`: expected `covered`, got `insufficient_information`
 

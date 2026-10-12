@@ -246,7 +246,7 @@ function Chip({
 }
 
 /**
- * The two-minute wait.
+ * The five-minute wait.
  *
  * Shows the real stage and a real count, because the backend reports both. A
  * spinner would be a lie of omission here: the user has handed over a document

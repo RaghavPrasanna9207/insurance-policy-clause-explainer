@@ -124,7 +124,7 @@ export function Upload() {
             </div>
 
             <p className="mt-5 text-[13px] leading-relaxed text-muted">
-              A 40-clause policy takes about two minutes to read. The model runs locally, so the
+              A 40-clause policy takes about five minutes to read. The model runs locally, so the
               speed depends on your machine, not on a queue.
             </p>
 

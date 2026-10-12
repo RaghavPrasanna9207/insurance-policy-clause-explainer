@@ -377,6 +377,15 @@ The remaining wrong answers attempted once more, each candidate tested on the ev
 - **Failure 102: right in one session, and paying a refused claim in the next** - a fix for a wrongly cited clause turned a correct refusal (bungee jumping) into "covered". A re-ask is a push: ask which way the answer moves if the model simply gives way.
 - **What the four attempts have in common** - the model cannot tell old illness from new without an expected word, agrees a condition is on a list that omits it, and takes whichever option changes its answer.
 
+### M38 - A false line removed from the prompt, and the answer got worse
+Star's maternity exclusion is printed with an exception it does not have. A three-line fix to the exception check removes exactly that one line across three policies, and was reverted.
+- **Failure 103: the answer was right because of the false line** - with it, the model's wrong first answer cites the exclusion and a check catches it (right 3 of 3); without it, the model ignores the exclusion and promises a caesarean at 95% (wrong 3 of 3). A right answer is not evidence of a right process.
+- **Why the check was not widened** - the word lookup it would rely on names an exclusion in 5 questions and is right about one.
+- **Follow-up: every set run in full, in one session** - 100 of 109, every total as the README had it, and the same nine misses by name. The hand-kept list of open cases had lost three, two of them refused claims answered as paid (a war injury, treatment in Toronto). Why the report says 37/40 and the README 39/40.
+
+### M39 - The app, used once from start to finish in a browser
+Upload, analysis, the ranked clause map, a clause's detail panel and three questions with known answers, driven in Chrome. It works; a short entry. Read it for what a browser showed that no eval score does: a stated time that had gone stale, a right verdict explained with the wrong clause, the schema's own label leaking into text meant for a person, and the app and the eval keeping separate answer caches.
+
 ---
 
 ## Related documents

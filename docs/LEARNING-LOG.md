@@ -15067,3 +15067,535 @@ under 4.4, only ask whether it might be, and a model that gives way to a
 question with nothing computed behind it can land anywhere, including on
 "covered".
 </details>
+
+---
+
+# M38 — A false line removed from the prompt, and the answer got worse
+
+## The problem
+
+For every clause, the analysis step asks the model for the clause's
+*exceptions*: the cases in which the clause does not apply ("cosmetic
+surgery is excluded **unless** necessitated by an accident"). When a person
+later asks a question, each clause is printed in the prompt with a line
+under it: "EXCEPTIONS - this clause does NOT apply when: ...". That line is
+written by this program, not by the model, so a wrong one is a falsehood the
+program itself asserts.
+
+On Star Health's Arogya Sanjeevani wording, exclusion 18 (maternity) reads:
+
+```
+18.  Maternity - Code Excl 18
+a. Medical treatment expenses traceable to childbirth (including complicated
+   deliveries and caesarean sections incurred during hospitalization) except
+   ectopic pregnancy
+b. Expenses towards miscarriage (unless due to an accident) and lawful
+   medical termination of pregnancy during the Policy Period
+```
+
+The exceptions stored for it are:
+
+```
+"due to an accident"
+"lawful medical termination of pregnancy during the Policy Period"
+```
+
+The second is wrong. Termination of pregnancy is something the clause
+*excludes*; it is on the list of things not paid. And the one real exception
+in part (a), ectopic pregnancy, is missing: the model never returned it.
+
+## Why the wrong one gets through
+
+Extracted exceptions are already checked in code, because the model was
+measured returning wrong ones (5 of 8 on the synthetic policy, when the
+check was first written). The check, in `api/app/grounding.py`:
+
+```python
+def verify_exception(span: str, source_text: str) -> bool:
+    ...
+    while start != -1:
+        sentence_so_far = _SENTENCE_END.split(haystack[:start])[-1]
+        if _MARKER.search(sentence_so_far):
+            return True
+```
+
+An exception is accepted if its words appear in the clause **and** an
+exception word ("unless", "except", "other than", ...) comes before it in
+the same sentence. In part (b) there is an "unless" earlier in the sentence.
+But it sits inside brackets, "(unless due to an accident)", and the brackets
+have closed before "lawful medical termination" begins. A word inside a
+closed bracket governs only what is inside the bracket.
+
+## The fix that was tried
+
+Before looking for an exception word, delete every bracket that has already
+opened and closed:
+
+```python
+_CLOSED_BRACKET = re.compile(r"\([^()]*\)")
+...
+        if _MARKER.search(_CLOSED_BRACKET.sub(" ", sentence_so_far)):
+```
+
+"due to an accident" still passes, because its own bracket is still open at
+the point where it starts.
+
+**Measured without the model.** The check runs on the stored analysis, so
+its effect on all three policies can be listed with no model call:
+
+```
+exceptions before: 17, across 13 clauses in three policies
+exceptions after : 16
+dropped          : Star 18, "lawful medical termination of pregnancy during the Policy Period"
+```
+
+Exactly the one wrong exception goes, and nothing else. A test written from
+clause 18's text passed. `evals/compare_requests.py` reported that 2 of the
+109 eval questions would send a different first request: `star-caesarean`
+and `star-gallstones-no-timing`, the two whose prompts include clause 18.
+
+By every check that needs no model, this is a correct change.
+
+## Failure 103: the answer was right because of the false line
+
+`star-caesarean`: "I had a caesarean delivery last week and was in hospital
+for four days. I have held the policy for five years." Expected
+`not_covered` under clause 18. Three fresh samples each way, in one server
+session:
+
+```
+WITHOUT the fix (the false exception still printed)
+   first answer:  covered, citing 18
+                  "Clause 18 explicitly excludes '... caesarean sections ...
+                   except ectopic pregnancy.' Since this exclusion does not
+                   apply to caesarean sections, the claim is covered."
+   asked again -> not_covered, citing 18 as denies               3 of 3  RIGHT
+
+WITH the fix
+   first answer:  conditional, citing 9 only
+                  "You are covered for the caesarean delivery, but a 5%
+                   co-payment applies."
+   not asked again                                               3 of 3  WRONG
+```
+
+`star-gallstones-no-timing` was unchanged, right 3 of 3.
+
+**The model's first answer is wrong both ways.** With the false line, it is
+wrong in a shape the program recognises: it says `covered` and cites an
+exclusion that names what the person described, and a rule added in M33
+asks about exactly that. Without the false line, the model does not mention
+clause 18 at all. It answers `conditional`, cites only the co-payment
+clause, and nothing in `find_contradictions`
+(`api/app/pipeline/scenario.py`) asks about a paying answer that simply
+ignores an exclusion.
+
+So the correct result on this question was never the model reading clause
+18 correctly. It was a wrong reading that happened to trip a check.
+Removing a falsehood from the prompt removed the trip.
+
+**Could the check be widened to catch the new shape?** The rule would be: a
+paying answer, while the code's word lookup says some exclusion names what
+the person described, is asked about that exclusion whether or not it is
+cited. Its reach was listed with no model. The lookup names an exclusion in
+5 of the 109 questions:
+
+| question | expected | exclusion "named", by which word |
+|---|---|---|
+| `star-caesarean` | not_covered | 18, "caesarean" (a correct match) |
+| `star-ho-heart-attack-singapore` | not_covered | "heart", and "attack" (the nuclear-attack exclusion) |
+| `star-ho-ill-in-thailand-treated-chennai` | conditional | "severe" |
+| `hdfc-accident-ten-days` | covered | "fractured" |
+| `hdfc-medicines-five-months-after` | covered | "infection" |
+
+One match in five is right. Three of the other four are questions whose
+correct answer pays, and each would be asked whether an unrelated exclusion
+refuses it. M35 to M37 measured what this model does when asked that: it
+mostly gives way. The existing rule requires the answer to *cite* the
+exclusion precisely because the lookup alone is this loose. The wider rule
+was not built.
+
+**The fix was reverted.** The false exception line stays in Star's clause
+18. This is the uncomfortable outcome and it is the measured one: with the
+line, the one eval question that depends on the clause is answered
+correctly; without it, a claim the policy refuses is promised at 95%.
+
+Only one server session was measured. Both arms were unanimous, and a
+change that turns a refusal into a payment in any session is not merged, so
+a second session could not have changed the decision.
+
+## What to take from this
+
+- **A right answer is not evidence of a right process.** The eval scored
+  `star-caesarean` as correct and it was, for a reason nobody would have
+  designed. M32 recorded that an improvement nobody can explain is not yet
+  an improvement. This is the same lesson from the other side: a correct
+  answer nobody has explained is not yet a strength.
+- **Checks that fire on the shape of a wrong answer depend on the wrong
+  answer keeping its shape.** Any change to the prompt, even a correction,
+  can move a wrong first answer from a shape that is caught to one that is
+  not. That is why every prompt change in this project is measured on the
+  questions whose request it alters, however obviously correct it looks.
+- This is Failure 99 (M35) in a new place. There, a correct duration handed
+  to the model produced a wrong refusal. Here, a false statement taken away
+  produced a wrong payment. **With a weak reader, whether a line in the
+  prompt is true and what it does to the answer are separate
+  measurements.**
+
+Still open, unchanged: the false exception on Star's clause 18, and the
+missing one (ectopic pregnancy). A reader able to apply clause 18 on a
+first reading would need neither the false line nor the check; whether a
+stronger model does is one of the things a hosted-model comparison would
+measure.
+
+## Check it yourself
+
+Nothing was merged, so there is no new test. To see the answer the stored
+exceptions lead to:
+
+```bash
+api/.venv/Scripts/python evals/run_scenario_eval.py --no-report --repeats 3 \
+  --only star-caesarean --policy samples/real/star-arogya-sanjeevani.pdf \
+  --cases evals/real/scenarios-star-arogya-sanjeevani.json
+```
+
+**Predict before you look:** the bracket fix would have left "due to an
+accident" as an exception of clause 18. A woman writes: "I had a caesarean
+after a car accident brought on early labour." Which half of the clause
+does her claim fall under, and what would the printed line "this clause
+does NOT apply when: due to an accident" suggest?
+
+<details>
+<summary>Answer</summary>
+
+Her claim is childbirth, part (a), whose only exception is ectopic
+pregnancy; it is refused. "Due to an accident" belongs to part (b) and
+excepts a *miscarriage* caused by an accident. But exceptions are stored
+per clause, not per lettered part, so the printed line says the whole of
+clause 18 does not apply to accidents, and the code's own test for "does
+the question use the exception's words?" would see "accident" and stand
+down. The exception is real text, in the right clause, with a real
+exception word before it, and it is still attached to the wrong thing.
+Storing exceptions per clause is too coarse for a clause with lettered
+parts. No eval question tests it; it is recorded here so that the next
+person to touch `verify_exception` knows the bracket was the smaller of two
+problems.
+</details>
+
+---
+
+# M38 follow-up — Every set run in full, in one session
+
+## The problem
+
+The project README quotes a score for eight sets of questions: 40 main
+questions and four held-out batches on the synthetic policy, two sets on
+Star Health's wording, and one on HDFC ERGO's. Only the main set had been
+run in full since the last code change (M36). The others had last been run
+in full around M33. Every change after that left the first request of all
+109 questions byte-identical, and each question a change could reach was
+sampled again, so the README rows were "the last full run, with the
+re-measured cases updated". The README said so in a caveat paragraph.
+
+That is a defensible way to keep numbers current, and it is still an
+inference. Failure 97 (M34 follow-up) is the reason not to rest on it: a
+full run after a one-case fix came back with the same total and four
+different answers inside it. And the committed `evals/REPORT.md` was six
+days and ten prompt versions old (`v55`, against the code's `v65`).
+
+## The run
+
+All eight sets, three samples each, majority scored, one after another in a
+single new server session of Ollama 0.35.1, code at M36
+(`v65-own-offence`). 109 questions, 327 answers, 43 minutes.
+
+```bash
+P="api/.venv/Scripts/python evals/run_scenario_eval.py --no-report --repeats 3"
+$P --heldout 1      # and 2, 3, 4
+$P --policy samples/real/star-arogya-sanjeevani.pdf --cases evals/real/scenarios-star-arogya-sanjeevani.json
+$P --policy samples/real/star-arogya-sanjeevani.pdf --cases evals/real/scenarios-star-heldout-abroad.json
+$P --policy samples/real/hdfc-optima-secure.pdf     --cases evals/real/scenarios-hdfc-optima-secure.json
+$P                  # the 40 main questions
+```
+
+| set | README before | this run | all 3 samples agree |
+|---|---:|---:|---:|
+| main (40) | 39/40 | 39/40 | 37 |
+| held-out 1 (16) | 14/16 | 14/16 | 14 |
+| held-out 2 (13) | 12/13 | 12/13 | 13 |
+| held-out 3 (3) | 1/3 | 1/3 | 3 |
+| held-out 4 (6) | 4/6 | 4/6 | 5 |
+| Star (10) | 10/10 | 10/10 | 9 |
+| Star, treatment abroad (7) | not in the README | 6/7 | 7 |
+| HDFC (14) | 14/14 | 14/14 | 13 |
+| **total** | | **100/109** | 101 |
+
+Every total is the one the README already carried. After Failure 97 a
+matching total is not accepted as "nothing moved", so the misses were
+compared by name.
+
+## The nine wrong answers, by name
+
+| question | expected | answered | |
+|---|---|---|---|
+| `copay-applies-emergency` | conditional | insufficient_information 3/3 | known; M35, M36, M37 |
+| `ho-war-injury` | not_covered | **covered** 3/3 | known since the first held-out run; see below |
+| `ho-short-procedure` | insufficient_information | conditional 2/3 | known since M22 |
+| `ho2-gallbladder-no-timing` | insufficient_information | conditional 3/3 | known; M37 |
+| `ho3-two-policies-appendix` | conditional | not_covered 3/3 | known; M37 |
+| `ho3-switched-from-old-insurer` | covered | insufficient_information 3/3 | known; M37 |
+| `ho4-thyroid-after-cover` | covered | not_covered 2/3 | known; M37 |
+| `ho4-back-trouble-on-and-off` | insufficient_information | not_covered 3/3 | known; M37 |
+| `star-ho-flew-from-india-treated-toronto` | not_covered | **conditional** 3/3 | known since the abroad batch was written |
+
+No question that was right before is wrong now, and none that was wrong is
+right. This time the unchanged totals do mean unchanged answers.
+
+## A correction to M37: the open list was nine, not six
+
+M37 described "the remaining wrong answers" as one main-set miss and five
+held-out misses, plus two citation faults. The table above has nine wrong
+verdicts. Three were left off M37's list: `ho-war-injury`,
+`ho-short-procedure` and the Toronto question. They were not new; each is
+recorded in earlier entries. They were missing
+because M37's list was assembled from the cases recent milestones had been
+working on, not from a full run.
+
+Two of the three are the kind of error that matters most, a claim the
+policy refuses being answered as paid:
+
+- **`ho-war-injury`**: "I was injured by shelling while visiting a border
+  town during a war and had to be hospitalised." Clause 4.8 excludes war.
+  Answered `covered`, 3 of 3, never citing 4.8. This is the same gap as M34
+  (drinking / "intoxicating substances") and M36 (shoplifting / "breach of
+  law"), except that here the question even uses the clause's own word,
+  "war".
+- **Toronto**: Star's exclusion 22 refuses treatment outside India.
+  Answered `conditional`, 3 of 3.
+
+M36's entry said "No main-set question is now known to be answered
+`covered` when the policy refuses it." That sentence is true and its
+qualifier, "main-set", was doing more work than a reader would guess. On
+the held-out questions, the ones this system was never tuned on, two refused
+claims are still answered as paid.
+
+No fix was attempted here. Both belong to the family M37 concluded cannot be
+closed by another check-and-ask-again rule with this model, and both are
+added to the list of questions to put to a stronger one.
+
+**The lesson is about lists, not about these cases.** A list of open
+problems kept by hand drifts toward whatever was worked on last. The full
+run is the only list that is complete, which is the practical reason to
+keep running it even when every change has been measured on its own.
+
+## One number that was wrong
+
+The README had "Star Health cases whose answer cites the clause that
+decides them: 10/10". In this run `star-weekend-trek` (a leg broken on an
+amateur trek; expected `conditional`) has the right verdict in all three
+samples and in none of them cites clause 9, the adventure-sports exclusion
+whose "as a professional" wording is what makes the claim payable. The row
+is now 9/10.
+
+Other answers that are right without citing the deciding clause, 3 of 3:
+`ambulance-admissible` (2.5), `ho-cancer-reconstruction` (4.1),
+`ho-planned-notice-late` (6.1), `ho4-acute-no-history` (2.1),
+`hdfc-typhoid-45-days`, `hdfc-tests-75-days-before`,
+`hdfc-medicines-five-months-after`. A verdict score does not see any of
+these. A person reading such an answer is told the right outcome and
+pointed at the wrong paragraph, or at none.
+
+## What was changed
+
+- `evals/REPORT.md` regenerated (`python evals/run_all.py`), now stamped
+  `v65-own-offence`.
+- README: the Star citation row is 9/10; the caveat about which numbers
+  come from a full run is replaced by one sentence saying all of them do;
+  the count of known wrong verdicts is stated as 9 of 109.
+
+**Why the report says 37/40 and the README says 39/40.** They measure
+different things and both are right. The report is one sample: each
+question's *stored* answer, replayed. The README's figure is the majority
+of three samples, two of them generated afresh. Two main-set questions
+have a stored answer that is wrong and fresh answers that are right. The
+single-sample figure is the stricter one, and the gap between the two is
+itself a measurement of how much this model's answers vary.
+
+## Check it yourself
+
+```bash
+python evals/run_all.py          # replays the cache; a few seconds
+```
+
+Then open `evals/REPORT.md` and find `ho-war-injury`.
+
+**Predict before you look:** the main set scores 39/40 and held-out batches
+3 and 4 together score 5/9. Both were written by the same person for the
+same policy. What is the most likely reason for the difference, and which
+number should a stranger believe?
+
+<details>
+<summary>Answer</summary>
+
+The main set is the one the system was built against: for forty
+milestones, every rule and prompt line was kept only if those questions did
+not get worse. Batches 3 and 4 were written later, each to probe one new
+mechanism from an angle the mechanism had not been tuned for, so they are
+both harder and unseen. A stranger should believe the held-out figure as
+the estimate of what happens on their own question, and read the main
+figure as "the cases the authors know about are handled". The honest
+headline is 100 of 109 with nine named failures, two of which pay a claim
+the policy refuses.
+</details>
+
+---
+
+# M39 — The app, used once from start to finish in a browser
+
+## The problem
+
+Everything measured since M17 was measured through the eval harness:
+Python scripts that call the pipeline's functions directly. The web
+application, the thing a person would actually use, had not been opened in
+a browser since its screens were built. The harness and the app share the
+pipeline but not the path to it. The app adds an upload endpoint, a
+background task, a status endpoint the page polls, a database, and a React
+front end. Thirty milestones of prompt and rule changes went through the
+first path and none through the second.
+
+So this milestone changes almost nothing and checks one thing: does the
+whole product still work when a person uses it?
+
+## What was done
+
+The API (`uvicorn app.main:app`, port 8000) and the front end (`npm run
+dev` in `web/`) were started, with Ollama 0.35.1 running, and the app was
+driven in Chrome: real clicks, a real file upload, typed questions. A
+recording of the session was saved as a GIF.
+
+One practical note: Vite's default port, 5173, was already taken by another
+project on this machine, so the front end came up on 5174. The first page
+loaded was therefore someone else's login screen. Read the port Vite
+prints; do not assume it.
+
+| step | expected | seen |
+|---|---|---|
+| Landing page | upload box, disclaimer | both present |
+| Upload `evals/golden/synthetic-health-policy.pdf` | redirect to the policy page, progress shown | "Reading 40 clauses", then "Read N of 40 clauses" with a percentage that only rises |
+| Analysis finishes | clause map | 40 clauses, 5 pages, "23 clauses in this policy could reduce or deny a claim" |
+| Ranking | worst first, each with a number and a label | 6.1 Notice of Claim, impact 85, "Easy to miss"; then 6.2 (83), 6.3 (82) |
+| Filters | one per clause type, with counts | Never covered 8, Something you must do 7, Not covered yet 4, Payout cap 4, Admin 6, Covered 6, Defined term 5 (sums to 40) |
+| Open a clause | plain-English version beside the policy's own words | side panel with both, the page number, the character offsets, and how the score was reached |
+| Typefaces | policy text in Source Serif 4, the app's own words in Instrument Sans | confirmed from the browser's computed styles, not by eye |
+| Severity | never colour alone | every impact bar carries its number and a text label |
+| Disclaimer | on every screen | landing, progress and policy pages |
+| Browser console | no errors | none |
+
+Three questions were then typed into "Check your own situation", each one
+an eval question with a known answer:
+
+| question | expected | shown |
+|---|---|---|
+| "I was injured while being arrested for shoplifting and needed hospital treatment. I have held the policy six years." | not_covered | **Not covered** — "On the wording below, this policy would not pay." |
+| "I was hit by a car ten days after my policy started and was hospitalised." | covered | **Likely covered** — "Nothing in this policy appears to block it, on what you described." |
+| "Does this policy cover my car being stolen from the hospital car park?" | insufficient_information | **Your policy doesn't settle this** — "Rather than guess, here is what would be needed to answer." |
+
+Each answer came back in 10 to 20 seconds with its reasoning, the list of
+facts the person did not mention, and the deciding clauses quoted in the
+policy's typeface with their page numbers.
+
+The product works end to end.
+
+## What the browser showed that the eval does not
+
+**1. A stated time that was wrong.** The landing page said "A 40-clause
+policy takes about two minutes to read." This run took about five: 32 of 40
+clauses were done roughly four minutes after the upload. The sentence was
+written when clauses were analysed several to a request; they were later
+analysed one at a time (`analyze_batch_size: int = 1` in
+`api/app/config.py`) because that measured more accurate, and the
+progress screen says so ("Each clause is read individually ... slower ...
+and measurably more accurate"). The landing page was never updated. Fixed:
+
+```tsx
+// web/src/routes/Upload.tsx
+A 40-clause policy takes about five minutes to read. The model runs locally, so the
+speed depends on your machine, not on a queue.
+```
+
+A small thing, and exactly the kind no eval can catch: a number in the
+interface that was true when it was written.
+
+**2. The shoplifting answer is right for the wrong clause, visibly.** The
+verdict was "Not covered", which is correct. The reason shown was:
+
+> ... falls under the exclusion in Clause 4.2 (4.2 Intentional
+> Self-Injury) ... Since the injury was intentional, the claim is not
+> covered.
+
+The clause that actually refuses it is 4.4, breach of law. Nobody injured
+themselves on purpose. In an eval table this is a line reading "missing
+4.4"; M37 recorded it as a citation fault and left it, because the attempt
+to fix it turned a correct refusal into a payment (Failure 102). On the
+screen it is a paragraph telling a person their injury was self-inflicted.
+The verdict score counts this answer as correct. Reading it as a user would
+is a different experience from reading the score, and it is worth doing
+once for that reason alone.
+
+**3. The model's vocabulary leaks.** The third answer ends "Therefore, the
+verdict is insufficient_information." That is the schema's internal label,
+written by the model into text meant for a person. The heading above it
+translates the label properly ("Your policy doesn't settle this"); the
+reasoning underneath is the model's own words and nothing translates
+those. Not fixed: the reasoning is shown as the model wrote it, and
+rewriting model text in code is a step this project has avoided.
+
+**4. The app and the eval do not share stored answers.** The eval had
+analysed this exact PDF many times, and every model answer is stored in a
+cache keyed by the exact request, so the upload might have been expected
+to finish in seconds. It took five minutes because the cache file's
+location is a relative path, `data/llm_cache.db`. The eval is run from the
+repository root and the API from `api/`, so there are two files:
+`data/llm_cache.db` and `api/data/llm_cache.db`. Nothing is wrong with
+either. It does mean the clause analysis the browser showed was generated
+afresh and is not guaranteed to be the one the eval scored. Left as it is:
+moving the file would change where a running installation keeps its data,
+for no gain a user would see.
+
+## Not checked
+
+- The real insurer PDFs through the browser (they are large; the Star and
+  HDFC wordings take much longer to analyse and were measured through the
+  harness).
+- The light ("paper") theme, a phone-width layout, and keyboard-only use.
+- Uploading something that is not a policy.
+
+## Check it yourself
+
+```bash
+# terminal 1 (Ollama must be running)
+cd api && .venv/Scripts/python.exe -m uvicorn app.main:app
+# terminal 2
+cd web && npm run dev          # read the port it prints
+```
+
+Upload `evals/golden/synthetic-health-policy.pdf` and ask the shoplifting
+question.
+
+**Predict before you look:** the eval harness and the web app call the same
+`run_scenario` function with the same question and the same policy. Will
+the browser show the same answer the eval recorded for that question?
+
+<details>
+<summary>Answer</summary>
+
+Not necessarily, and here it did not: the eval's fresh samples of this
+question mostly cite 4.4 after the M36 check asks again, and the browser's
+answer cited 4.2. Two things differ. The app keeps its own cache (finding
+4), so it analysed the uploaded PDF afresh; if even one clause's summary
+or extracted detail came out differently, the prompt differs, and a
+different prompt is a different answer. And M36 showed this very
+question's answer depends on what the
+server answered just before it. The same function is not the same request,
+and the same request is not always the same answer. The eval measures the
+pipeline; it does not replay what a particular user will see.
+</details>
