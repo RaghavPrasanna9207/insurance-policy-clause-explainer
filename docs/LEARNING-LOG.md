@@ -14740,3 +14740,77 @@ the *absence* of a match as a reason to push an answer toward paying, so
 every word the list did not know became a wrongly paid claim. A lookup may
 raise a question; it must never be the evidence that settles one.
 </details>
+
+---
+
+# M36 follow-up — The full run: 39/40
+
+## The problem
+
+M36 added a check for one main-set question, `breach-of-law` ("I was
+injured while being arrested for shoplifting and needed hospital
+treatment"), which had been answered `covered` in two full runs and
+correctly whenever asked alone. The fix was measured in a short sequence
+that reproduces the failure, because the full run started after it was
+stopped at 73 of 120 samples when the computer ran short of memory. A full
+run is the setting in which this case fails, so the M36 entry recorded the
+result as pending. This entry is that run.
+
+## The run
+
+```bash
+api/.venv/Scripts/python evals/run_scenario_eval.py --no-report --repeats 3
+```
+
+```
+majority verdict accuracy : 39/40 = 0.975
+unanimous cases           : 37/40
+per sample: 0.925, 0.975, 0.950
+```
+
+Case by case against the previous full run (after M35, 38/40):
+
+| case | run after M35 | this run |
+|---|---|---|
+| `breach-of-law` | wrong, covered 2/3 | **right, 3/3** |
+| `copay-applies-emergency` | wrong 3/3 | wrong 3/3 (left deliberately, M36 Failure 101) |
+| the other 38 | right | right |
+
+One answer changed, the one the change was for. The three cases that are
+right by 2 of 3 and not 3 of 3 are the same three as in the two runs before
+(`ped-waiting-served`, `oral-chemo-limit`, `day-care-not-listed`).
+
+`breach-of-law` cites clause 4.4 in two of its three samples. The third is
+the stored first answer, which refuses under clause 4.3 (hazardous sports):
+right verdict, wrong clause. The new check only asks a *paying* answer, so
+it has nothing to say to that one. A citation fault, known and left.
+
+## Reading the number
+
+Three full runs in a row, each compared with the one before:
+
+```
+after M34   37/40   (two cases gained, two lost, on identical requests)
+after M35   38/40   (one case changed: the one fixed)
+after M36   39/40   (one case changed: the one fixed)
+```
+
+The last two runs behave the way a fix is supposed to: one answer moves and
+nothing else does. That is worth more than the total, because the first of
+the three showed that a total can stand still while the answers under it
+swap.
+
+What 39/40 does not mean: these 40 questions are the ones every rule in
+this project was tuned against, several rules were written for a single
+one of them, and the reasoning prompt uses one as its worked example. The
+score says the system now does what its authors intended on the cases they
+were looking at. How it does on questions nobody was looking at is the
+held-out number in the project README, about 82%, and M36's Failure 101 is
+a fresh reminder of the gap: a rule can be clean on all 109 eval questions
+and wrong on the first five written beside it.
+
+## Check it yourself
+
+```bash
+api/.venv/Scripts/python evals/run_scenario_eval.py --no-report --repeats 3 --only breach-of-law,copay-applies-emergency
+```
