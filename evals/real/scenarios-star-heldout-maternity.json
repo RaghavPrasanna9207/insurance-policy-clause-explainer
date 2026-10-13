@@ -1,0 +1,70 @@
+{
+  "_why": [
+    "HELD-OUT questions on Star Health's Arogya Sanjeevani, about its maternity exclusion (18).",
+    "Never used to choose or tune a change.",
+    "",
+    "Written for M42, with every expected verdict fixed and this file committed BEFORE any",
+    "run of these cases. No code was changed for them.",
+    "",
+    "Why they exist. Exclusion 18 reads:",
+    "  a. Medical treatment expenses traceable to childbirth (including complicated",
+    "     deliveries and caesarean sections incurred during hospitalization) except",
+    "     ectopic pregnancy",
+    "  b. Expenses towards miscarriage (unless due to an accident) and lawful medical",
+    "     termination of pregnancy during the Policy Period",
+    "The reasoning prompt prints under it, in the program's own voice: 'EXCEPTIONS - this",
+    "clause does NOT apply when: due to an accident; lawful medical termination of",
+    "pregnancy during the Policy Period'. The second is false (termination is excluded),",
+    "the first belongs to miscarriage only, and the one exception of part (a), ectopic",
+    "pregnancy, is missing. M38 measured a fix, reverted it because the one existing",
+    "question on this clause (`star-caesarean`) got worse, and left the line in place. No",
+    "eval question asked about the things the line is wrong about. These five do.",
+    "",
+    "Same conventions as scenarios-star-arogya-sanjeevani.json: a payable claim is",
+    "`conditional` because of the 5% co-payment on every claim, and must_cite never names",
+    "that co-payment. Every question states four or more years held, so no waiting period",
+    "can be the reason. Same author as the system, so not fully independent, and the",
+    "clause is read as a layperson reads it, not as an insurer or a court would.",
+    "",
+    "Questions 2 and 4 deliberately avoid the clause's own words ('miscarriage', 'ectopic'),",
+    "so a wrong answer there may mean the condition was not recognised and not that the",
+    "clause was misread."
+  ],
+  "cases": [
+    {
+      "id": "star-ho-termination-planned",
+      "scenario": "My doctor has advised a medical termination of pregnancy next week, which is legal at this stage. Will this policy pay for the hospital stay? I have had the policy for six years.",
+      "expected_verdict": "not_covered",
+      "must_cite": ["18"],
+      "why": "Exclusion 18(b) excludes lawful medical termination of pregnancy during the policy period. This is the case the printed EXCEPTIONS line states the opposite of."
+    },
+    {
+      "id": "star-ho-lost-baby-eleven-weeks",
+      "scenario": "My wife lost our baby at eleven weeks and was kept in hospital for two nights. We have been on this policy for four years.",
+      "expected_verdict": "not_covered",
+      "must_cite": ["18"],
+      "why": "A miscarriage, in everyday words, with no accident described. Exclusion 18(b) excludes expenses towards miscarriage unless due to an accident."
+    },
+    {
+      "id": "star-ho-miscarriage-after-fall",
+      "scenario": "I slipped on wet stairs at home, fell hard, and miscarried the same night. I was in hospital for four days. I have held this policy for five years.",
+      "expected_verdict": "conditional",
+      "must_cite": [],
+      "why": "A miscarriage due to an accident is the stated exception to exclusion 18(b), so the exclusion does not apply. Five years serves every waiting period, and the 5% co-payment makes a payable claim conditional."
+    },
+    {
+      "id": "star-ho-pregnancy-in-tube",
+      "scenario": "Scans showed the pregnancy was growing in my fallopian tube and I needed emergency surgery to remove it. I spent three days in hospital. I bought this policy seven years ago.",
+      "expected_verdict": "conditional",
+      "must_cite": [],
+      "why": "An ectopic pregnancy, described without the word. It is the stated exception to exclusion 18(a), so the exclusion does not apply. Seven years serves every waiting period, and the 5% co-payment makes it conditional."
+    },
+    {
+      "id": "star-ho-caesarean-after-scooter",
+      "scenario": "A scooter hit my daughter while she was eight months pregnant. She went into labour early and the baby was delivered by caesarean. She was in hospital for six days. She has been covered under this policy for five years.",
+      "expected_verdict": "not_covered",
+      "must_cite": ["18"],
+      "why": "A caesarean delivery is childbirth, exclusion 18(a), whose only exception is ectopic pregnancy. 'Unless due to an accident' belongs to miscarriage in 18(b) and does not reach a delivery, although the printed EXCEPTIONS line attaches it to the whole clause."
+    }
+  ]
+}

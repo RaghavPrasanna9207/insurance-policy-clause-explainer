@@ -43,6 +43,7 @@ SETS = [
       for n in ("", "-2", "-3", "-4")],
     ("evals/real/scenarios-star-arogya-sanjeevani.json", "samples/real/star-arogya-sanjeevani.pdf"),
     ("evals/real/scenarios-star-heldout-abroad.json", "samples/real/star-arogya-sanjeevani.pdf"),
+    ("evals/real/scenarios-star-heldout-maternity.json", "samples/real/star-arogya-sanjeevani.pdf"),
     ("evals/real/scenarios-hdfc-optima-secure.json", "samples/real/hdfc-optima-secure.pdf"),
 ]
 
