@@ -7,11 +7,11 @@ one run against the code and settings stated here.
 |---|---|
 | Model | `qwen2.5:7b-instruct-q4_K_M` |
 | Ollama | `0.35.1` |
-| Prompt version | `v65-own-offence` |
+| Prompt version | `v66-true-exceptions` |
 | Decoding | num_ctx 28672, num_predict 1600, temperature 0.0, KV cache q8_0 |
 | Analysis batch size | 1 |
-| Commit | `efd7d9d` |
-| Generated | 2026-10-12 16:39 UTC |
+| Commit | `9f5b895` |
+| Generated | 2026-10-13 14:33 UTC |
 | Total wall time | 1s (served from cache; a cold run takes several minutes) |
 
 The golden set is a 39-clause synthetic IRDAI-style policy authored for
