@@ -2195,7 +2195,27 @@ grep -rn "PROMPT_VERSION" api/app/llm/ api/app/pipeline/
 # every hit passes it to cache.make_key(); none concatenates it into a message
 ```
 
-And `temperature` is 0.0.
+And `temperature` is 0.0 (set in `api/app/config.py`).
+
+> **True then, not now (checked against the code on 13 October 2026).** The two
+> statements above about the cache describe the code as it stood in this
+> milestone. `PROMPT_VERSION` was removed from the cache key in the next
+> milestone (M10, Concept 30: a version label is not a cache key), because
+> bumping it threw away every stored answer, including those whose prompts had
+> not changed. Today the key is a hash of the model name, the exact messages,
+> the schema, the decoding options, the server's KV cache precision and the
+> Ollama version. The version string is only a label, as the top of
+> `api/app/llm/cache.py` now says:
+>
+> ```
+> PROMPT_VERSION IS DELIBERATELY NOT PART OF THE KEY, though it used to be.
+> ```
+>
+> So the `grep` above no longer prints what its comment describes: today it
+> finds the definition in `api/app/llm/prompts.py` and one use in
+> `api/app/pipeline/run.py`, which stores the string beside an analysis as a
+> label. The point the grep was making still holds: the version string is never
+> written into a prompt.
 
 Comparing the three runs case by case, **five of the forty cases flip between
 runs**:
@@ -2215,11 +2235,17 @@ day-care-not-listed
 So the system's real score is *27 guaranteed passes plus up to five coin
 flips*: somewhere in 0.675–0.800, and which end gets reported is luck.
 
+Read those three column headings as "in these three runs", not as facts about
+the cases. Three runs cannot show that a case is *always* right, and run 1 was
+warm, so most of its answers were stored ones replayed and not fresh samples.
+What the table does establish is the smaller claim the rest of this entry
+needs: at least five cases changed verdict with no change to the code.
+
 **This invalidates more than one milestone's conclusions.** The previous
-milestone compared 0.725 against 0.675 and wrote a careful diagnosis of why a
+milestone (M8) compared 0.725 against 0.675 and wrote a careful diagnosis of why a
 change had cost two cases. Two cases is inside the noise. The diagnosis may
 still be right — its mechanism was verified independently — but the *number*
-never supported it. The milestone before that had already noticed five runs
+never supported it. The milestone before that (M7) had already noticed five runs
 landing on 0.688 / 0.625 / 0.812 / 0.688 / 0.812 and concluded the 16-case set
 was too small to resolve the changes being made against it. That conclusion was
 half right in an expensive way: the set was too small, but enlarging it to 40
@@ -2230,6 +2256,14 @@ cases did not fix the problem, because the problem was never the set size.
 > checked the second one. An eval you have not tested for reproducibility is
 > not an instrument, it is an anecdote generator, and it will produce a
 > confident story for any change you make.
+
+**What this entry does not contain.** It shows that the runs differed. It does
+not show why, and it does not introduce the habit of scoring each case as the
+majority of several samples. The cause is found three sections on (Failure 23:
+answers differed only while two requests were being computed at once). Majority
+scoring came much later, in M17 ("What a sample is"), and is the `--repeats`
+option of `evals/run_scenario_eval.py`; the number of samples is whatever is
+passed, usually three.
 
 ---
 
@@ -2274,7 +2308,23 @@ run B: {"deciding_clauses": [{"clause_id": "4.3", "effect": "denies",  ...
 One says a waiting period reduces the claim; the other says an exclusion denies
 it. A single flipped token at position 37, and the answers have nothing in
 common. Near-ties are not rare events at the margins — they are the normal
-condition of a 150,000-way choice, and there is one at every token.
+condition of a 150,000-way choice, and there is one at every token. (The log
+did not record which eval case those two lines came from.)
+
+**How far the evidence goes.** "On a GPU the logits are not reliably
+bit-identical" is stated here as a general fact, and at this point in the
+milestone it was only a belief. The measurements that follow narrow it a great
+deal. Eighteen model calls sent one after another came back byte-identical
+every time. The answers diverged only when the analysis stage kept two requests
+in flight at once (Failure 23, Concept 27). So what this milestone actually
+measured is narrower than the sentence above: answers differed when a request
+shared the GPU with another one. That is why `analyze_concurrency` in
+`api/app/config.py` is 1 today. (Failure 22's three calls that disagreed were
+made before the two layers were separated, and the log does not record what
+else was running.) It was not the last cause found. Later entries add others:
+Concept 43 (the same prompt, computed two ways), Concept 45 (the runtime is
+part of the model) and Failure 94 (an answer unanimous in one session and
+different on another day).
 
 ---
 
@@ -3414,6 +3464,10 @@ ped-waiting-served, clause 3.2
   CLAUSE : '... after the date of inception of the first policy with the Company.'
 ```
 
+(Only this one of the eight is printed here. The other three of this shape, and
+the four of other shapes, were read at the time and not copied into the log, so
+"four of eight" rests on that reading and cannot be re-checked from this page.)
+
 That is the clause, correctly copied, followed by a line the policy never
 contained. The line is written by the pipeline: the reasoning prompt prints
 each clause's extracted exceptions directly beneath its text.
@@ -3429,11 +3483,35 @@ if getattr(clause, "exceptions", None):
 ```
 
 The model could not tell where the clause stopped and the annotation began.
-The verbatim check caught every one, and detection integrity stayed at 1.000,
+The verbatim check caught every one, and detection integrity stayed at 1.000
+(the eval's measure that every quotation not found in its clause was flagged as
+unverified, re-checked independently of the pipeline's own flag),
 so the guarantee never failed. But the annotation it had copied raised a much
 worse question. "Direct complications of a pre-existing disease" is not an
 exception to clause 3.2. The clause *excludes* "a Pre-existing Disease and its
 direct complications". The annotation says the opposite of the policy.
+
+> **Two things to know when reading this later (checked against the code on
+> 13 October 2026).**
+>
+> *The cause named above was not removed.* "The model could not tell where the
+> clause stopped" is the diagnosis, but `render_reasoning_request()` in
+> `api/app/llm/prompts.py` still prints the EXCEPTIONS line directly under the
+> clause, in the same format. Failed quotations fell from 8 to 1 in this
+> milestone because five wrong annotations were deleted (Failure 33, next), so
+> there were fewer lines to copy. A quotation of this shape was still failing
+> in M13, and was dealt with there (Failure 40): `verified_prefix()` in `api/app/grounding.py` keeps the leading
+> part of a quotation that really is in the clause and drops what was appended,
+> provided the kept part is at least 60% of the quotation.
+>
+> *"The verbatim check caught every one" describes the check as it was then.*
+> It was a plain test: is the normalised quotation a substring of the clause?
+> Today `verify_quote()` also removes a trailing bracketed reference such as
+> "[3.2 (3.2)]" and accepts a quotation whose lines each appear in the clause in
+> order, and `verified_prefix()` then rescues a clause-plus-annotation quote. So
+> the quotation printed above would be shown today as verified, shortened to the
+> clause's own words. Nothing invented gets through, because what is kept must
+> still match the clause exactly.
 
 ---
 
@@ -3454,9 +3532,11 @@ exception on the synthetic policy, beside the clause it came from:
 | 4.5 infertility | reversal of sterilisation | ✗ on its list of things excluded |
 | 4.7 non-medical | items listed in Annexure III | ✗ "any other item listed in Annexure III" is excluded |
 
-**Five of eight were wrong.** Each was presented to the reasoning step as a
+**Five of the eight clauses had a wrong exception.** Each was presented to the reasoning step as a
 statement of when an exclusion does *not* apply, in exactly the situation where
-it does.
+it does. (The count is of clauses, not of exceptions: row 4.1 alone holds two,
+both right. This "eight" is also unrelated to the eight answers with a failed
+quotation in Failure 32.)
 
 That explains a case that had failed in every run on record.
 `intoxication-injury`, *"I fell down the stairs after drinking heavily and
@@ -3568,6 +3648,20 @@ exception kept is the pipeline asserting something false.
 word in the same sentence passes, for instance the words just after "unless"
 taken from the wrong part of a long sentence. This checks the common shape of
 the mistake. It does not prove correctness.
+
+**What it leaves in place.** This is a filter on the model's answer. The thing
+that produced the worst of the five, the worked example in `CLASSIFY_SYSTEM`
+that the model echoed for clause 4.2, is still in the prompt. The model can
+still return it; the check drops it because those words are not in the clause.
+This entry does not record a decision about rewording the prompt. What is on
+record is the cost of doing so: Failure 28 showed that one added paragraph in
+the analysis prompt reclassified clauses it never mentioned, and any change to
+that prompt means re-analysing every clause, where a filter placed after the
+cache re-analyses none. And the list of exception words was
+written and tested against the same eight clauses of the synthetic policy, so
+on this evidence it is known to fit them, not policies in general. (Its
+behaviour on a real policy is measured later: M38, Failure 103, on Star
+Health's clause 18.)
 
 ---
 
@@ -8922,6 +9016,11 @@ def derive_pre_existing(facts: dict[str, Any]) -> dict[str, Any]:
     return facts | {"pre_existing_condition": "yes" if known > policy else "no"}
 ```
 
+(That is the function as written in this milestone. Today the two helpers
+`condition_known_days` and `policy_age_days` are one, called as
+`duration_days(facts, "condition_known_for")` and
+`duration_days(facts, "time_since_policy_start")`; the logic is unchanged.)
+
 Two deliberate narrowings, both following a principle this project arrived at
 earlier — that a check which overrides a model must act only on positive evidence
 for the other reading, because its two kinds of mistake do not cost the same:
@@ -8941,14 +9040,31 @@ harder, it gives it one more thing to copy down.
 
 ---
 
-## Failure 78: four prompts to add one field, and what each one broke
+## Failure 78: five prompts to add one field, and what three of them broke
 
 The schema field and the Python comparison were right on the first attempt and
-never changed. **The prompt took four versions**, and each version broke
-something that had nothing to do with pre-existing conditions. That sequence is
-the most transferable thing in this milestone, so it is recorded in full.
+never changed. **The prompt took five versions.** Three of them (v45, v46 and
+v48) each broke something that had nothing to do with pre-existing conditions;
+v47 broke nothing new, and v49 is the one that was kept. That sequence is the
+most transferable thing in this milestone, so it is recorded in full. (This
+entry was first written when v48 looked final and was titled "four prompts".
+The v49 step was recorded only in a commit message until 13 October 2026, when
+it was added below.)
 
-Throughout, the rule for deciding whether something is real: **three fresh
+The instrument throughout is `evals/check_fact_extraction.py`. It runs the fact
+extractor alone, with no verdict step, on a fixed list of sentences and compares
+every extracted field with an answer key. Each sentence carries one of three
+labels, defined at the top of that file:
+
+```
+eval      the eval's own questions, whose facts must be right
+heldout   sentences in no eval case and no prompt example, written to test
+          whether a prompt change generalises or just memorises
+tuned     sentences that WERE held out until a prompt change was made
+          while looking at them; kept, but no longer evidence of generalising
+```
+
+The rule for deciding whether something is real: **three fresh
 samples on the new prompt and three on committed `main`.** A single sample of
 this model proves nothing — one case in this very set, `seven-years-at-59`,
 flipped between runs with no code change at all.
@@ -9054,15 +9170,76 @@ v48-condition-known-for
   scan-after-discharge         ['ok', 'ok', 'ok']
 ```
 
+Those six are the fact check only. v48 had not yet been through the full
+scenario eval, which scores verdicts.
+
+### v49 — the right words in the wrong place
+
+The full scenario eval then moved a case that has nothing to do with
+pre-existing conditions, `other-policy-contribution`, from right to wrong. Its
+question is *"I hold another health policy with a different insurer and I have
+sent the same hospital bill to both. I have held this policy four years."* The
+expected verdict is `conditional`, citing the contribution clause, 6.6: this
+insurer pays only its share.
+
+The cause was in the fact step, not the reasoning step. The fact schema ends
+with a free-text field, `notes`. No sentence anywhere in the extraction prompt
+(`FACTS_SYSTEM`) says what to put in it, and it is the last field the model
+writes, so it is filled by inference from whatever the prompt said last. v48
+had put its fifteen lines about durations at the very end of the prompt. With
+them there, `notes` changed from
+
+```
+"I hold another health policy with a different insurer and I have sent the
+ same hospital bill to both."
+```
+
+to
+
+```
+"Held the policy for 4 years."
+```
+
+That drops the only fact the contribution clause turns on, and the answer
+stopped citing 6.6.
+
+The fix changed no words. The block was moved up to sit with the other duration
+rules, directly after the paragraph that begins "NEVER convert between units",
+which made the end of the prompt byte-identical to `main`'s again:
+
+```
+# api/app/llm/prompts.py, FACTS_SYSTEM, the order after v49
+NEVER convert between units. ...
+
+HOW LONG THE CONDITION HAS BEEN KNOWN: a value and a unit, exactly like the
+durations above. ...
+
+TWO DIFFERENT AGES, AND THEY ARE NOT INTERCHANGEABLE.
+```
+
+`notes` came back in full and `other-policy-contribution` answered
+`conditional` in 3 samples of 3, where it had answered `covered` in 3 of 3 with
+the block at the end. The move had a price: `63-held-eleven`, clean 3 of 3 on
+v48, was right in 2 of 3 on v49. That is still a correct majority, and it was
+accepted. `PROMPT_VERSION` became `v49-condition-known-for`, the version this
+milestone shipped. (Source: commit `859f55a`, 23 September 2026. Its message
+does not say whether the other five watched cases were sampled again on v49.)
+
+So where a block sits in a prompt is part of what it says. The same fifteen
+lines were harmless in the middle and damaging at the end, because the end is
+what the last field is written under.
+
 ### Concept 48: a prompt is not a list of independent rules
 
-The pattern across those four versions is one thing, seen four times: **adding an
+The pattern across those versions is one thing, seen three times: **adding an
 instruction for one field competes for attention with every other field, and the
 fields it damages are the ones nothing warned you to look at.** An example about
-hernias cost an age. A denial mentioning two other fields caused a subtraction
-between them.
+hernias cost an age (v45). A denial mentioning two other fields caused a
+subtraction between them (v46). Fifteen lines about durations, placed last,
+rewrote a free-text field that no instruction covers (v48).
 
-It is the same mechanism as the earlier reversion recorded in this log, where a
+It is the same mechanism as the earlier reversion recorded in this log (Failure
+42), where a
 change aimed at pre-existing conditions broke an ICU rate — and it is why that
 attempt was abandoned rather than debugged. What made this one survivable was
 not better prompt wording. It was:
@@ -9072,12 +9249,20 @@ not better prompt wording. It was:
    policy durations, because the harness scores every field on every sentence
    rather than the one being worked on.
 2. **Three samples, and a baseline run of the same three.** Of the four
-   suspicious failures, two were real regressions, one was noise, and one was a
-   pre-existing failure. Acting on the single-sample list would have meant
-   chasing two phantoms.
-3. **Restating an existing rule rather than writing a new one.** Three of the
-   four versions added new prohibitions and each added a new interaction. The
-   version that worked pointed back at a rule the prompt already contained.
+   suspicious failures in the v46 run, two were real regressions
+   (`63-held-eleven`, `ped-waiting-served`), one was noise
+   (`seven-years-at-59`), and one was a pre-existing failure
+   (`70-bought-at-55`). Acting on the single-sample list would have meant
+   chasing two phantoms. (The four were not named when this was written. The
+   names here are the cases that fit, taken from the v46 section above and the
+   table in "Closing out M18".)
+3. **Restating an existing rule rather than writing a new one.** v46 added an
+   abstract prohibition and caused a new interaction. v47 replaced it with
+   worked examples and caused none. The wording that closed the last collision
+   (v48) pointed back at a rule the prompt already contained.
+4. **The full eval, run after the narrow check passed.** The fact check was
+   clean on v48. Only the verdict eval, on a case about something else
+   entirely, showed that `notes` had been rewritten.
 
 Two honest notes about what this evidence supports. `copay-applies-emergency`
 and `ped-waiting-served` are **eval** sentences, not held-out ones, and the v46
@@ -9087,6 +9272,41 @@ written from the prompt's own existing rule rather than from
 `63-held-eleven`'s output, and `63-held-eleven` is held out; but having watched
 it fail, the cleanest reading is that the held-out group as a whole carries the
 generalisation claim, not that one case.
+
+A third note, added on 13 October 2026 after checking the prompt against the
+case lists. **Four of this check's sentences are now inside the prompt they
+test.** The two v47 examples are two eval questions almost word for word:
+
+```
+prompt example                                     evals/golden/scenarios.json
+"hospitalised for it 5 years after taking          ped-waiting-served: "...I was hospitalised for it
+ the policy out"                                    5 years after taking the policy out."
+"I was admitted with pneumonia last month"         copay-applies-emergency: "...I was admitted with
+                                                    pneumonia last month."
+```
+
+So for those two cases a correct fact extraction now shows the model can copy
+an example, which is the problem Failure 41 ("the test question inside the
+prompt") had already recorded once in this project. And two sentences written for the
+new field carry the `heldout` label while sharing their key phrase with a
+prompt example, which that label's own definition rules out:
+
+```
+prompt example                                 heldout sentence in check_fact_extraction.py
+"a hernia that was found last month"           hernia-found-last-month: "...an inguinal hernia
+                                                that was found last month. I bought this policy
+                                                14 months ago..."
+"diagnosed with diabetes three years ago"      diabetes-longer-than-policy: "I was diagnosed with
+                                                diabetes three years ago and have held this
+                                                policy for eight months."
+```
+
+Their passes are evidence that the field is wired up correctly, not that the
+prompt generalises. Of the six sentences written for the field, the ones whose
+wording is not in the prompt are the ones that carry that claim. Nothing was
+changed on finding this. Rewording an example changes the text of every
+fact-extraction request, so it could only be judged by a full re-measure of
+every eval set. It is recorded here so that the result is read for what it is.
 
 ### The stale answer key
 
@@ -9099,8 +9319,10 @@ BAD tuned    ho-knee-replacement     pre_existing_condition=unknown
 BAD tuned    ho-kidney-stone         pre_existing_condition=unknown
 ```
 
-The obvious reading is that this milestone broke them. Before accepting it, the
-same six sentences were run against committed `main` with every change stashed:
+The obvious reading is that this milestone broke them. Before accepting it, all
+six sentences in the answer key that test `pre_existing_condition` (those four,
+plus `fever-no-history` and `migraines-new`) were run against committed `main`
+with every change stashed:
 
 ```
 prompt version: v44-picked-clauses-covered-means-in-full
@@ -9116,7 +9338,10 @@ prompt version: v44-picked-clauses-covered-means-in-full
 ```
 
 **One out of six on the baseline.** Five of those cases were already failing on
-committed `main`, before this milestone touched anything.
+committed `main`, before this milestone touched anything. (The fifth,
+`migraines-new`, is not in the list of four above. It fails on both prompts in
+the table in "Closing out M18"; the log does not record why the first list
+left it out.)
 
 Two things follow, and both matter more than the six cases.
 
@@ -9128,13 +9353,14 @@ mislabels a pre-existing failure as a regression, which is exactly what it did
 here until the baseline was run.
 
 **This is the runtime lesson arriving from a different direction.** An earlier
-milestone established that the program doing the arithmetic is part of the model,
+milestone (M17, Concept 45: the runtime is part of the model) established that
+the program doing the arithmetic is part of the model,
 and that stored answers must be re-measured when it changes. These expectations
 were written under an earlier Ollama and are being read under 0.34.2. **A
 committed answer key carries a runtime with it whether or not anyone wrote that
 down.**
 
-Those four cases are **not fixed by this milestone and remain open**: the
+Those five cases are **not fixed by this milestone and remain open**: the
 extractor still will not answer "no" or "yes" to a sentence that states the
 relationship in words rather than in two durations. What this milestone fixed is
 the case that can be settled by arithmetic — which is the case that should never
@@ -9257,9 +9483,11 @@ of the same sentence. It has since flickered on v46 and v48 as well. This is the
 reason single-sample results in this project are never acted on alone.
 
 The five "open" rows are the pre-existing-condition sentences whose relationship
-is stated in words rather than in two durations. **Four of the five were already
-failing on committed `main`** before this milestone started, which is the finding
-written up under Failure 78 as the stale answer key.
+is stated in words rather than in two durations. **All five were already
+failing on committed `main`** before this milestone started (the v44 column
+above), which is the finding written up under Failure 78 as the stale answer
+key. (This sentence said "four of the five" until 13 October 2026; the table
+and the baseline listing under Failure 78 both show five.)
 
 ### What is deliberately not fixed
 
@@ -15598,4 +15826,143 @@ question's answer depends on what the
 server answered just before it. The same function is not the same request,
 and the same request is not always the same answer. The eval measures the
 pipeline; it does not replay what a particular user will see.
+</details>
+
+---
+
+# M40 — Three old entries, read again against today's code
+
+## The problem
+
+This log has 103 numbered failures and runs past fifteen thousand lines. Most
+of it was written in the hour the work was done, and none of it had ever been
+read back against the code as it stands now. An entry written in M9 describes
+M9's code in the present tense. Thirty milestones later some of those sentences
+are false, and a reader arriving cold has no way to tell which.
+
+So three entries were picked, each a story worth being able to tell aloud, and
+each was checked line by line against the repository on 13 October 2026:
+
+- **Failure 21** (M9): the same code scored 0.725, 0.700 and 0.750.
+- **Failure 32 with Failure 33** (M11): failed quotations that were the
+  pipeline's own annotation, and the annotations that were wrong.
+- **Failure 78** (M18): the prompt versions it took to add one fact field.
+
+No model was run. Every check was reading: the entry, the files it names, and
+`git log` for what happened afterwards.
+
+## What was found
+
+All three conclusions hold. None of the entries reached a wrong lesson. What
+was wrong falls into four kinds, and the kinds matter more than the instances,
+because the other hundred entries have not been checked and will have the same
+ones.
+
+**1. True then, false now.** Failure 21 said `PROMPT_VERSION` "is part of every
+cache key". It was, in M9. It was taken out one milestone later. Failure 32
+said the verbatim check "caught every one"; the check has since been loosened
+on purpose and that quotation is shown today as verified, shortened. Each sentence
+was accurate when written and carried no date.
+
+**2. A story that stops before it ends.** Failure 78 ended on "all six watched
+cases clean" at v48. The same day a v49 was committed, because the full eval
+showed v48 had broken an unrelated case. That step existed only in a commit
+message. Failure 32 named a cause, the model not knowing where the clause ends,
+that its own milestone never removed; the repair came two milestones later
+under a different entry, with no pointer between them.
+
+**3. Counts that do not agree with their own tables.** Failure 78 said four
+cases, then six, then five, then "four of the five", beside a table showing
+five. Failure 33's "five of eight" counted clauses in a sentence that read as
+if it counted exceptions.
+
+**4. A claim one size larger than the evidence.** Failure 21's "always right"
+column rests on three runs, one of them mostly replayed from the cache. Its
+explanation of *why* the runs differed was a belief at the point it was
+written, and was narrowed by measurements a few sections on. Failure 32's
+"half were our own words" prints one quotation of eight. Failure 78's heading
+said every version broke something; two of the first four did.
+
+Two findings were about the code and not the log.
+
+A comment in `api/app/config.py` above `seed` still gave the first, disproved
+explanation of the flips (no seed, so near-ties break differently each run),
+though Failure 22 measured that pinning the seed fixed nothing. It now reads:
+
+```python
+# api/app/config.py
+    # The seed was the first suspect: with none supplied Ollama picks a random
+    # one per request. Pinning it was MEASURED TO FIX NOTHING - three calls with
+    # identical messages and seed 0 still gave two different answers. At
+    # temperature 0 the sampler takes the highest-scoring token and never draws
+    # from the generator a seed feeds. The flips came from two requests being
+    # computed at once, which changes the scores themselves: see
+    # analyze_concurrency below.
+```
+
+And four sentences of the fact-extraction check sit inside the prompt they
+test: two eval questions quoted as worked examples, and two sentences labelled
+`heldout` that share their key phrase with an example. That is written up in
+full under Failure 78. The prompt was left alone, because rewording an example
+changes every fact-extraction request and could only be judged by re-measuring
+every eval set. What changed is how those four passes should be read.
+
+## How the entries were corrected
+
+The old text was not rewritten into what it should have said. A log that is
+silently tidied stops being a record. Each correction is one of:
+
+- a dated note beside the original sentence ("True then, not now, checked
+  against the code on 13 October 2026"), saying what the code does today;
+- a missing step added as its own section (v49 under Failure 78);
+- a wrong number changed, with the old number stated next to it.
+
+## Concept 56: a log entry has a date even when it does not print one
+
+Code has one current state. A log entry about code is a statement about a
+commit, and reads as a statement about the present. The present tense is what
+does the damage: "the key includes the version" cannot be told apart, on the
+page, from a claim that it still does.
+
+Three habits follow, cheap at the time of writing and expensive to add later:
+
+- **Label quoted code with its moment** when it is likely to change:
+  "before this milestone", "as written in M18".
+- **When a later milestone finishes an earlier story, go back and leave a
+  pointer** in the earlier entry. The reader of Failure 32 needs to know that
+  Failure 40 exists; the reader of Failure 40 already knows about Failure 32.
+- **Write the count next to the list it counts.** Every disagreeing number
+  above sat in prose, some distance from the table that would have corrected
+  it.
+
+## What this does not show
+
+Three entries of 103 were checked. The other hundred have had no such reading,
+and the four kinds of fault above should be expected in them, most of all the
+first: any present-tense statement about the cache, the prompts or the check
+functions in an early entry should be confirmed in the code before it is
+repeated.
+
+## Check it yourself
+
+```bash
+# the version string is a label, not part of the cache key
+grep -rn "PROMPT_VERSION" api/app/llm/*.py api/app/pipeline/*.py
+
+# the v49 step, as recorded on the day
+git show 859f55a --stat
+```
+
+**Predict before you look:** the reasoning prompt prints an "EXCEPTIONS" line
+under a clause. The model quotes the clause and that line together. Is that
+quotation shown to the user as verified or unverified today?
+
+<details>
+<summary>Answer</summary>
+
+Verified, but shortened. `verify_quote()` fails it, because the EXCEPTIONS
+line is not in the clause. `verified_prefix()` then keeps the longest leading
+part that is in the clause, provided it is at least 60% of the quotation, and
+that part is what is shown. In M11 the same quotation was shown as unverified,
+because `verified_prefix()` did not exist yet.
 </details>

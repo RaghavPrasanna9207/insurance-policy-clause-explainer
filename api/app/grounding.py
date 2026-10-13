@@ -231,8 +231,8 @@ def verify_citations(
 # Stage 3 asks the model for each clause's carve-outs, and stage 5 prints them
 # under the clause as "EXCEPTIONS - this clause does NOT apply when: ...". That
 # line is the pipeline speaking, not the model, so a wrong one is a falsehood
-# this system asserts. Measured on the synthetic policy, 5 of the 8 exceptions
-# extracted were wrong, in two different ways:
+# this system asserts. Measured on the synthetic policy, 5 of the 8 clauses
+# given an exception were given a wrong one, in two different ways:
 #
 #   NOT IN THE CLAUSE    the alcohol exclusion was given "necessitated by an
 #                        Accident, Burn or Cancer" - the analysis prompt's own

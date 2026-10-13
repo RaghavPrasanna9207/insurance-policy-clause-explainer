@@ -150,7 +150,7 @@ Two errors that happened before the model ever reasoned, found by reading the fa
 - **Failure 31: every check did its job, on a fact that was wrong** - 9 of 40 questions had the policy's age missing or replaced by the person's age. Every downstream stage was correct given its input, and the scenario eval, which scores only verdicts, could not see it.
 - **Concept 31: a schema key is part of the prompt** - under constrained decoding the key is the last thing written before the value. `policy_age` pulled in ages; `policy_held_for` fixed that and lost "after my policy started"; `time_since_policy_start` read both. Measured on held-out sentences, with a second held-out batch written after the first had been tuned against.
 - **Failure 32: eight fabricated quotes, and half were our own words** - the model copied an annotation the pipeline prints beneath each clause.
-- **Failure 33: the pipeline was telling the model things the policy does not say** - 5 of 8 extracted exceptions were wrong, one copied from the analysis prompt's own example. "The alcohol exclusion does not apply to accidents" explained a case that had failed in every run. The first diagnosis of its cause was wrong too.
+- **Failure 33: the pipeline was telling the model things the policy does not say** - 5 of the 8 clauses given an exception were given a wrong one, one copied from the analysis prompt's own example. "The alcohol exclusion does not apply to accidents" explained a case that had failed in every run. The first diagnosis of its cause was wrong too.
 - **Concept 32: checking an extraction by its grammar, not only its text** - a substring check cannot catch real text in the wrong role. An exception must be preceded by an exception word in its own sentence.
 - **A verdict-neutral change, kept, and why** - it broke two cases and fixed two, and it stopped the system asserting falsehoods about the policy. Weighed against a structurally correct M10 fix that was reverted.
 
@@ -253,7 +253,7 @@ Five things wrong on screen that no eval in the repository could see, found by u
 - **Failure 76: an exact quotation, marked unreliable** - a correct answer flagged "Not verified" for quoting parts A, D and E of a clause and skipping B and C.
 - **Concept 47: provenance and meaning are different questions** - loosening the project's core grounding check safely, and why a check that cries wolf degrades into no check at all rather than into a stricter one.
 - **Failure 77: asking for facts about an answer it had already decided** - one list serving the reasoning prompt and the interface, which need opposite things from it; and a pre-existing condition stated twice in the question and read as unknown, because settling it is a subtraction.
-- **Failure 78: four prompts to add one field, and what each one broke** - an example about hernias cost an age; a denial naming two fields caused a subtraction between them. Includes the stale answer key: four "regressions" that were already failing on `main`.
+- **Failure 78: five prompts to add one field, and what three of them broke** - an example about hernias cost an age; a denial naming two fields caused a subtraction between them; the same lines placed at the end of the prompt rewrote a field no instruction covers. Includes the stale answer key: "regressions" that were already failing on `main`, and a note that four of the check's sentences sit inside the prompt they test.
 - **Concept 48: a prompt is not a list of independent rules** - adding an instruction for one field competes for attention with every other field, and the fields it damages are the ones nothing warned you to look at.
 
 ### M19 - One clause list, built in one place
@@ -385,6 +385,11 @@ Star's maternity exclusion is printed with an exception it does not have. A thre
 
 ### M39 - The app, used once from start to finish in a browser
 Upload, analysis, the ranked clause map, a clause's detail panel and three questions with known answers, driven in Chrome. It works; a short entry. Read it for what a browser showed that no eval score does: a stated time that had gone stale, a right verdict explained with the wrong clause, the schema's own label leaking into text meant for a person, and the app and the eval keeping separate answer caches.
+
+### M40 - Three old entries, read again against today's code
+Failures 21, 32/33 and 78 checked line by line against the repository, with no model run. All three lessons hold; the faults were sentences true when written and false now, a story that stopped one step early, counts that disagreed with their own tables, and claims a size larger than their evidence. Read it before quoting any early entry, and for the dated notes now sitting inside those three.
+
+- **Concept 56: a log entry has a date even when it does not print one** - why present-tense statements about code go stale, and three habits that prevent it.
 
 ---
 

@@ -120,14 +120,16 @@ class Settings(BaseSettings):
     # correct. A change worth two cases cannot be measured through noise worth
     # three.
     #
-    # Greedy decoding still runs through llama.cpp's sampler chain, and with no
-    # seed supplied Ollama picks a random one per request, so near-ties between
-    # two tokens are broken differently from run to run. A near-tie at one
-    # token is all it takes: `not_covered` and `insufficient_information` begin
-    # to diverge at the first word of the verdict.
+    # The seed was the first suspect: with none supplied Ollama picks a random
+    # one per request. Pinning it was MEASURED TO FIX NOTHING - three calls with
+    # identical messages and seed 0 still gave two different answers. At
+    # temperature 0 the sampler takes the highest-scoring token and never draws
+    # from the generator a seed feeds. The flips came from two requests being
+    # computed at once, which changes the scores themselves: see
+    # analyze_concurrency below.
     #
-    # Fixed rather than left to chance. The value is arbitrary; being the same
-    # value every time is the entire point.
+    # Pinned anyway, because an input to a system whose premise is
+    # reproducibility should not be left unspecified. The value is arbitrary.
     seed: int = 0
 
     # --- Pipeline ---
