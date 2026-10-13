@@ -73,16 +73,49 @@ _TRAILING_REF = re.compile(r"[\s.,;:]*[\[(][^\[\]]{0,60}[\])]\s*$")
 MIN_QUOTE_CHARS = 25
 
 
+# A hyphen with whitespace after it, between two word characters: a word the
+# PDF broke at the end of a line ("pre-\nexisting", "para-\nsurgical").
+_LINE_END_HYPHEN = re.compile(r"(?<=\w)-\s+(?=\w)")
+
+
+def plain(text: str) -> str:
+    """The same words in plain characters, on one line. Case is kept.
+
+    Ligatures are split ("fi" set as one character becomes two), curly quotes
+    and dashes become ASCII, and every run of whitespace, line breaks included,
+    becomes one space. None of those say anything about what a clause or a
+    question means, so no rule that reads text should see them.
+    """
+    text = unicodedata.normalize("NFKC", text)
+    for fancy, ascii_char in _PUNCTUATION_MAP.items():
+        text = text.replace(fancy, ascii_char)
+    return _WHITESPACE.sub(" ", text).strip()
+
+
 def normalize(text: str) -> str:
     """Reduce text to what a quotation check should actually compare.
 
     Collapses whitespace (PDF reflow), unifies typographic punctuation, and
     lowercases. Deliberately preserves every word and their order.
     """
-    text = unicodedata.normalize("NFKC", text)
-    for fancy, plain in _PUNCTUATION_MAP.items():
-        text = text.replace(fancy, plain)
-    return _WHITESPACE.sub(" ", text).strip().lower()
+    return plain(text).lower()
+
+
+def _quotable(text: str) -> str:
+    """`normalize`, with a word broken by a hyphen at a line end rejoined.
+
+    A correct quotation of "pre-existing" failed against a clause printed
+    "pre-\\nexisting": 12 places in the two real policies measured. Applied to
+    both sides of the comparison, so it cannot make differing words match.
+
+    QUOTATIONS ONLY, and that is a measured decision, not an oversight. The
+    same join in `verify_exception` lets through a true exception that the
+    line break had been hiding (HDFC's Geography clause: "except under Section
+    B-\\n2.8 ..."). Printing it changed 8 HDFC questions' requests and one of
+    them, dengue at four months, went from right 3/3 to wrong 3/3 on an
+    unrelated clause. So the exception check still reads the unjoined text.
+    """
+    return _LINE_END_HYPHEN.sub("-", normalize(text))
 
 
 @dataclass
@@ -122,13 +155,13 @@ def _verify_elided(quote: str, source_text: str) -> bool:
     mattered; that is a question about meaning, and this check is about
     provenance. The elision stays visible in the quotation the reader is shown.
     """
-    pieces = [p for p in (normalize(line) for line in quote.split("\n")) if p]
+    pieces = [p for p in (_quotable(line) for line in quote.split("\n")) if p]
     # One piece would have passed the contiguous check already; reaching here
     # with one piece means it genuinely is not in the clause.
     if len(pieces) < 2:
         return False
 
-    haystack = normalize(source_text)
+    haystack = _quotable(source_text)
     cursor = 0
     for piece in pieces:
         if len(piece) < MIN_QUOTE_CHARS:
@@ -145,13 +178,13 @@ def verify_quote(quote: str, source_text: str) -> tuple[bool, str]:
     if not quote or not quote.strip():
         return False, "empty quote"
 
-    normalized_quote = _TRAILING_REF.sub("", normalize(quote)).strip()
+    normalized_quote = _TRAILING_REF.sub("", _quotable(quote)).strip()
     if len(normalized_quote) < MIN_QUOTE_CHARS:
         return False, f"quote too short to verify (<{MIN_QUOTE_CHARS} chars)"
 
     # The strictest reading first, so an unbroken quotation is still checked
     # exactly as it always was, and the elision path is only ever a fallback.
-    if normalized_quote in normalize(source_text):
+    if normalized_quote in _quotable(source_text):
         return True, ""
     if _verify_elided(quote, source_text):
         return True, ""
@@ -182,11 +215,11 @@ def verified_prefix(quote: str, source_text: str) -> str | None:
     so what the reader sees is still a copy of the model's quotation, shortened.
     """
     tokens = quote.split()
-    haystack = normalize(source_text)
-    whole = len(normalize(quote))
+    haystack = _quotable(source_text)
+    whole = len(_quotable(quote))
     for k in range(len(tokens) - 1, 0, -1):
         kept = " ".join(tokens[:k]).rstrip(" ,;:")
-        needle = normalize(kept)
+        needle = _quotable(kept)
         if len(needle) < MIN_QUOTE_CHARS or len(needle) < MIN_KEPT_SHARE * whole:
             return None
         if needle in haystack:

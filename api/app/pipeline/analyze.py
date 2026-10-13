@@ -70,7 +70,7 @@ from app.taxonomy import ClauseType
 log = logging.getLogger(__name__)
 
 # "24 months", "1 year": a time_windows entry that is a duration and nothing else.
-_BARE_DURATION = re.compile(r"(\d+)\s*(day|month|year)s?", re.IGNORECASE)
+_BARE_DURATION = re.compile(r"(\d+)(?:-|\s*)(day|month|year)s?", re.IGNORECASE)
 _DAYS_PER = {"day": 1, "month": 30, "year": 365}
 
 
@@ -410,7 +410,7 @@ def correct_stay_period(analysis: ClauseAnalysis, text: str) -> None:
         analysis.clause_type = ClauseType.COVERAGE.value
 
 
-_PER_DAY = re.compile(r"per\s+day|per\s+diem|/\s*day\b|\bdaily\b", re.IGNORECASE)
+_PER_DAY = re.compile(r"per[\s-]+day|per\s+diem|/\s*day\b|\bdaily\b", re.IGNORECASE)
 _DAILY_CAPS = (
     "cap_percent_of_sum_insured", "icu_cap_percent_of_sum_insured",
     "cap_max_inr_per_day", "icu_cap_max_inr_per_day",

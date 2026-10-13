@@ -17308,3 +17308,353 @@ with "due to an accident". The limit keeps the over-attachment to two or
 three items and away from sixteen. It does not remove it. Removing it means
 storing each exception with the item it belongs to.
 </details>
+
+---
+
+# M45 — Every text rule, run against the same words set differently
+
+## The problem
+
+M44's first version of a rule worked because Star's PDF prints "a." and "b."
+on lines of their own. Printed as a paragraph, the same clause would have
+been read differently (Failure 106). That is one instance of a kind of
+fault: **a rule that reads how text is typeset when it should read what the
+text says.** Where a line breaks, whether an apostrophe is straight or
+curly, whether "fi" is two characters or one ligature: none of it is in the
+policy or in the person's question. It comes from the PDF and the keyboard.
+
+This project has about fifty hand-written text patterns outside the model:
+which clause is a waiting period, how long it is, whether a question
+mentions another policy, how many cross-references a clause makes. Any of
+them could have the same fault. This milestone checks all of them.
+
+## The instrument
+
+Reading that many patterns and imagining inputs finds what one thinks to
+imagine. So the check is mechanical, and it is `evals/check_format.py`:
+
+1. Collect every compiled pattern in the pipeline's modules.
+2. Take real text: every clause of the three policies (234), and every eval
+   question (114).
+3. For each text, make copies with **only the typesetting changed**:
+
+   | for clause text | for questions |
+   |---|---|
+   | line breaks turned into spaces | straight apostrophes made curly |
+   | a hyphen at a line end joined to the next line | everything in capitals |
+   | typographic characters made ASCII (ligatures, curly quotes, dashes) | spaces doubled |
+
+4. Run each pattern on the original and on each copy. **A different number
+   of matches means the pattern's answer depends on the typesetting.**
+
+No model is involved; the clause analysis replays from the cache.
+
+A line of its output is a lead and not a verdict. Some patterns are applied
+to text that has already been normalised, so a difference on raw text never
+happens in the running program. One uses layout on purpose: the reading
+grade treats each line as a unit when a text has no full stops, because a
+list of item names has no sentences (an earlier fix, for a list that
+reported grade 94). So every lead was followed to where the pattern is
+used, and the ones that looked real were tested a second way: run the
+actual function on the clauses as stored and on the same clauses reflowed,
+and compare what comes out.
+
+What the real policies contain, which is what makes these faults reachable:
+
+```
+                 line-end     en/em    curly     ligatures
+                 hyphens      dashes   quotes    (fi, fl as one character)
+synthetic            0           0        0          0
+Star                 8          18       28         95
+HDFC                 8          52      107          0
+```
+
+The synthetic policy has none of them. It was typed for this repository in
+plain characters, so **nothing measured on the synthetic policy could ever
+have shown one of these faults.**
+
+## What it found
+
+Five faults that reach the running program, and three that are latent (the
+pattern is wrong, and no text in the three policies happens to trigger it).
+
+### 1. A correct quotation was rejected when the PDF broke a word
+
+The quotation check normalises both the model's quotation and the clause
+(lower case, whitespace collapsed) and asks whether one contains the other.
+A clause printed
+
+```
+... treatment of a pre-
+existing disease ...
+```
+
+normalises to "pre- existing", with a space. A model that quotes it as
+"pre-existing" is quoting correctly and fails the check. Tested by taking
+every sentence that spans a line-end hyphen, reflowing it, and verifying it
+against its own clause: **rejected in 12 places** across Star and HDFC, 0
+on the synthetic policy. Each is an honest quotation that would be shown to
+a user as "unverified".
+
+Fixed in `api/app/grounding.py` by joining such a break before comparing,
+on both sides:
+
+```python
+_LINE_END_HYPHEN = re.compile(r"(?<=\w)-\s+(?=\w)")
+
+def _quotable(text: str) -> str:
+    return _LINE_END_HYPHEN.sub("-", normalize(text))
+```
+
+`verify_quote`, its elided-quotation fallback and `verified_prefix` use
+`_quotable`. Because both sides get the same treatment it cannot make
+different words match; a test checks that "long-existing" still fails
+against "pre-\nexisting". After the fix: rejected in 0 places.
+
+### 2. A curly apostrophe hid a negation
+
+The rule that decides whether a person holds a second policy skips a
+sentence containing a negation, and the negation list is spelled with a
+straight apostrophe:
+
+```python
+# api/app/pipeline/scenario.py
+_NOT_HELD_NOW = re.compile(r"\b(?:no|not|never|don't|no longer|used to|previous|old|...)\b", re.IGNORECASE)
+```
+
+A phone keyboard types "don’t" with a curly one. "I don’t have another
+health policy with anyone" was therefore read as holding another policy,
+which puts a line about the contribution clause into the prompt.
+
+Fixed at the root and not in that one pattern. The question is made plain
+once, where it enters, so that every lookup, present and future, sees the
+same characters:
+
+```python
+# api/app/pipeline/scenario.py, run_scenario()
+scenario = plain(scenario)
+```
+
+```python
+# api/app/grounding.py
+def plain(text: str) -> str:
+    """The same words in plain characters, on one line. Case is kept."""
+    text = unicodedata.normalize("NFKC", text)
+    for fancy, ascii_char in _PUNCTUATION_MAP.items():
+        text = text.replace(fancy, ascii_char)
+    return _WHITESPACE.sub(" ", text).strip()
+```
+
+**New concept: NFKC.** Unicode has several ways to write what a reader sees
+as the same thing. The "fi" in "specified" can be two characters, `f` and
+`i`, or one, the ligature `ﬁ`, which typesetting software substitutes
+because it looks better. To a program they are different strings, and
+`"specified" in text` is false for the ligature form. NFKC is a standard
+normalisation that replaces such "compatibility" characters with their
+plain equivalents. It does not touch curly quotes or dashes, which are
+different characters and not alternate forms, so those are mapped by hand
+in `_PUNCTUATION_MAP`. (Earlier milestones met ligatures twice, in two
+functions, and fixed them there. This milestone's finding is that the fix
+belonged in one shared place.)
+
+### 3. Cross-references were undercounted when a phrase wrapped
+
+A clause's risk score includes how many times it sends the reader elsewhere
+("subject to", "as defined in", "specified in", ...). The pattern spells
+those phrases with ordinary spaces and was run on the clause as stored, so
+"subject\nto" across a line break did not count, and neither did "speciﬁed
+in" with a ligature. **12 clauses** of the two real policies had a lower
+count than their text warrants. Fixed by counting on plain text:
+
+```python
+# api/app/pipeline/score.py
+crossrefs = len(_RE_CROSSREF.findall(plain(seg.text)))
+```
+
+### 4. Ligatures split words in the reading grade
+
+The reading grade counts words with `[A-Za-z][A-Za-z'-]*`. A ligature is
+not in `A-Za-z`, so "speciﬁed" counted as two short words, "speci" and
+"ed". The word count differed on **57 clauses** of the real policies. The
+effect on any one score is small. Fixed by applying NFKC at the top of
+`flesch_kincaid_grade`, keeping line breaks, which that function uses.
+
+### 5, 6, 7. Latent: wrong patterns that nothing in three policies triggers
+
+| pattern | what it missed | fix |
+|---|---|---|
+| `pre[\s-]?existing` in `waiting.py` | "Pre-\nExisting", which reads "pre- existing" (two characters between) once whitespace is collapsed. Star and HDFC have this break in four clauses, none in the 60-character opening the rule reads | `pre[\s-]*existing` |
+| `(?:other\|multiple) (?:polic...)` in `scenario.py` | "multiple\npolicies". Star has this break; the clause is still found by another phrase | `\s+` |
+| `(\d+)\s*(day\|month\|year)` in three files | "24-month", "twenty four (24) months". Each real policy has one "N-day" form, outside the clauses these rules read; none has the bracketed form | `(\d+)\)?(?:-\|\s*)(day\|...)` |
+
+The duration fix had a first version worth recording. `[\s-]*` between the
+number and the unit also matches "3 - Day" in "Section 3 - Day Care
+Treatment", reading a heading as three days. The kept version allows either
+whitespace or a single hyphen, and a test pins the heading case.
+
+`per\s+day` also became `per[\s-]+day`.
+
+## Failure 107: the fix uncovered a true exception, and printing it broke an answer
+
+The line-end hyphen join was first put in `normalize()` itself, which the
+check on extracted *exceptions* also uses. The list of stored exceptions
+was compared before and after, as it has been for every change since M38,
+and it had one new line:
+
+```
+HDFC 1.20 | Section B-2.8 (E-Opinion for Critical Illness), Section B-2.9 Global
+            Health Cover (Emergency Treatments Only), ... as may be specified in
+            the Schedule of Coverage in the Policy Schedule
+```
+
+Clause 1.20 is HDFC's Geography clause:
+
+```
+This Policy provides coverage throughout the territory of India, except under Section B-
+2.8 (E-Opinion for Critical Illness), Section B-2.9 Global Health Cover ...
+```
+
+The model had extracted that exception correctly when the policy was
+analysed. The check dropped it, because the model wrote "B-2.8" and the
+clause reads "B-\n2.8". **A true exception had been thrown away by a line
+break**, the same fault as finding 1, in a different caller.
+
+Restoring it is correct. It also changes the prompt of 8 HDFC questions, so
+it was measured, three fresh answers each, old code against new in one
+server session, on the first four:
+
+| question | expected | old code | with the exception restored |
+|---|---|---|---|
+| `hdfc-typhoid-45-days` | covered | 3/3 | 2/3 |
+| `hdfc-dengue-four-months` | covered | **3/3** | **0/3** |
+| `hdfc-typhoid-20-days` | not_covered | 3/3 | 3/3 |
+| `hdfc-accident-ten-days` | covered | 3/3 | 3/3 |
+
+Dengue four months into a policy, with no earlier insurance, went from paid
+to refused. One answer printed in full:
+
+> not_covered, citing Excl01 —
+> "The claim is not covered due to the 36-month Pre-Existing Disease
+> Waiting Period (Excl01). ... which is not enough time to satisfy the
+> waiting period for a new illness like dengue."
+
+The geography exception is not mentioned. A line added under one clause
+moved the model's reading of a different one. That is Failure 28's
+mechanism (a paragraph of instructions reclassified clauses it never
+mentioned) and Failure 99's outcome (a correct addition, a worse answer),
+this time on HDFC.
+
+The remaining four questions were not run. One right answer made wrong, 3
+of 3, is enough to refuse a change under this project's rule.
+
+**What was done.** The join was moved out of `normalize()` into
+`_quotable()`, used by the quotation checks only. The exception check reads
+the text as before and the Geography exception stays dropped. After that
+the stored exceptions are again identical to M44's, and
+`evals/compare_requests.py` reports **0 of 114 questions send a different
+request**.
+
+So the system knowingly keeps one format-dependent behaviour, and the code
+says so where it happens:
+
+```python
+def _quotable(text: str) -> str:
+    """...
+    QUOTATIONS ONLY, and that is a measured decision, not an oversight. The
+    same join in `verify_exception` lets through a true exception that the
+    line break had been hiding (HDFC's Geography clause ...). Printing it
+    changed 8 HDFC questions' requests and one of them, dengue at four
+    months, went from right 3/3 to wrong 3/3 on an unrelated clause.
+    """
+```
+
+This is the third time in four milestones that making the stored data more
+correct made an answer worse (M38, M43, here). It is the same lesson as
+Concept 59 with a sharper edge: on HDFC there is no second error to go and
+find. The exception is true, the clause is right, and the model, shown one
+more true line among a hundred clauses, misapplies a different one.
+
+## What the fixes changed, measured
+
+| check | result |
+|---|---|
+| stored exceptions on three policies | identical, 17 lines |
+| eval questions whose request changes | 0 of 114 |
+| synthetic sets (classification, ranking, verdicts) | 0.973, 8 of 9, 0.925: unchanged; 40 replayed, 0 regenerated |
+| correct quotations across a line-end hyphen rejected | 12 before, 0 after |
+| backend tests | 327 pass; `api/tests/test_format.py` holds one test per fault |
+
+No answer to any eval question can have changed, because no request did.
+What changes is behaviour on inputs the eval does not contain: a question
+typed with a curly apostrophe, a quotation across a broken word, and the
+risk scores of some clauses on real policies.
+
+`PROMPT_VERSION` is unchanged: no prompt differs for any measured input.
+
+## What was not checked, and what is still wrong
+
+- **The segmenter.** Deciding where a clause starts is layout by nature:
+  font size, bold, numbering. It was built against six real PDFs and has
+  its own entries. This check ran its patterns but cannot say whether a
+  different layout would be segmented correctly; only another PDF can.
+- **The Geography exception is still dropped** (Failure 107), by decision.
+- **Sentence ends.** The exception check ends a sentence at a full stop
+  followed by a space, so "Rs. 5,000" or "No. 3" ends one early. It errs
+  toward dropping an exception, which is the safe direction, and was left.
+- **A word broken across lines counts as two** in the reading grade
+  ("para-\nsurgical"). 19 clauses, one word each.
+- **Only three policies' text.** A fourth PDF may typeset something none of
+  these does: a soft hyphen, a non-breaking hyphen, a different ligature.
+  The latent findings above are the evidence that such cases exist.
+- **Documents already analysed in the app** keep their stored scores until
+  uploaded again.
+
+## Concept 60: test a rule against the same input in a different form
+
+A unit test checks that a rule gives the right answer on an input someone
+wrote. It says nothing about inputs that mean the same and look different,
+and hand-written test inputs are always in the cleanest form: one line,
+straight quotes, single spaces. The tests in this repository were
+written that way, and every one of these faults passed them.
+
+The technique that found them needs no expected answers at all. Take real
+inputs, apply a transformation that must not change the meaning, and
+require the output to be the same. Testers call this a **metamorphic
+test**: the relation between two outputs is checked, and the correct value
+of either is not needed. It is cheap exactly where ordinary tests are
+expensive, on large real inputs nobody has labelled.
+
+Two conditions make it work. The transformation has to be truly
+meaning-preserving for the rule in question, which is why each lead was
+checked by hand: collapsing line breaks is not neutral for a function that
+deliberately treats lines as units. And the inputs have to be real. Run on
+the synthetic policy alone, this check reports nothing, because the
+synthetic policy has no typesetting to vary.
+
+## Check it yourself
+
+```bash
+# the leads, on the three policies and all eval questions (no model)
+python evals/check_format.py
+
+# one test per fault
+cd api && .venv/Scripts/python -m pytest tests/test_format.py -q
+```
+
+**Predict before you look:** `check_format.py` still lists
+`score._RE_CROSSREF` as differing on six clauses when line breaks are
+turned into spaces, after the fix. Is the fix not working?
+
+<details>
+<summary>Answer</summary>
+
+It is working. The script runs each bare pattern on raw text, and the
+pattern itself was not changed: it still spells "subject to" with an
+ordinary space. The fix is at the place the pattern is used, where the
+clause is made plain before the pattern runs
+(`_RE_CROSSREF.findall(plain(seg.text))`). The script cannot see that,
+which is why its header says a line of output is a lead and each one has to
+be followed to where the pattern is applied. The test that shows the fix is
+in `api/tests/test_format.py`: a wrapped phrase and a ligature phrase, made
+plain, give the same count as the clean ones.
+</details>
