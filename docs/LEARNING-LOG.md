@@ -16316,3 +16316,297 @@ before them. So "3 of 3 with the line, 0 of 3 without" is a reason not to
 merge the fix, since it paid a refused claim at least once, and it is not
 proof that the line is what made the answer right.
 </details>
+
+---
+
+# M42 — The questions nobody had asked about the maternity clause
+
+## The problem
+
+When a person asks whether a claim will be paid, the reasoning prompt shows
+the model each relevant clause of the policy, and under some clauses a line
+written by this program: "EXCEPTIONS - this clause does NOT apply when:
+...". The exceptions come from the analysis step, where the model extracts
+them from each clause, and code keeps only the ones that pass a check
+(`verify_exception` in `api/app/grounding.py`).
+
+On Star Health's Arogya Sanjeevani policy, the maternity exclusion reads:
+
+```
+18.  Maternity - Code Excl 18
+a. Medical treatment expenses traceable to childbirth (including complicated
+   deliveries and caesarean sections incurred during hospitalization) except
+   ectopic pregnancy
+b. Expenses towards miscarriage (unless due to an accident) and lawful
+   medical termination of pregnancy during the Policy Period
+```
+
+and the line printed under it is:
+
+```
+EXCEPTIONS - this clause does NOT apply when: due to an accident; lawful
+medical termination of pregnancy during the Policy Period
+```
+
+Three things are wrong with that line. Termination of pregnancy is
+*excluded*, so the second half says the opposite of the policy. "Due to an
+accident" excepts a miscarriage only, in part (b), and the line attaches it
+to the whole clause. And the one exception of part (a), ectopic pregnancy,
+is missing.
+
+M38 measured a fix that removed the false half, and reverted it, because
+the only eval question about this clause (`star-caesarean`, an ordinary
+caesarean) went from right to wrong. M41 then noted what that decision had
+not faced: no eval question asked about termination, miscarriage or ectopic
+pregnancy, so what the system says about the very things the line is wrong
+about had never been measured.
+
+This milestone measures it. It changes no behaviour.
+
+## What was done
+
+Five questions were written, with the expected verdict of each fixed and the
+file committed (`87f8aa6`) **before** the first model call, so that the
+answer key could not drift toward what the model says.
+`evals/real/scenarios-star-heldout-maternity.json`:
+
+| id | the question, shortened | expected | what it tests |
+|---|---|---|---|
+| `star-ho-termination-planned` | a doctor has advised a legal medical termination next week; held six years | `not_covered`, 18 | the false half of the line, directly |
+| `star-ho-lost-baby-eleven-weeks` | "My wife lost our baby at eleven weeks", two nights in hospital; four years | `not_covered`, 18 | a miscarriage in everyday words, no accident |
+| `star-ho-miscarriage-after-fall` | slipped on wet stairs, fell hard, miscarried the same night; five years | `conditional` | the real exception in part (b) |
+| `star-ho-pregnancy-in-tube` | pregnancy growing in the fallopian tube, emergency surgery; seven years | `conditional` | the real exception the line leaves out, without the word "ectopic" |
+| `star-ho-caesarean-after-scooter` | a scooter hit a woman eight months pregnant, early labour, caesarean; five years | `not_covered`, 18 | "due to an accident" applied to the wrong half |
+
+Every question states four or more years held, so no waiting period can be
+the reason. A payable claim on this policy is `conditional`, not `covered`,
+because Star takes a 5% co-payment from every claim; that is the convention
+of the other Star files. The clause was read as a layperson reads it, by
+the same author as the system.
+
+Each question was asked three times. Then every Ollama process was stopped,
+the server started again, and each was asked three more times, because
+Failure 94 showed that answers about this clause can agree within one
+server session and differ in the next. Ollama 0.35.1, prompt version
+`v65-own-offence`.
+
+## What came back
+
+| question | expected | session 1 | session 2 |
+|---|---|---|---|
+| termination, planned | not_covered | not_covered 3/3 | not_covered 3/3 |
+| lost baby at eleven weeks | not_covered | not_covered 3/3 | not_covered 3/3 |
+| miscarriage after a fall | conditional | **not_covered 3/3** | **not_covered 3/3** |
+| pregnancy in the tube | conditional | conditional 3/3 | conditional 3/3 |
+| caesarean after a scooter | not_covered | **conditional 3/3** | **conditional 3/3** |
+
+Three of five, identically in both sessions. One claim the policy pays is
+refused, and one it refuses is promised at 95%.
+
+**The feared failure did not happen.** The line says the exclusion "does
+NOT apply" to lawful termination, and the termination question was refused
+correctly, six times of six. Two further samples were printed in full, and
+in both the model read the clause over the line:
+
+> "Clause 18 (18) explicitly excludes expenses towards a lawful medical
+> termination of pregnancy during the policy period. Since the procedure
+> described is a medical termination of pregnancy, the claim is not
+> covered."
+
+**The fall is not recognised as an accident.** Two further samples, printed
+in full, said the same thing word for word:
+
+> "... 'Expenses towards miscarriage (unless due to an accident) and lawful
+> medical termination of pregnancy during the Policy Period' are not
+> covered. Since the incident did not occur due to an accident, the claim
+> is not covered."
+
+The question says "I slipped on wet stairs at home, fell hard". It does not
+say "accident". The model quotes the exception and then decides a fall is
+not one. This has nothing to do with the false line. (On the synthetic
+policy the model does treat "I was hit by a car" as an accident, in the
+eval case `accident-in-initial-period`. A fall on the stairs, here, it did
+not.)
+
+**The caesarean after a scooter is where the false line does harm.** The
+first answer, in both printed samples:
+
+> verdict: covered, citing 18 —
+> "Clause 18 (18) [exclusion] excludes medical treatment expenses traceable
+> to childbirth, but this exclusion does not apply because the claim is due
+> to an accident."
+
+That is the "due to an accident" exception carried from miscarriage to
+childbirth. Whether the model took it from the printed line or from the
+bracket in the clause itself cannot be told from the answer. What happened
+next can be explained exactly, because it is code.
+
+## Failure 104: the false exception switched off the check that would have caught it
+
+M33 added a rule for precisely this shape of wrong answer: `covered`, while
+citing an exclusion that names what the person described, is asked again
+("Clause 18 is an EXCLUSION: everything it lists is NOT paid"). It is the
+rule that makes the ordinary caesarean question come out right. It did not
+fire here. The co-payment re-ask ran instead and turned the wrong `covered`
+into a plausible `conditional` citing only clause 9:
+
+```
+-> covered [('18', 'reduces')]
+RE-ASKED: - You answered covered, which means paid in full, but it was
+            calculated that clause 9: a 5% co-payment is taken from EVERY claim ...
+-> conditional [('9', 'reduces')]
+FINAL: conditional
+```
+
+The M33 rule fires only for exclusions returned by this function:
+
+```python
+# api/app/pipeline/scenario.py
+def naming_exclusions(facts, clauses, scenario):
+    """Exclusions that name what the person described, unless the description
+    uses the words of the clause's own exception."""
+    said = _stems(scenario).keys() - _stems(" ".join(reduction._GENERIC_WORDS)).keys()
+    by_id = {c.clause_id: c for c in clauses}
+    return {
+        clause_id: words
+        for clause_id, words in named_in_question(facts, clauses).items()
+        if by_id[clause_id].clause_type == "exclusion"
+        and not any(_stems(e).keys() & said for e in by_id[clause_id].exceptions)
+    }
+```
+
+The last line is a sensible guard: if the person's own words match one of
+the clause's exceptions, the exclusion may well not apply, so the rule
+stands down. But the exceptions it reads are the same stored list the
+prompt prints, false one included. Printed for each question, with no
+verdict call:
+
+```
+clause 18 exceptions: ['due to an accident',
+                       'lawful medical termination of pregnancy during the Policy Period']
+
+star-ho-caesarean-after-scooter
+   lookup names:  {'18': ['caesarean', 'pregnancy']}
+   exception words shared with the question:
+                  {'lawful medical termination of pregnancy ...': ['pregna']}
+   excluding:     {}                       <- the rule cannot fire
+
+star-caesarean (the existing question)
+   lookup names:  {'18': ['caesarean']}
+   exception words shared with the question:  {}
+   excluding:     {'18': ['caesarean']}    <- the rule can fire
+```
+
+The scooter question says "eight months pregnant". The false exception
+contains "pregnancy". The two share a word stem, so the code concludes the
+person may be describing an exception and switches the check off. The
+existing caesarean question never says "pregnant", which is the only reason
+the check works for it.
+
+So on this policy the M33 rule is disabled for **any maternity question
+that uses the word pregnant or pregnancy**, and the cause is a string that
+is not an exception to anything.
+
+## Concept 58: a line in the prompt can have two readers
+
+M38 treated the false exception as something the model reads, and measured
+what the model does with and without it. That was half the picture. The
+stored exceptions are read by the program too, in `naming_exclusions`, and
+a program does not weigh a line against the clause above it as a model
+might. It matches words.
+
+This is why the termination question and the scooter question came out
+opposite ways. The model, shown a false line next to the true clause,
+followed the clause. The code, given the false line as data, followed the
+line.
+
+The general form: **anything the pipeline extracts and stores is an input
+to every later step that reads it, not only to the prompt.** Before asking
+"what does the model do with this wrong value", list every place the code
+branches on it. Here that list has two entries, the printed line and this
+guard, and only the first had been measured.
+
+## What this changes about M38's decision
+
+M38 kept the false line because removing it made one question worse and no
+question better. That ledger now has more rows. With the line as it is:
+
+| question | result | the line's part in it |
+|---|---|---|
+| `star-caesarean` | right (3/3 on 13 October, one session) | M38: right because the wrong first answer cites 18 and the M33 rule catches it |
+| termination | right 6/6 | none visible; the model follows the clause |
+| caesarean after a scooter | wrong 6/6, a refused claim promised | the false exception's word "pregnancy" disables the M33 rule |
+
+What removing the false exception would do to the scooter question follows
+from the code: the remaining exception, "due to an accident", shares no
+word with a question about a scooter, so `naming_exclusions` would return
+clause 18 and the rule could fire on a first answer of `covered` citing 18.
+Whether the model's first answer would still have that shape is exactly
+what M38 found it did not for the ordinary caesarean. So this is a reason
+to measure M38's fix again on all six clause-18 questions, not a prediction
+of the result.
+
+## What was not done
+
+- **No fix.** Nothing in `api/` changed. The two wrong answers are open,
+  and are added to the list of known wrong answers, which is now thirteen:
+  the eleven of M41 and these two.
+- **The five questions are not in the consolidated report.** They are
+  registered in `evals/compare_requests.py`, so any future change that
+  alters their requests will list them, and that script's total is now 114
+  questions, not 109. `evals/run_all.py`, `evals/REPORT.md` and the README's
+  results table do not include them: adding a set there means a full run of
+  everything.
+- **The fall question was not varied.** One sentence shows the model does
+  not connect a fall to "accident"; it does not show how often.
+- **Six samples per question, in two sessions on one day.** Failure 94's
+  instability showed over three days.
+
+## Check it yourself
+
+```bash
+# the answers (needs Star's PDF: python evals/real/fetch_policies.py)
+api/.venv/Scripts/python evals/run_scenario_eval.py --no-report --repeats 3 \
+  --policy samples/real/star-arogya-sanjeevani.pdf \
+  --cases evals/real/scenarios-star-heldout-maternity.json
+```
+
+The switch itself needs no verdict from the model. Saved as a file and run
+from the repository root:
+
+```python
+import asyncio, sys
+from pathlib import Path
+sys.path.insert(0, "evals"); sys.path.insert(0, "api")
+from run_scenario_eval import build_clauses
+from app.pipeline import scenario
+
+async def main():
+    clauses = scenario.shortlist(await build_clauses(Path("samples/real/star-arogya-sanjeevani.pdf")))
+    facts = {"procedure": "caesarean", "condition": "pregnancy"}
+    for said in ("She was eight months pregnant and the baby was delivered by caesarean.",
+                 "The baby was delivered by caesarean."):
+        print(scenario.naming_exclusions(facts, clauses, said), "<-", said)
+
+asyncio.run(main())
+```
+
+It prints `{}` for the first sentence and `{'18': ['caesarean',
+'pregnancy']}` for the second.
+
+**Predict before you look:** the termination question was answered
+correctly even though the printed line says the exclusion does not apply to
+termination. The same false exception disables the M33 rule for that
+question too, since it also says "pregnancy". Why did that not matter?
+
+<details>
+<summary>Answer</summary>
+
+Because the M33 rule only acts on an answer of `covered`. It is a net under
+one kind of wrong answer. The model's first answer to the termination
+question was already `not_covered`, so there was nothing for the rule to
+catch and its being switched off cost nothing. On the scooter question the
+first answer was `covered` citing the exclusion, the exact answer the rule
+exists for, and the net was not there. A disabled check is invisible on
+every question the model gets right on its own.
+</details>

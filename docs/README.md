@@ -397,6 +397,11 @@ Failures 95, 102 and 103 checked the same way. The recent entries are accurate a
 
 - **Concept 57: evidence belongs where the claim is** - if an entry says "these are the test set", the files go in the same commit.
 
+### M42 - The questions nobody had asked about the maternity clause
+Five held-out questions on Star's exclusion 18, written and committed before any run, asked in two server sessions. 3 of 5 both times. Read it for the first measurement of what M38's false exception line actually costs, and for a bug that only shows on a question the model gets wrong.
+- **Failure 104: the false exception switched off the check that would have caught it** - the stored exception contains "pregnancy"; any question saying "pregnant" makes the code stand its exclusion check down, and a refused caesarean is promised at 95%.
+- **Concept 58: a line in the prompt can have two readers** - the model followed the clause over the false line; the code, matching words, followed the line.
+
 ---
 
 ## Related documents
