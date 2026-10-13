@@ -402,6 +402,12 @@ Five held-out questions on Star's exclusion 18, written and committed before any
 - **Failure 104: the false exception switched off the check that would have caught it** - the stored exception contains "pregnancy"; any question saying "pregnant" makes the code stand its exclusion check down, and a refused caesarean is promised at 95%.
 - **Concept 58: a line in the prompt can have two readers** - the model followed the clause over the false line; the code, matching words, followed the line.
 
+### M43 - The bracket fix measured again, on seven questions, and reverted again
+M38's fix for the false maternity exception, re-measured now that there are seven questions about the clause and a known second way the false line does harm. Two arms, two server sessions: 5 of 7 right without the fix, 4 of 7 with it. Read it for a fully worked case of a correct change exposing a second error.
+- **Failure 105: the check came back on, and refused a claim the policy pays** - with the false exception gone, the exclusion check fires on an ectopic pregnancy, because the true exception was never extracted. The false one had been standing in for it.
+- **Concept 59: fixing one of two compensating errors makes things worse** - when a correct fix measures worse, look for the second error it uncovered.
+- **What would have to be true for this fix to be kept** - three separate conditions, each its own measured change.
+
 ---
 
 ## Related documents

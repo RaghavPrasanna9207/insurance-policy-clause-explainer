@@ -16610,3 +16610,301 @@ first answer was `covered` citing the exclusion, the exact answer the rule
 exists for, and the net was not there. A disabled check is invisible on
 every question the model gets right on its own.
 </details>
+
+---
+
+# M43 — The bracket fix measured again, on seven questions, and reverted again
+
+## The problem
+
+Under Star Health's maternity exclusion (clause 18) the reasoning prompt
+prints a line written by this program:
+
+```
+EXCEPTIONS - this clause does NOT apply when: due to an accident; lawful
+medical termination of pregnancy during the Policy Period
+```
+
+The second exception is false. The clause excludes termination:
+
+```
+b. Expenses towards miscarriage (unless due to an accident) and lawful
+   medical termination of pregnancy during the Policy Period
+```
+
+It gets past the code that checks extracted exceptions
+(`verify_exception` in `api/app/grounding.py`), because that check accepts
+any words that follow an exception word in the same sentence, and "unless"
+comes earlier in this one. The "unless" is inside brackets that have
+already closed.
+
+M38 wrote a three-line fix, measured it on the one eval question about this
+clause, found that question went from right to wrong, and reverted it. M42
+then wrote five more questions about the clause and found the false
+exception does a second kind of damage that M38 had not looked for: it
+contains the word "pregnancy", and the code that decides whether an
+exclusion "names what the person described" stands down whenever the
+question shares a word with one of the clause's exceptions. So a safety
+rule from M33 is switched off for any question that says "pregnant".
+
+That changed the question from "one case gets worse" to a ledger with rows
+on both sides. This milestone fills the ledger in.
+
+## The change that was measured
+
+The same fix as M38, in `api/app/grounding.py`:
+
+```python
+# A bracket that has opened and closed. An exception word inside it governs
+# only what is inside.
+_CLOSED_BRACKET = re.compile(r"\([^()]*\)")
+...
+        if _MARKER.search(_CLOSED_BRACKET.sub(" ", sentence_so_far)):
+            return True
+```
+
+Before looking for an exception word ahead of the span, every bracket that
+has already closed is deleted. "due to an accident" still passes, because
+its own bracket is still open where it starts. "lawful medical termination
+of pregnancy during the Policy Period" no longer does. A test written from
+the clause's text passed.
+
+**Which questions it reaches**, found with no model call by
+`evals/compare_requests.py`, which builds every eval question's requests on
+two checkouts of the code and lists those that differ:
+
+```
+evals/real/scenarios-star-arogya-sanjeevani.json: 2 of 10 cases changed
+    star-caesarean, star-gallstones-no-timing
+evals/real/scenarios-star-heldout-maternity.json: 5 of 5 cases changed
+7 of 114 cases send a different request.
+```
+
+Seven questions, all on Star's policy, all with clause 18 in their prompt.
+The other 107 are untouched and were not re-run.
+
+**What it does to the M33 rule's reach**, also with no verdict call. The
+rule can fire only for exclusions in `Computed.excluding`:
+
+| question | `excluding` without the fix | with the fix |
+|---|---|---|
+| `star-caesarean` | `{'18': ['caesarean']}` | the same |
+| termination, planned | `{}` | `{'18': ['pregnancy']}` |
+| lost baby at eleven weeks | `{}` | `{}` |
+| miscarriage after a fall | `{}` | `{}` |
+| pregnancy in the tube | `{}` | `{'18': ['pregnancy']}` |
+| caesarean after a scooter | `{}` | `{'18': ['caesarean', 'pregnancy']}` |
+
+The rule is switched back on for three questions. For the scooter question
+that is the intent. For the fallopian-tube question it is a warning: that
+claim is *payable*, under an exception ("except ectopic pregnancy") that
+the analysis step never extracted, so nothing tells the code to stand down.
+
+## How it was measured
+
+Two arms. BASE is the code on `main`; FIX is `main` plus the change. BASE
+was run from a second checkout of the repository with the working directory
+unchanged, so both arms read the same stored clause analysis.
+
+Three fresh answers per question per arm, in each of two server sessions
+(every Ollama process stopped and the server started again between them),
+because answers about this clause have agreed within a session and differed
+across sessions before (Failure 94).
+Ollama 0.35.1, prompt version `v65-own-offence`, 13 October 2026.
+
+One arm's session-B numbers for the five maternity questions come from
+M42's second session, which was the same server process.
+
+## What came back
+
+Right answers out of three, session B then session C:
+
+| question | expected | BASE | FIX |
+|---|---|---|---|
+| `star-caesarean` | not_covered | 3/3, 3/3 ✓ | **at most 1/3, at most 1/3** ✗ (`conditional` in 2 of 3 both times) |
+| `star-gallstones-no-timing` | insufficient_information | 3/3, 3/3 ✓ | 3/3, 3/3 ✓ |
+| termination, planned | not_covered | 3/3, 3/3 ✓ | 3/3, 3/3 ✓ |
+| lost baby at eleven weeks | not_covered | 3/3, 3/3 ✓ | 3/3, 3/3 ✓ |
+| miscarriage after a fall | conditional | 0/3, 0/3 ✗ | 0/3, 0/3 ✗ |
+| pregnancy in the tube | conditional | 3/3, 3/3 ✓ | **0/3, 0/3** ✗ |
+| caesarean after a scooter | not_covered | 0/3, 0/3 ✗ | **3/3, 3/3** ✓ |
+| **questions right by majority** | | **5 of 7** | **4 of 7** |
+
+The two sessions agree in every cell.
+
+The fix does what the code said it would for the scooter question: fixed,
+six of six. It also breaks two questions that were right.
+
+## Failure 105: the check came back on, and refused a claim the policy pays
+
+The fallopian-tube question, with the fix, both samples printed in full:
+
+```
+-> covered [('18', 'reduces'), ('9', 'reduces')]
+   "... Clause 18 (18) [exclusion] excludes expenses related to miscarriage,
+    but this exclusion does not apply as the pregnancy was not due to an
+    accident. ... You will be paid 95% of the admissible amount."
+RE-ASKED: - You answered covered and cited clause 18. Clause 18 is an
+            EXCLUSION: everything it lists is NOT paid. It names what the
+            person described (pregnancy) ...
+-> not_covered [('18', 'denies')]
+   "... Clause 18 (exclusion) clearly states that expenses related to
+    maternity, including medical treatment expenses traceable to childbirth,
+    are not covered by the policy. The situation described falls under this
+    exclusion."
+FINAL: not_covered
+```
+
+Three things are visible in that trace.
+
+The first answer was right about the outcome and wrong about the reason.
+The model never connects "growing in my fallopian tube" to "except ectopic
+pregnancy". It pays the claim by way of a muddled reading of the accident
+exception. So the baseline's correct answer to this question is not the
+model applying the ectopic exception either.
+
+The re-ask is the M33 rule working as written. The answer is `covered`, it
+cites an exclusion, and the code's word lookup says the exclusion names
+what the person described: the clause contains "pregnancy" and so does the
+question.
+
+And the rule had no reason to hold back. Its guard is "unless the
+description uses the words of the clause's own exception". The stored
+exceptions for clause 18, with the fix, are `['due to an accident']`. The
+exception that actually applies was never extracted. So the code told the
+model, in the program's own voice, that everything clause 18 lists is not
+paid, about the one maternity treatment the clause says it does pay for.
+
+Without the fix this did not happen, for the accidental reason M42 found:
+the false exception's word "pregnancy" matched the question and switched
+the rule off.
+
+**The false exception was standing in for the missing true one.** On this
+question the wrong data produced the right behaviour, because a rule that
+should have been restrained by "ectopic pregnancy" was restrained by
+"termination of pregnancy" sharing a word with it.
+
+`star-caesarean` went wrong as M38 recorded: `conditional` in 2 of 3 in each
+session with the fix, and right 3 of 3 without. It was not watched again here.
+
+## The decision
+
+Reverted, a second time. The reasons, in order of weight:
+
+- **It scores lower:** 4 of 7 against 5 of 7, the same in both sessions.
+- **It does not reduce the worst kind of error.** A refused claim answered
+  as paid: one with the fix (`star-caesarean`), one without (the scooter).
+  It trades one for the other.
+- **It adds a wrongly refused claim** (the fallopian tube), so wrong
+  refusals go from one to two.
+
+The two lines in `grounding.py` and the test were removed. A change that
+measures worse is not left in the code, and the bracket logic is quoted
+above for whoever returns to it.
+
+## What the seven questions say about the clause, taken together
+
+Neither arm reads this clause correctly. Counting what each answer rests
+on, not only whether its verdict matches:
+
+| question | why the baseline's answer is what it is |
+|---|---|
+| ordinary caesarean | wrong first answer in a shape the M33 rule catches (M38) |
+| termination | read correctly from the clause |
+| lost baby | read correctly |
+| miscarriage after a fall | wrong: a fall is not recognised as an accident |
+| pregnancy in the tube | right verdict, wrong reason; and protected from the M33 rule only by the false exception |
+| caesarean after a scooter | wrong: the accident exception applied to childbirth, and the M33 rule disabled by the false exception |
+
+Two of the six are right for the stated reason. This is what a clause with
+two lettered parts, a bracketed exception inside one and a trailing
+exception on the other, costs a 7B model and a per-clause list of
+exceptions.
+
+## Concept 59: fixing one of two compensating errors makes things worse
+
+The stored exceptions for clause 18 had two faults: a false exception was
+present and a true one was absent. The M33 rule's guard depends on both.
+By luck the false one did part of the missing one's job. Correcting only
+the first exposed the second.
+
+This is the shape behind three failures in this log now: Failure 99 (a
+correct duration given to the model produced a wrong refusal), Failure 103
+(M38, this same fix on one question), and this one. In each, a correct
+change was made to one input while another input, or another reader of the
+same input, was still wrong in a way the first error had been hiding.
+
+The working rule: **when a correct fix measures worse, look for the second
+error it uncovered before concluding the model is perverse.** Here the
+second error has a name and a location. The exception "ectopic pregnancy"
+is in the clause, with "except" directly before it, and is not in the
+stored list. That is a fault of the extraction step, and it can be checked
+without the model's opinion: a span preceded by an exception word that no
+stored exception covers.
+
+## What would have to be true for this fix to be kept
+
+Not built here; recorded so the next attempt starts further on.
+
+1. The missing exception is in the stored list. Either the analysis step
+   returns "ectopic pregnancy", or code adds exceptions it can find by
+   grammar and does not rely on the model to volunteer them.
+2. The guard can tell that "growing in my fallopian tube" is an ectopic
+   pregnancy. It cannot: it matches word stems, and the question was
+   written without the word. The same question with the word in it would
+   test (1) alone.
+3. `star-caesarean` stays right. M38 found the model's first answer stops
+   citing clause 18 once the false line is gone, so the rule has nothing to
+   catch. That is a separate behaviour and nothing in (1) or (2) touches it.
+
+Each is its own measured change. All three would have to hold on the same
+seven questions.
+
+## What was not done
+
+- **Nothing was merged in `api/`.** The system answers these seven
+  questions exactly as it did before this milestone.
+- **The other 107 questions were not run.** `compare_requests.py` shows
+  their requests are byte-identical under the fix, so their stored answers
+  stand; that is the tool's purpose.
+- **Two sessions on one day.** Failure 94's instability on this clause
+  showed over three days. Every cell here agreed across the restart, which
+  is better evidence than M38 had and still not a different day.
+- **The fall question** is wrong in both arms and was not investigated
+  further. It is independent of the exception list.
+
+## Check it yourself
+
+Nothing was added to the code, so there is no new test. The baseline's
+answers:
+
+```bash
+# needs Star's PDF: python evals/real/fetch_policies.py
+api/.venv/Scripts/python evals/run_scenario_eval.py --no-report --resample --repeats 3 \
+  --policy samples/real/star-arogya-sanjeevani.pdf \
+  --cases evals/real/scenarios-star-heldout-maternity.json
+```
+
+To see the other arm, apply the two lines quoted under "The change that was
+measured" to `verify_exception` and run the same command.
+
+**Predict before you look:** suppose the analysis step had extracted both
+true exceptions for clause 18 and no false one: "ectopic pregnancy",
+"due to an accident". A woman asks about a normal delivery and mentions
+that she "had an ectopic pregnancy two years ago". What does the M33 rule's
+guard do, and is that right?
+
+<details>
+<summary>Answer</summary>
+
+It stands down. The question contains "ectopic" and "pregnancy", the
+stored exception contains both, the guard sees shared words and concludes
+the person may be describing an exception. A normal delivery is excluded,
+so if the model's first answer were `covered` citing clause 18, nothing
+would ask it again. The guard matches words in the question, and has no
+idea which of them describe the treatment being claimed and which are
+history. A complete and correct exception list removes the fault this
+milestone found and leaves this one. The guard is a word match in both
+directions, which is the limit M33 recorded when it refused a rule that
+relied on a word *not* being shared.
+</details>
