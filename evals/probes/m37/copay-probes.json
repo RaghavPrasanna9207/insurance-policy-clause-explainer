@@ -1,0 +1,24 @@
+{
+  "_note": "Written BEFORE any model call of this attempt. 'pay' = covered or conditional. A probe whose expected is 'must not pay' FAILS the candidate if any sample ends covered/conditional. Ages are two or more years apart on purpose: the candidate only acts then (66 -> 67 can mean one day held). P2/P3 are the previous attempt's heart and asthma questions with the inception age moved back so the rule reaches them; their pinned facts are the previous attempt's real extractions with that one number edited, and P3's stated '60 years known' removed so the code guard cannot rescue it (the hostile case: the extraction is unstable on this sentence).",
+  "probes": [
+    {"id": "EVAL", "text": "I took this policy out when I was 70 and I am 72 now. I was admitted with pneumonia last month.",
+     "expected": "conditional citing 5.3", "facts": "cached extraction (the eval's own)"},
+    {"id": "P2-heart", "text": "I took this policy out when I was 65 and I am 67 now. My old heart trouble flared up again and I was in hospital for a week.",
+     "expected": "must not pay (insufficient_information or not_covered)", "facts": "raw_P2.json"},
+    {"id": "P3-asthma", "text": "I took this policy out when I was 64 and I am 67 now. I was admitted last week because of the asthma I have had since I was a child.",
+     "expected": "must not pay", "facts": "raw_P3.json (no condition_known_for: worst case)"},
+    {"id": "P3g-asthma-guard", "text": "same as P3", "expected": "rule does not fire (offline check only): 60 years known >= time held",
+     "facts": "raw_P3 with condition_known_for 60 years"},
+    {"id": "N1-dengue", "text": "I was 68 when I bought this policy and I am 71 now. Last week I was admitted with dengue fever and spent four days in hospital.",
+     "expected": "conditional citing 5.3 (acute, no history, not listed)", "facts": "raw_N1.json, one live extraction"},
+    {"id": "N2-kidney", "text": "I took this policy at 62 and I am 64 now. I was admitted for my kidney disease, which I have had for many years.",
+     "expected": "must not pay", "facts": "raw_N2.json, one live extraction; duration/known-for/pre-existing nulled if extracted, so the rule is reached"},
+    {"id": "N3-hernia", "text": "I bought this policy when I was 61 and I am 63 now. I need a hernia operation.",
+     "expected": "must not pay: hernia is listed in 3.3 (24 months) and 1-3 years held does not settle it; insufficient_information", "facts": "raw_N3.json, same treatment"},
+    {"id": "N4-copd", "text": "I took this policy out when I was 66 and I am 69 now. I was admitted with a flare-up of my COPD.",
+     "expected": "must not pay (a flare-up of 'my COPD' is a history without the word old)", "facts": "raw_N4.json, same treatment"},
+    {"id": "E2-diabetes", "text": "I bought this policy when I was 63 and I am 65 now. I was admitted for the diabetes I have been managing for a long time.",
+     "expected": "rule not reached with the previous attempt's pinned extraction (it states 2 years); offline check only", "facts": "raw_E2.json"},
+    {"id": "E2n-diabetes", "text": "same as E2", "expected": "must not pay", "facts": "raw_E2 with the duration nulled so the rule IS reached (run only if budget allows)"}
+  ]
+}

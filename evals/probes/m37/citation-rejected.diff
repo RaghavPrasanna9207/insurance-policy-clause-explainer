@@ -1,0 +1,163 @@
+--- a/api/app/pipeline/scenario.py
++++ b/api/app/pipeline/scenario.py
+@@ -1114,6 +1114,8 @@
+     breach_of_law: dict[str, str] = field(default_factory=dict)
+     # Exclusion id -> the words of the described procedure or condition it uses.
+     excluding: dict[str, list[str]] = field(default_factory=dict)
++    # Ids of the clauses typed as exclusions.
++    exclusions: set[str] = field(default_factory=set)
+ 
+ 
+ def naming_exclusions(
+@@ -1168,6 +1170,7 @@
+         intoxication=intoxication_clauses(scenario, clauses),
+         breach_of_law=breach_of_law_clauses(scenario, clauses),
+         excluding=naming_exclusions(facts, clauses, scenario),
++        exclusions={c.clause_id for c in clauses if c.clause_type == "exclusion"},
+     )
+ 
+ 
+@@ -1556,6 +1559,62 @@
+                 f"which in the reasoning."
+             )
+ 
++    # The mirror of the two rules above, as M32 mirrored M31: refused, and the
++    # exclusion the lookup found is not among the citations. The stored answer
++    # to `breach-of-law` ("injured while being arrested for shoplifting") is
++    # not_covered citing 4.3, hazardous sports: the verdict is right and the
++    # person is shown the wrong clause to read.
++    #
++    # Only a refusal that rests on OTHER EXCLUSIONS alone is asked, so the
++    # question is which exclusion. That boundary was measured, not assumed.
++    # Asked about any refusal, with this same two-way wording, the model gave
++    # up a right clause for the looked-up one, 2 samples of 2 each: typhoid
++    # three weeks in, rightly refused under the 30-day wait, came back as
++    # "convicted of trespassing some years ago ... therefore the claim for
++    # treatment of typhoid is not covered"; Ayurvedic treatment at an
++    # unaccredited clinic lost its AYUSH clause the same way. A refusal under
++    # an exclusion that names the treatment (a nose job, bungee jumping, IVF,
++    # each beside an old arrest or conviction) kept its clause, 2 of 2 each.
++    # A clause with a waiting-period check is never "another exclusion":
++    # HDFC's specified-disease waiting period is typed `exclusion`.
++    #
++    # The re-ask does not carry the previous answer, so the line says what it
++    # was. A question with both outcomes, the one that keeps the answer first
++    # (Failure 100), and no "you answered X, but" (Failure 98).
++    cited = {c.clause_id for c in citations}
++    timed = {c.clause_id for c in computed.waiting}
++    if verdict == Verdict.NOT_COVERED and cited and cited <= computed.exclusions - timed:
++        looked_up = {
++            clause_id: (f"excludes \"{words}\"", "an arrest or an offence",
++                        "What is being treated is an illness, or an injury from something "
++                        "else, or the person committed no offence",
++                        "The person was hurt while committing or attempting an offence "
++                        "with criminal intent, or as a direct result of it")
++            for clause_id, words in computed.breach_of_law.items()
++        } | {
++            clause_id: ("is an EXCLUSION about alcohol, intoxicating substances or drugs",
++                        "drink or drugs",
++                        "What is being treated was not caused by drink or drugs",
++                        "What is being treated is attributable to what that clause excludes")
++            for clause_id in computed.intoxication
++        }
++        for clause_id, (says, mentions, unrelated, applies_when) in looked_up.items():
++            if clause_id in cited:
++                continue
++            problems.append(
++                f"- Clause {clause_id} {says}. The person mentions {mentions} "
++                f"(looked up from their own words; a lookup cannot tell whether "
++                f"that has anything to do with this treatment), and the previous "
++                f"answer refused this claim without citing clause {clause_id}. "
++                f"Decide which of these the person described. (a) {unrelated}: "
++                f"clause {clause_id} does not apply and is not cited, and the "
++                f"answer rests on the other clauses. (b) {applies_when}: clause "
++                f"{clause_id} is the clause that refuses this claim, cited with "
++                f"effect denies, and another clause is cited as well only if it "
++                f"refuses THIS claim on what the person actually described. Say "
++                f"which in the reasoning."
++            )
++
+     # A definite verdict resting on a waiting period nobody can time. The
+     # person never said how long they have held the policy, so the clause's
+     # line reads "NOT STATED ... cannot be determined" - and Star, gallstones,
+--- a/api/tests/test_scenario.py
++++ b/api/tests/test_scenario.py
+@@ -1502,3 +1502,78 @@
+         assert breach_of_law_clauses(not_own, excl) == {}, not_own
+     # The same words in a clause that is not an exclusion refuse nothing.
+     assert breach_of_law_clauses("I broke my ankle while shoplifting.", _policy(BREACH_TEXT)) == {}
++
++
++# --- a refusal under the wrong exclusion, when a lookup found the right one ---
++
++SPORTS_TEXT = (
++    "4.3 Hazardous Activities Expenses related to any treatment necessitated due to "
++    "participation in hazardous or adventure sports shall not be admissible under this policy."
++)
++
++
++def test_a_refusal_under_another_exclusion_is_asked_about_the_looked_up_one():
++    """`breach-of-law`: the stored answer to "injured while being arrested for
++    shoplifting" was not_covered citing 4.3, hazardous sports. Right verdict,
++    wrong clause, and the M36 rule only asks an answer that pays."""
++    from app.pipeline.scenario import compute, find_contradictions
++
++    clauses = _policy(HOSPITAL_TEXT) + _exclusions(SPORTS_TEXT, BREACH_TEXT, INTOXICATION_TEXT)
++    question = "I was injured while being arrested for shoplifting and needed hospital treatment."
++    computed = compute({}, clauses, question)
++    assert computed.exclusions == {"4.2", "4.3", "4.4"}
++    problems, irrelevant = find_contradictions(
++        [_citation("4.3", "denies")], "not_covered", computed, question)
++    assert len(problems) == 1 and irrelevant == []
++    # Both outcomes are spelled out, the one that keeps the answer first, and the
++    # line says what the previous answer was: the re-ask does not carry it.
++    assert "refused this claim without citing clause 4.4" in problems[0]
++    assert "clause 4.4 does not apply and is not cited" in problems[0]
++    assert "clause 4.4 is the clause that refuses this claim" in problems[0]
++    assert problems[0].index("does not apply") < problems[0].index("is the clause that refuses")
++    assert "You answered" not in problems[0]
++    # Already cited: nothing to ask.
++    assert find_contradictions(
++        [_citation("4.4", "denies")], "not_covered", computed, question) == ([], [])
++
++    # The alcohol lookup gets the same question.
++    drunk = "I fell down the stairs after drinking heavily and fractured my hip."
++    problems, _ = find_contradictions(
++        [_citation("4.3", "denies")], "not_covered", compute({}, clauses, drunk), drunk)
++    assert len(problems) == 1 and "without citing clause 4.2" in problems[0]
++
++
++def test_a_refusal_that_rests_on_anything_but_another_exclusion_is_not_asked():
++    """Measured, 2 samples of 2 each: asked anyway, typhoid three weeks in gave
++    up the 30-day waiting period, and Ayurvedic treatment at an unaccredited
++    clinic gave up the AYUSH clause, both for "convicted of trespassing some
++    years ago". Which exclusion applies is a question this model answers;
++    whether an old conviction outranks a waiting period is not."""
++    from app.pipeline.scenario import ShortlistClause, compute, find_contradictions
++
++    listed = ShortlistClause(
++        "Excl02", "t:9", "Excl02", "exclusion",
++        "Excl02 Specified disease waiting period: expenses shall be excluded until the "
++        "expiry of 24 months.", 1.0, waiting_periods_days=[720])
++    clauses = (_clauses() + _policy(HOSPITAL_TEXT) + _exclusions(SPORTS_TEXT, BREACH_TEXT)
++               + [listed])
++    question = "I was convicted of trespassing some years ago and have now been admitted."
++    computed = compute(
++        {"time_since_policy_start_value": 3, "time_since_policy_start_unit": "weeks"},
++        clauses, question)
++    assert list(computed.breach_of_law) == ["4.4"]
++
++    def asked(*ids):
++        problems, _ = find_contradictions(
++            [_citation(i, "denies") for i in ids], "not_covered", computed, question)
++        return [p for p in problems if "without citing clause 4.4" in p and "looked up" in p]
++
++    assert asked("4.3")                 # another exclusion alone: asked
++    assert not asked("3.2")             # a waiting period
++    assert not asked("1.1")             # a cover's own condition
++    assert not asked("4.3", "1.1")      # mixed: something other than an exclusion is in play
++    assert not asked("Excl02")          # typed exclusion, but it is a waiting period
++    # Only a refusal: the paying verdicts have their own rule.
++    problems, _ = find_contradictions(
++        [_citation("4.3", "reduces")], "conditional", computed, question)
++    assert not any("without citing clause 4.4" in p for p in problems)

@@ -375,7 +375,8 @@ An injury "while being arrested for shoplifting" was paid, but only when the ser
 ### M37 - Eight open cases, four candidate fixes, nothing merged
 The remaining wrong answers attempted once more, each candidate tested on the eval and on questions written beside it. Read this to understand where the design stops working with a 7B model, and why.
 - **Failure 102: right in one session, and paying a refused claim in the next** - a fix for a wrongly cited clause turned a correct refusal (bungee jumping) into "covered". A re-ask is a push: ask which way the answer moves if the model simply gives way.
-- **What the four attempts have in common** - the model cannot tell old illness from new without an expected word, agrees a condition is on a list that omits it, and takes whichever option changes its answer.
+- **What this milestone establishes** - the model cannot tell old illness from new without an expected word, agrees a condition is on a list that omits it, and often takes the option that changes its answer. Followed by a dated note on how much of the "ceiling" claim the evidence carries, and a correction: the open list is eleven cases, not eight.
+- **The probe questions and rejected patches** are in `evals/probes/m37/`.
 
 ### M38 - A false line removed from the prompt, and the answer got worse
 Star's maternity exclusion is printed with an exception it does not have. A three-line fix to the exception check removes exactly that one line across three policies, and was reverted.
@@ -390,6 +391,11 @@ Upload, analysis, the ranked clause map, a clause's detail panel and three quest
 Failures 21, 32/33 and 78 checked line by line against the repository, with no model run. All three lessons hold; the faults were sentences true when written and false now, a story that stopped one step early, counts that disagreed with their own tables, and claims a size larger than their evidence. Read it before quoting any early entry, and for the dated notes now sitting inside those three.
 
 - **Concept 56: a log entry has a date even when it does not print one** - why present-tense statements about code go stale, and three habits that prevent it.
+
+### M41 - Three more entries read against the code, and evidence that was not in the repository
+Failures 95, 102 and 103 checked the same way. The recent entries are accurate about the code; their fault is conclusions larger than their evidence, all three in the same direction. M37's probe questions, which it called the test set for the hosted comparison, turned out to live in a temporary folder and are now in `evals/probes/m37/`. Read it with M40 before retelling any of the six.
+
+- **Concept 57: evidence belongs where the claim is** - if an entry says "these are the test set", the files go in the same commit.
 
 ---
 

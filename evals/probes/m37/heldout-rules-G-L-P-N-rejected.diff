@@ -1,0 +1,118 @@
+--- a/api/app/pipeline/scenario.py
++++ b/api/app/pipeline/scenario.py
+@@ -1587,6 +1587,115 @@
+                     f"missing_information. Answer otherwise only if some other clause "
+                     f"refuses this claim outright."
+                 )
++
++    # One question at a time: each rule below is raised only when nothing above
++    # was, so every re-ask that existed before them is sent unchanged.
++    #
++    # G. Paying, while a waiting period that bars EVERY illness cannot be timed.
++    # Held-out: "I had my gallbladder removed. I'm 45." answered conditional
++    # citing only the co-payment clause, with time_since_policy_start_value in
++    # its own missing_information. The rule above needs the untimed clause to
++    # be cited; this one does not, because a general period concerns every
++    # illness - there is no "is this treatment on the list" for a lookup to
++    # get wrong. Both ways out are spelled out, the non-paying one last (M36,
++    # Failure 100: the last option gets the benefit of the doubt). It can only
++    # leave a paying answer standing or move it to insufficient_information.
++    if not problems and verdict in (Verdict.COVERED, Verdict.CONDITIONAL):
++        said = _stems(scenario).keys()
++        for check in computed.waiting:
++            if (check.status is not waiting.WaitingStatus.UNKNOWN or check.listed
++                    or check.pre_existing or not check.exceptions
++                    or any(_stems(e).keys() & said for e in check.exceptions)):
++                continue
++            problems.append(
++                f"- It was calculated: {check.describe()}. Inside that period clause "
++                f"{check.clause_id} pays for one thing only: "
++                f"{'; '.join(check.exceptions)}. Decide which of these the person "
++                f"described. (a) An injury from a sudden outside event, such as a "
++                f"crash, a fall or a blow, or a description that itself shows the "
++                f"policy has been held longer than that period: clause "
++                f"{check.clause_id} does not stand in the way and the answer stays "
++                f"{verdict}. (b) An illness, infection or disease, or an operation "
++                f"for one, with nothing said about how long the policy has been "
++                f"held: whether this claim is paid turns on a fact the person did "
++                f"not give, so the answer is insufficient_information, citing "
++                f"clause {check.clause_id}, with time_since_policy_start_value in "
++                f"missing_information. Say which in the reasoning."
++            )
++
++    # L and P. Refused or delayed, resting on nothing but an unserved waiting
++    # period that the code could not connect to what the person described: a
++    # list-type period sharing no word with it (L), or the pre-existing
++    # diseases period when nothing settled whether the illness is older than
++    # the policy (P). Their lines in the prompt already say "bars ONLY ..." and
++    # "concerns ONLY ..."; this is the check behind those lines. Held-out: a
++    # thyroid problem "will be paid after" the specified-disease period, an
++    # appendix removed two years in refused as pre-existing. Asked as a
++    # question whose last option keeps the refusal: the lookup misses half of
++    # what such lists bar (M33: 26 of 52), so its silence is a reason to ask
++    # and never a reason to pay.
++    if not problems and verdict in (Verdict.NOT_COVERED, Verdict.CONDITIONAL) and citations:
++        unsettled = {
++            c.clause_id: c for c in computed.waiting
++            if c.status is waiting.WaitingStatus.NOT_SERVED and (
++                c.pre_existing and c.condition_predates_policy == "unknown"
++                or not c.pre_existing and c.listed and not c.named and not c.exceptions
++            )
++        }
++        # A pre-existing diseases period for an illness settled as newer than
++        # the policy: its line says it "does not concern this claim", and
++        # nothing checked that the answer agreed. Not a question - it is the
++        # code's own result, like a served period.
++        settled_new = {
++            c.clause_id: c for c in computed.waiting
++            if c.concerns_nothing_here() and c.status is not waiting.WaitingStatus.SERVED
++        }
++        cited = list(dict.fromkeys(c.clause_id for c in citations))
++        if set(cited) <= unsettled.keys() | settled_new.keys():
++            for clause_id in cited:
++                if clause_id in settled_new:
++                    problems.append(
++                        f"- The answer rests on clause {clause_id}, but it was "
++                        f"calculated: {settled_new[clause_id].describe()}. Clause "
++                        f"{clause_id} is not a reason to refuse or delay this claim: "
++                        f"it is decided by the other clauses."
++                    )
++                    continue
++                check = unsettled[clause_id]
++                held = (f"{waiting._human(check.held_days)} of the "
++                        f"{waiting._either(check.required_days)} required")
++                if check.pre_existing:
++                    problems.append(
++                        f"- The answer rests on clause {clause_id} alone. Clause "
++                        f"{clause_id} concerns ONLY an illness the person already had "
++                        f"when the policy began. Decide which of these the description "
++                        f"says. (a) Nothing in it says the illness or its symptoms were "
++                        f"there before the policy began - a sudden illness, an injury, "
++                        f"a first diagnosis: clause {clause_id} is not a reason to "
++                        f"refuse this claim, and it is decided by the other clauses. "
++                        f"(b) It says the trouble has a past, but not whether that past "
++                        f"is longer than the policy: the answer is "
++                        f"insufficient_information, citing clause {clause_id}, with "
++                        f"pre_existing_condition in missing_information. (c) It says "
++                        f"the person had it before the policy began, or for longer "
++                        f"than the policy has been held ({held}): the answer is "
++                        f"not_covered, citing clause {clause_id}. Say which in the "
++                        f"reasoning, quoting the person's words."
++                    )
++                else:
++                    lists = f': "{check.listing}"' if check.listing else ""
++                    problems.append(
++                        f"- The answer rests on clause {clause_id} alone. Clause "
++                        f"{clause_id} bars ONLY the treatments it lists{lists}. Decide "
++                        f"which is true of what the person described. (a) It is not on "
++                        f"that list under any name: clause {clause_id} is not a reason "
++                        f"to refuse or delay this claim, and it is decided by the other "
++                        f"clauses. (b) It is on that list, in the clause's own words or "
++                        f"in everyday words for the same thing: the period is not "
++                        f"served ({held}), so the answer is not_covered, citing clause "
++                        f"{clause_id} with effect denies. Say which in the reasoning, "
++                        f"naming the item on the list."
++                    )
+     return problems, irrelevant
+ 
+ 

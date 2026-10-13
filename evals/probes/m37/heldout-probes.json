@@ -1,0 +1,170 @@
+{
+ "_note": "Written BEFORE any live run. Synthetic policy. 'never' lists verdicts that count as the rule doing harm. 'want' is the right answer.",
+ "probes": [
+  {
+   "id": "G1-pneumonia-untimed",
+   "rule": "G",
+   "text": "I was admitted with pneumonia for three days. I am 40.",
+   "want": "insufficient_information",
+   "never": [
+    "not_covered"
+   ],
+   "kind": "must flip if the first answer pays"
+  },
+  {
+   "id": "G2-fall-untimed",
+   "rule": "G",
+   "text": "I slipped on the stairs and broke my wrist, and it needed surgery. I am 33.",
+   "want": "covered",
+   "never": [
+    "not_covered"
+   ],
+   "kind": "must NOT flip (an accident in other words; insufficient_information is a degradation, not_covered a failure)"
+  },
+  {
+   "id": "G3-renewed-five-times",
+   "rule": "G",
+   "text": "I have renewed this policy every year since 2019. Last week I was admitted with dengue fever. I am 41.",
+   "want": "covered",
+   "never": [
+    "not_covered"
+   ],
+   "kind": "must NOT flip (held for years, said without a number+unit the extractor reads)"
+  },
+  {
+   "id": "G4-recently-bought",
+   "rule": "G",
+   "text": "I bought this policy recently and had my appendix out last week. I am 29.",
+   "want": "insufficient_information",
+   "never": [
+    "not_covered"
+   ],
+   "kind": "must flip if the first answer pays"
+  },
+  {
+   "id": "L1-tonsils",
+   "rule": "L",
+   "text": "I had my tonsils removed ten months after buying this policy. I am 30.",
+   "want": "not_covered",
+   "never": [
+    "covered",
+    "conditional"
+   ],
+   "kind": "must NOT flip (ear, nose and throat, in everyday words)"
+  },
+  {
+   "id": "L2-new-hip",
+   "rule": "L",
+   "text": "I got a new hip fitted a year after I took this policy. I am 58.",
+   "want": "not_covered",
+   "never": [
+    "covered",
+    "conditional"
+   ],
+   "kind": "must NOT flip (joint replacement, in everyday words)"
+  },
+  {
+   "id": "L3-womb-removed",
+   "rule": "L",
+   "text": "I had my womb removed 15 months into this policy. I am 47.",
+   "want": "not_covered",
+   "never": [
+    "covered",
+    "conditional"
+   ],
+   "kind": "must NOT flip (hysterectomy, in everyday words)"
+  },
+  {
+   "id": "L4-kidney-stones",
+   "rule": "L",
+   "text": "I was admitted with kidney stones ten months after buying the policy, and I never had them before. I am 36.",
+   "want": "covered",
+   "never": [],
+   "kind": "must flip if refused or delayed under 3.3 (not on the list)"
+  },
+  {
+   "id": "P1-old-back-injury",
+   "rule": "P",
+   "text": "My old back injury flared up and I needed surgery on my spine. I bought this policy a year ago.",
+   "want": "not_covered or insufficient_information",
+   "never": [
+    "covered",
+    "conditional"
+   ],
+   "kind": "must NOT pay (a phrasing the history word list missed)"
+  },
+  {
+   "id": "P2-daily-bp-medicine",
+   "rule": "P",
+   "text": "I take daily medicine for my blood pressure and was admitted when it shot up. I have held the policy for one year.",
+   "want": "not_covered or insufficient_information",
+   "never": [
+    "covered",
+    "conditional"
+   ],
+   "kind": "must NOT pay (a phrasing the history word list missed)"
+  },
+  {
+   "id": "P3-heart-long-way",
+   "rule": "P",
+   "text": "My heart trouble goes back a long way and I was admitted for a bypass. I have had this policy for two years.",
+   "want": "not_covered",
+   "never": [
+    "covered",
+    "conditional"
+   ],
+   "kind": "must NOT pay (a phrasing the history word list missed)"
+  },
+  {
+   "id": "P4-broken-hip-fall",
+   "rule": "P",
+   "text": "I slipped in the bathroom and broke my hip, and it was pinned in an operation. I have held this policy for two years and I am 52.",
+   "want": "covered",
+   "never": [],
+   "kind": "must flip if refused under 3.2 (an injury, no history)"
+  },
+  {
+   "id": "G5-ambulance-general",
+   "rule": "G",
+   "text": "Does this policy pay for an ambulance to take me to hospital in an emergency?",
+   "want": "covered or conditional (2.5)",
+   "never": [
+    "not_covered"
+   ],
+   "kind": "general question, no claim: insufficient_information would be a degradation"
+  },
+  {
+   "id": "G6-cataract-general",
+   "rule": "G",
+   "text": "Is cataract surgery covered by this policy?",
+   "want": "conditional or insufficient_information (24-month wait, capped)",
+   "never": [
+    "not_covered"
+   ],
+   "kind": "general question, no claim"
+  },
+  {
+   "id": "G7-hernia-untimed",
+   "rule": "G",
+   "text": "I had a hernia operation. I'm 52.",
+   "want": "insufficient_information",
+   "never": [
+    "covered",
+    "not_covered"
+   ],
+   "kind": "must flip if the first answer pays"
+  },
+  {
+   "id": "G8-motorbike-untimed",
+   "rule": "G",
+   "text": "I was hit by a motorbike while crossing the road and needed stitches in hospital. I'm 27.",
+   "want": "covered",
+   "never": [
+    "not_covered"
+   ],
+   "kind": "must NOT flip (an accident in other words)"
+  }
+ ],
+ "_note2": "G5 and G6 were added AFTER the first G results (to cover general questions with no claim described) but BEFORE either was run.",
+ "_note3": "G7 and G8 added after G1-G6 were run, before either was run: short claims in the shape of the target, where the first answer is likelier to pay."
+}

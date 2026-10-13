@@ -1,0 +1,48 @@
+--- a/api/app/pipeline/scenario.py
++++ b/api/app/pipeline/scenario.py
+@@ -1587,6 +1587,45 @@
+                     f"missing_information. Answer otherwise only if some other clause "
+                     f"refuses this claim outright."
+                 )
++
++    # Paying, while a waiting period that bars EVERY illness cannot be timed.
++    # Held-out: "I had my gallbladder removed. I'm 45." answered conditional
++    # citing only the co-payment clause, with time_since_policy_start_value in
++    # its own missing_information. The rule above needs the untimed clause to
++    # be cited adversely; this one does not, because a general period concerns
++    # every illness - there is no "is this treatment on the list" for a lookup
++    # to get wrong. Not asked when the description uses the exception's words
++    # ("road accident"), and only when nothing above was raised, so every
++    # re-ask that existed before this rule is sent unchanged.
++    #
++    # It can leave a paying answer standing or move it to
++    # insufficient_information; in 16 sampled re-asks it never refused. Its
++    # known cost: option (a) is rarely taken. A broken wrist from a fall and a
++    # policy "renewed every year since 2019" were both moved to
++    # insufficient_information. Listing (a) last instead was measured and is
++    # worse: those two still moved and the gallbladder did not.
++    if not problems and verdict in (Verdict.COVERED, Verdict.CONDITIONAL):
++        said = _stems(scenario).keys()
++        for check in computed.waiting:
++            if (check.status is not waiting.WaitingStatus.UNKNOWN or check.listed
++                    or check.pre_existing or not check.exceptions
++                    or any(_stems(e).keys() & said for e in check.exceptions)):
++                continue
++            problems.append(
++                f"- It was calculated: {check.describe()}. Inside that period clause "
++                f"{check.clause_id} pays for one thing only: "
++                f"{'; '.join(check.exceptions)}. Decide which of these the person "
++                f"described. (a) An injury from a sudden outside event, such as a "
++                f"crash, a fall or a blow, or a description that itself shows the "
++                f"policy has been held longer than that period: clause "
++                f"{check.clause_id} does not stand in the way and the answer stays "
++                f"{verdict}. (b) An illness, infection or disease, or an operation "
++                f"for one, with nothing said about how long the policy has been "
++                f"held: whether this claim is paid turns on a fact the person did "
++                f"not give, so the answer is insufficient_information, citing "
++                f"clause {check.clause_id}, with time_since_policy_start_value in "
++                f"missing_information. Say which in the reasoning."
++            )
+     return problems, irrelevant
+ 
+ 
