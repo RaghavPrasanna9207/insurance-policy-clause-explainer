@@ -316,6 +316,25 @@ def test_a_short_exception_ending_a_list_item_is_read_from_the_clause():
     assert trailing_exceptions(MATERNITY) == ["ectopic pregnancy"]
 
 
+@pytest.mark.parametrize("layout", [
+    MATERNITY,                                      # labels on their own lines
+    " ".join(MATERNITY.split()),                    # one paragraph, "a." and "b." inline
+    MATERNITY.replace("\na.\n", "\n(a) ").replace("\nb.\n", "\n(b) "),
+    MATERNITY.replace("\na.\n", "\ni) ").replace("\nb.\n", "\nii) "),
+])
+def test_the_exception_is_read_whatever_the_layout(layout):
+    assert trailing_exceptions(layout) == ["ectopic pregnancy"]
+
+
+def test_nothing_is_read_from_a_long_list_of_items():
+    # An exception is stored for the whole clause. Lifted from one item of a
+    # long list, it would be printed over every other item too.
+    short = "4. Exclusions a. Dental treatment unless necessitated by an accident. b. War."
+    assert trailing_exceptions(short) == ["necessitated by an accident"]
+    long = short + " c. Obesity. d. Cosmetic surgery. e. Hazardous sports."
+    assert trailing_exceptions(long) == []
+
+
 def test_a_long_condition_after_an_exception_word_is_not_copied():
     # "unless such surgery is necessitated by ..." needs reading; and "shall not
     # apply on subsequent continuous renewal ..." is not a phrase to lift.

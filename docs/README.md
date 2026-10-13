@@ -412,6 +412,7 @@ M38's fix for the false maternity exception, re-measured now that there are seve
 The fix that lost twice, kept on the third attempt once the second error was repaired with it. A survey of all three policies shows why the general repair was not built; a narrow rule adds exactly one line, "ectopic pregnancy". Same score as before (5 of 7), no question worse, and the prompt no longer states something false about the policy.
 - **Measured before building** - sixty-two exception words with no stored exception, and why copying what follows them would assert more falsehoods than it removed.
 - **Why it was kept, when the score is the same** - verdict-neutral, removes a falsehood, and the two remaining wrong answers now have a cause in named code and not in bad data.
+- **Failure 106: the first version read the page layout, not the clause** - it worked only because Star's PDF puts "a." and "b." on their own lines, and its good behaviour on HDFC rested on a missing space. Fixed so layout does not matter, with a limit that reads nothing from long lists.
 
 ---
 

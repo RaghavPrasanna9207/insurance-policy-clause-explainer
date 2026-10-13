@@ -17000,31 +17000,34 @@ plain words, with no punctuation, running to the very end of a list item.
 `api/app/grounding.py`:
 
 ```python
-# A line holding nothing but a list label: "a.", "ii)", "3.".
-_ITEM_LABEL = re.compile(r"(?m)^\s*(?:[a-z]|[ivx]{1,4}|\d{1,2})[.)]\s*$", re.IGNORECASE)
+# A list label: "a.", "(b)", "ii)", "3.". Matched on normalised text, where
+# line breaks are already spaces.
+_ITEM_LABEL = re.compile(r"(?:^|\s)\(?(?:[a-z]|[ivx]{1,4}|\d{1,2})[.)](?=\s|$)")
 # An exception word, then one to five plain words running to the end of the item.
 _TRAILING_EXCEPTION = re.compile(
     r"\b(?:" + "|".join(re.escape(m) for m in EXCEPTION_MARKERS) + r")\s+((?:[a-z-]+ ){0,4}[a-z-]+)[.;]?$"
 )
+_MAX_ITEMS = 4
 
 
 def trailing_exceptions(source_text: str) -> list[str]:
-    found = []
-    for item in _ITEM_LABEL.split(source_text):
-        match = _TRAILING_EXCEPTION.search(normalize(item))
-        if match:
-            found.append(match.group(1))
-    return found
+    items = [i.strip() for i in _ITEM_LABEL.split(normalize(source_text)) if i.strip()]
+    if len(items) > _MAX_ITEMS:
+        return []
+    return [m.group(1) for m in map(_TRAILING_EXCEPTION.search, items) if m]
 ```
 
-Walking through it on clause 18. The PDF gives the labels "a." and "b." on
-lines of their own, so splitting on label-only lines yields the heading,
-item (a) and item (b). Each is normalised (lower case, whitespace
-collapsed). Item (a) ends "... incurred during hospitalization) except
-ectopic pregnancy": an exception word, two plain words, end of item. It
-matches, and "ectopic pregnancy" is returned. Item (b) ends "... during the
-policy period", with its "unless" far back and a bracket in between, so it
-does not match.
+Walking through it on clause 18. The text is normalised first (lower case,
+every run of whitespace including line breaks collapsed to one space), then
+cut wherever a list label stands: "18.", "a.", "b.". That leaves three
+items: the heading, item (a) and item (b). Item (a) ends "... incurred
+during hospitalization) except ectopic pregnancy": an exception word, two
+plain words, end of item. It matches, and "ectopic pregnancy" is returned.
+Item (b) ends "... during the policy period", with its "unless" far back
+and a bracket in between, so it does not match.
+
+That is the second version of this function. The first is Failure 106,
+below, and `_MAX_ITEMS` is explained there.
 
 Why so narrow. A phrase of a few words with no punctuation, closing an
 item, can be copied without understanding it. Anything longer ("unless such
@@ -17172,6 +17175,87 @@ of a named piece of code.
 `PROMPT_VERSION` is now `v66-true-exceptions`. No prompt wording changed,
 but what is printed under one clause did.
 
+## Failure 106: the first version read the page layout, not the clause
+
+The version that was measured above found the end of a list item like this:
+
+```python
+# A line holding nothing but a list label: "a.", "ii)", "3.".
+_ITEM_LABEL = re.compile(r"(?m)^\s*(?:[a-z]|[ivx]{1,4}|\d{1,2})[.)]\s*$", re.IGNORECASE)
+...
+    for item in _ITEM_LABEL.split(source_text):
+        match = _TRAILING_EXCEPTION.search(normalize(item))
+```
+
+It split the raw text on lines containing nothing but a label. Star's PDF
+happens to put "a." and "b." on lines of their own, so it worked, and the
+entry's first draft recorded the consequence as a limitation: printed as one
+paragraph, "... except ectopic pregnancy b. Expenses towards miscarriage
+...", the same clause would yield nothing, the false exception would still
+be dropped by the bracket fix, and the clause would be back in the state
+M43 measured at 4 of 7.
+
+That is not a limitation to write down. It is a rule that works by accident
+of typesetting. Whether a label sits on its own line is decided by the
+insurer's page layout and by how the PDF library reflows it, and neither
+has anything to do with what the clause says. The fix was to normalise
+first and then look for labels, so that a line break and a space are the
+same thing:
+
+```python
+_ITEM_LABEL = re.compile(r"(?:^|\s)\(?(?:[a-z]|[ivx]{1,4}|\d{1,2})[.)](?=\s|$)")
+...
+    items = [i.strip() for i in _ITEM_LABEL.split(normalize(source_text)) if i.strip()]
+```
+
+A test now runs the clause through four layouts (labels on their own lines;
+one paragraph; "(a)" and "(b)"; "i)" and "ii)") and expects "ectopic
+pregnancy" from each.
+
+**Making the rule see more labels exposed a second problem.** The survey at
+the top of this entry rejected a general rule because of one item in HDFC's
+general exclusions, which ends "unless necessitated by an accident": copied
+out, it would be printed over all sixteen-odd items of that clause. The
+narrow rule did not copy it, and the reason turned out to be a missing
+space. The PDF text reads "... by an accident. p.any treatment", with no
+space after "p.", so "p." was not recognised as a label and the item did
+not appear to end there. With a space it is copied:
+
+```
+"o. Dental treatment unless necessitated by an accident. p.Any treatment ..."   -> []
+"o. Dental treatment unless necessitated by an accident. p. Any treatment ..."  -> ['necessitated by an accident']
+```
+
+So the rule's good behaviour on HDFC also rested on typesetting. The
+underlying fault is the one M38 first named: an exception is stored for the
+whole clause and not for the item it belongs to. A short clause can
+tolerate that; a list of sixteen cannot. Hence the limit: a clause that
+splits into more than `_MAX_ITEMS` (four) parts yields nothing.
+
+```python
+if len(items) > _MAX_ITEMS:
+    return []
+```
+
+Four is a heading and three items. Star's maternity clause is three parts
+and HDFC's general exclusions more than seventeen; no clause between those
+sizes was measured, so the number separates the two known cases and nothing
+more. It errs toward reading nothing, which is the safe direction: a
+missing exception leaves the clause's own words in front of the model,
+while a wrongly attached one is the program asserting a falsehood.
+
+**Nothing had to be measured again.** After both changes the stored
+exceptions on all three policies were listed and compared with the version
+that was sampled: the same seventeen, line for line. Identical stored
+exceptions mean identical requests, so the answers in the table above are
+the answers of this code.
+
+The lesson is about the sentence that almost shipped. "It depends on how
+the PDF lays the clause out" was written as an honest caveat, and an honest
+caveat about a defect is still a defect. **When a limitation can be stated
+as "works only if the input happens to be formatted this way", the next
+step is to fix it, and a note comes second.**
+
 ## What was not done
 
 - **The scooter question and the fall question are still wrong**, 6 of 6
@@ -17196,8 +17280,8 @@ but what is printed under one clause did.
 ## Check it yourself
 
 ```bash
-# the three new tests, no model
-cd api && .venv/Scripts/python -m pytest tests/test_grounding.py -q -k "closed_bracket or list_item or long_condition"
+# the new tests, no model
+cd api && .venv/Scripts/python -m pytest tests/test_grounding.py -q -k "closed_bracket or list_item or long_condition or layout or long_list"
 
 # the seven questions (needs Star's PDF: python evals/real/fetch_policies.py)
 cd .. && api/.venv/Scripts/python evals/run_scenario_eval.py --no-report --resample --repeats 3 \
@@ -17205,22 +17289,22 @@ cd .. && api/.venv/Scripts/python evals/run_scenario_eval.py --no-report --resam
   --cases evals/real/scenarios-star-heldout-maternity.json
 ```
 
-**Predict before you look:** the new rule reads "except ectopic pregnancy"
-because those words end item (a). Suppose the insurer had printed the clause
-as one paragraph, with "a." and "b." inline: "... except ectopic pregnancy
-b. Expenses towards miscarriage ...". What does `trailing_exceptions`
-return?
+**Predict before you look:** a policy has a short clause, "7. Dental a.
+Dental treatment is excluded unless necessitated by an accident. b.
+Dentures are excluded." What does `trailing_exceptions` return, and is the
+line the prompt would then print true?
 
 <details>
 <summary>Answer</summary>
 
-Nothing. The rule finds the end of an item by splitting on lines that hold
-only a label, and there is no such line, so the whole clause is one item.
-That item ends "... during the policy period", which is not an exception
-word followed by a few plain words. The exception would be missed, the
-false one would still be dropped by the bracket fix, and this clause would
-be back to the state M43 measured at 4 of 7. The rule depends on how the
-PDF happened to lay the clause out. It is a narrow reading of one layout,
-which is what it was built as, and why the entry says it has been shown to
-do one thing.
+It returns `['necessitated by an accident']`: three parts, under the limit,
+and item (a) ends with an exception word and four plain words. The prompt
+would print "EXCEPTIONS - this clause does NOT apply when: necessitated by
+an accident" under the whole clause. That is true of item (a) and not
+stated for item (b): the policy does not say dentures are paid for after an
+accident. So even inside the limit the rule can attach an exception more
+widely than the clause does, which is the fault clause 18 itself still has
+with "due to an accident". The limit keeps the over-attachment to two or
+three items and away from sixteen. It does not remove it. Removing it means
+storing each exception with the item it belongs to.
 </details>

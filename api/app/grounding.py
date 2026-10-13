@@ -268,11 +268,19 @@ _SENTENCE_END = re.compile(r"[.!?]\s")
 # exception whose job the false one had been doing by accident.
 _CLOSED_BRACKET = re.compile(r"\([^()]*\)")
 # A line holding nothing but a list label: "a.", "ii)", "3.".
-_ITEM_LABEL = re.compile(r"(?m)^\s*(?:[a-z]|[ivx]{1,4}|\d{1,2})[.)]\s*$", re.IGNORECASE)
+#
+# Matched on normalised text, where line breaks are already spaces, so it makes
+# no difference whether the PDF puts each label on a line of its own or runs
+# the items together in a paragraph. The first version split on label-only
+# LINES and so read the layout, not the clause.
+_ITEM_LABEL = re.compile(r"(?:^|\s)\(?(?:[a-z]|[ivx]{1,4}|\d{1,2})[.)](?=\s|$)")
 # An exception word, then one to five plain words running to the end of the item.
 _TRAILING_EXCEPTION = re.compile(
     r"\b(?:" + "|".join(re.escape(m) for m in EXCEPTION_MARKERS) + r")\s+((?:[a-z-]+ ){0,4}[a-z-]+)[.;]?$"
 )
+
+
+_MAX_ITEMS = 4
 
 
 def trailing_exceptions(source_text: str) -> list[str]:
@@ -284,13 +292,20 @@ def trailing_exceptions(source_text: str) -> list[str]:
     read here - a few words after the exception word, with no punctuation,
     running to the end of the item - because anything longer is a condition
     that needs reading, not a phrase that can be copied.
+
+    Nothing is read from a clause with many items. An exception is stored for
+    the whole clause, so one that ends item (o) of sixteen general exclusions
+    ("... unless necessitated by an accident") would be printed over all
+    sixteen. HDFC's general exclusions clause has exactly that item.
     """
-    found = []
-    for item in _ITEM_LABEL.split(source_text):
-        match = _TRAILING_EXCEPTION.search(normalize(item))
-        if match:
-            found.append(match.group(1))
-    return found
+    items = [i.strip() for i in _ITEM_LABEL.split(normalize(source_text)) if i.strip()]
+    # ponytail: exceptions are per clause, so a long list is skipped outright.
+    # 4 = a heading and three items; Star's maternity clause is 3, HDFC's
+    # general exclusions 17+, nothing between was measured. Storing exceptions
+    # per item would remove the need for this.
+    if len(items) > _MAX_ITEMS:
+        return []
+    return [m.group(1) for m in map(_TRAILING_EXCEPTION.search, items) if m]
 
 
 def verify_exception(span: str, source_text: str) -> bool:
