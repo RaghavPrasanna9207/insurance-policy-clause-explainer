@@ -12,6 +12,7 @@ from app.grounding import (
     EXCEPTION_MARKERS,
     MIN_QUOTE_CHARS,
     normalize,
+    trailing_exceptions,
     verified_prefix,
     verify_citations,
     verify_exception,
@@ -292,6 +293,35 @@ def test_an_exception_word_in_an_earlier_sentence_does_not_count():
     source = "Claims are excluded except for accidents. Treatment of obesity is excluded."
     assert verify_exception("accidents", source)
     assert not verify_exception("Treatment of obesity", source)
+
+
+# Star Health's maternity exclusion, as the PDF gives it: labels on their own lines.
+MATERNITY = (
+    "18.  Maternity - Code Excl 18\na.\nMedical treatment expenses traceable\n"
+    "to childbirth (including complicated\ndeliveries and caesarean sections\n"
+    "incurred during hospitalization) except\nectopic pregnancy\nb.\n"
+    "Expenses towards miscarriage (unless\ndue to an accident) and lawful medical\n"
+    "termination of pregnancy during the\nPolicy Period"
+)
+
+
+def test_an_exception_word_inside_a_closed_bracket_does_not_reach_past_it():
+    assert verify_exception("due to an accident", MATERNITY)
+    assert not verify_exception(
+        "lawful medical termination of pregnancy during the Policy Period", MATERNITY
+    )
+
+
+def test_a_short_exception_ending_a_list_item_is_read_from_the_clause():
+    assert trailing_exceptions(MATERNITY) == ["ectopic pregnancy"]
+
+
+def test_a_long_condition_after_an_exception_word_is_not_copied():
+    # "unless such surgery is necessitated by ..." needs reading; and "shall not
+    # apply on subsequent continuous renewal ..." is not a phrase to lift.
+    assert trailing_exceptions(COSMETIC) == []
+    assert trailing_exceptions(INITIAL_WAITING) == []
+    assert trailing_exceptions(INFERTILITY) == []
 
 
 def test_the_code_accepts_exactly_the_words_the_prompt_asks_for():

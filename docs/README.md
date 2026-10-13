@@ -408,6 +408,11 @@ M38's fix for the false maternity exception, re-measured now that there are seve
 - **Concept 59: fixing one of two compensating errors makes things worse** - when a correct fix measures worse, look for the second error it uncovered.
 - **What would have to be true for this fix to be kept** - three separate conditions, each its own measured change.
 
+### M44 - The missing exception read from the clause, and the false one finally removed
+The fix that lost twice, kept on the third attempt once the second error was repaired with it. A survey of all three policies shows why the general repair was not built; a narrow rule adds exactly one line, "ectopic pregnancy". Same score as before (5 of 7), no question worse, and the prompt no longer states something false about the policy.
+- **Measured before building** - sixty-two exception words with no stored exception, and why copying what follows them would assert more falsehoods than it removed.
+- **Why it was kept, when the score is the same** - verdict-neutral, removes a falsehood, and the two remaining wrong answers now have a cause in named code and not in bad data.
+
 ---
 
 ## Related documents

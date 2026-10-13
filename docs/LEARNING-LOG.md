@@ -15676,6 +15676,10 @@ a second session could not have changed the decision.
   prompt is true and what it does to the answer are separate
   measurements.**
 
+(Later: both were closed in M44, which removed the false exception together
+with a rule that reads the missing one from the clause. M42 and M43 are the
+measurements that led there.)
+
 Still open, unchanged: the false exception on Star's clause 18, and the
 missing one (ectopic pregnancy). A reader able to apply clause 18 on a
 first reading would need neither the false line nor the check; whether a
@@ -16860,6 +16864,9 @@ Not built here; recorded so the next attempt starts further on.
 Each is its own measured change. All three would have to hold on the same
 seven questions.
 
+(Later: M44 did the first, and found the third came with it. The second is
+still open.)
+
 ## What was not done
 
 - **Nothing was merged in `api/`.** The system answers these seven
@@ -16907,4 +16914,313 @@ history. A complete and correct exception list removes the fault this
 milestone found and leaves this one. The guard is a word match in both
 directions, which is the limit M33 recorded when it refused a rule that
 relied on a word *not* being shared.
+</details>
+
+---
+
+# M44 — The missing exception read from the clause, and the false one finally removed
+
+## The problem
+
+Star Health's maternity exclusion has two lettered parts:
+
+```
+18.  Maternity - Code Excl 18
+a. Medical treatment expenses traceable to childbirth (including complicated
+   deliveries and caesarean sections incurred during hospitalization) except
+   ectopic pregnancy
+b. Expenses towards miscarriage (unless due to an accident) and lawful
+   medical termination of pregnancy during the Policy Period
+```
+
+When the policy is analysed, the model is asked for each clause's
+exceptions, and code keeps the ones that pass a check. For this clause the
+stored list was:
+
+```
+"due to an accident"
+"lawful medical termination of pregnancy during the Policy Period"
+```
+
+One is false (termination is excluded, not excepted) and one true exception
+is missing (ectopic pregnancy). The list is used twice: it is printed under
+the clause in the reasoning prompt, as "EXCEPTIONS - this clause does NOT
+apply when: ...", and it is read by code, which stands a safety rule down
+when the person's question shares a word with one of the exceptions.
+
+A fix for the false one had now been measured twice and reverted twice. M43
+found why it kept losing: with the false exception gone, nothing restrained
+that safety rule on a question about an ectopic pregnancy, and the rule
+told the model to refuse a claim the policy pays. The false exception had
+been restraining it by accident, because it shares the word "pregnancy"
+with the true one that was never stored. M43 ended with a list of what
+would have to be true for the fix to be kept. The first item was: get the
+true exception into the list.
+
+## Measured before building: how many exceptions are missing
+
+The obvious repair is general: wherever a clause has an exception word
+("unless", "except", "other than", "save for", "provided that", "shall not
+apply") with no stored exception after it, copy the words that follow. So
+every such place was listed first, on all three policies, with no model
+call:
+
+| policy | clauses | exception words | with a stored exception after | without |
+|---|---|---|---|---|
+| synthetic | 40 | 6 | 3 | 3 |
+| Star Arogya Sanjeevani | 79 | 20 | 6 | 14 |
+| HDFC Optima Secure | 115 | 52 | 7 | 45 |
+
+(The "with / without" split was made by a loose test, a stored exception
+appearing within 200 characters after the word, so the last two columns are
+approximate.)
+
+Sixty-two places. Reading them settled what not to build. Most are not
+exceptions a person could claim under. They are conditions ("provided that
+such expenses relate to the same condition"), items of a list of
+non-payable things ("food charges (other than patient's diet provided by
+hospital)"), or procedure ("except on grounds of established fraud"). And
+the ones that are real exceptions sit inside long clauses with many
+lettered items. HDFC's general exclusions clause has at least sixteen items, and one
+of them ends "unless necessitated by an accident". Exceptions are stored
+per clause, not per item, so copying that phrase would print "this clause
+does NOT apply when: necessitated by an accident" over all of them, and
+would stand the safety rule down for any HDFC question that mentions an
+accident. That is the same fault as the false exception on clause 18, made
+by code this time, on a clause every HDFC question meets.
+
+**Rejected: a general "copy what follows every exception word".** It would
+change the prompt of most real-policy questions and assert more falsehoods
+than it removed.
+
+## What was built
+
+Only the plainest shape is read: an exception word followed by one to five
+plain words, with no punctuation, running to the very end of a list item.
+`api/app/grounding.py`:
+
+```python
+# A line holding nothing but a list label: "a.", "ii)", "3.".
+_ITEM_LABEL = re.compile(r"(?m)^\s*(?:[a-z]|[ivx]{1,4}|\d{1,2})[.)]\s*$", re.IGNORECASE)
+# An exception word, then one to five plain words running to the end of the item.
+_TRAILING_EXCEPTION = re.compile(
+    r"\b(?:" + "|".join(re.escape(m) for m in EXCEPTION_MARKERS) + r")\s+((?:[a-z-]+ ){0,4}[a-z-]+)[.;]?$"
+)
+
+
+def trailing_exceptions(source_text: str) -> list[str]:
+    found = []
+    for item in _ITEM_LABEL.split(source_text):
+        match = _TRAILING_EXCEPTION.search(normalize(item))
+        if match:
+            found.append(match.group(1))
+    return found
+```
+
+Walking through it on clause 18. The PDF gives the labels "a." and "b." on
+lines of their own, so splitting on label-only lines yields the heading,
+item (a) and item (b). Each is normalised (lower case, whitespace
+collapsed). Item (a) ends "... incurred during hospitalization) except
+ectopic pregnancy": an exception word, two plain words, end of item. It
+matches, and "ectopic pregnancy" is returned. Item (b) ends "... during the
+policy period", with its "unless" far back and a bracket in between, so it
+does not match.
+
+Why so narrow. A phrase of a few words with no punctuation, closing an
+item, can be copied without understanding it. Anything longer ("unless such
+surgery is necessitated by an Accident, Burn or Cancer, and is certified
+by ...") is a condition with parts, and deciding where it ends is reading,
+which is the model's job and the existing check's.
+
+It is applied where the model's exceptions are filtered, after the cache,
+so no clause is analysed again. `api/app/pipeline/analyze.py`, in
+`_analyze_batch()`:
+
+```python
+kept = [e for e in analysis.exceptions if verify_exception(e, text_by_id[key])]
+...
+if analysis.clause_type == "exclusion":
+    kept += [
+        e for e in trailing_exceptions(text_by_id[key])
+        if not any(e in normalize(k) for k in kept)
+    ]
+analysis.exceptions = kept
+```
+
+Exclusions only, because the rule that reads exceptions in code
+(`naming_exclusions`) reads only exclusions. Nothing is added that the
+model already returned.
+
+And the bracket fix from M38, unchanged, in `verify_exception`:
+
+```python
+_CLOSED_BRACKET = re.compile(r"\([^()]*\)")
+...
+        if _MARKER.search(_CLOSED_BRACKET.sub(" ", sentence_so_far)):
+            return True
+```
+
+## Its reach, with no model
+
+Every stored exception on the three policies, before and after:
+
+```
+before: 17 exceptions
+after the new rule alone: 18      added:   Star 18, "ectopic pregnancy"
+after both changes:       17      added:   Star 18, "ectopic pregnancy"
+                                  dropped: Star 18, "lawful medical termination of
+                                           pregnancy during the Policy Period"
+```
+
+One line added and one removed, both on the same clause, and nothing else
+on any policy. Clause 18's stored exceptions are now the two the clause
+states:
+
+```
+"due to an accident"
+"ectopic pregnancy"
+```
+
+`evals/compare_requests.py` reports that 7 of the 114 eval questions send a
+different request: the same seven as in M43, all on Star's policy with
+clause 18 in their prompt.
+
+## Measured
+
+Three arms. BASE is `main`. A is the new rule alone, so the false exception
+is still there beside the true one. A+B is both changes. Three fresh
+answers per question per arm. Ollama 0.35.1, 13 October 2026. BASE's
+numbers are M43's two sessions; A was run in the second of those; A+B in
+that session and again after a server restart.
+
+Right answers of three:
+
+| question | expected | BASE | A | A+B |
+|---|---|---|---|---|
+| `star-caesarean` | not_covered | 3, 3 ✓ | 3 ✓ | 3, 3 ✓ |
+| `star-gallstones-no-timing` | insufficient_information | 3, 3 ✓ | 2 ✓ | 3, 3 ✓ |
+| termination, planned | not_covered | 3, 3 ✓ | 3 ✓ | 3, 3 ✓ |
+| lost baby at eleven weeks | not_covered | 3, 3 ✓ | 3 ✓ | 3, 3 ✓ |
+| miscarriage after a fall | conditional | 0, 0 ✗ | 0 ✗ | 0, 0 ✗ |
+| pregnancy in the tube | conditional | 3, 3 ✓ | 3 ✓ | 3, 3 ✓ |
+| caesarean after a scooter | not_covered | 0, 0 ✗ | 0 ✗ | 0, 0 ✗ |
+| **right by majority** | | **5 of 7** | **5 of 7** | **5 of 7** |
+
+For comparison, the bracket fix alone (M43) scored 4 of 7.
+
+**The score did not move.** The same two questions are wrong in every arm.
+What changed is underneath.
+
+*The ordinary caesarean is now read correctly the first time.* In M38 and
+M43 this question was right only because the model's wrong first answer
+(`covered`, citing clause 18) had a shape the safety rule catches. With
+both changes, both printed samples refuse it on the first answer:
+
+> not_covered, citing 18 —
+> "... 'Medical treatment expenses traceable to childbirth (including
+> complicated deliveries and caesarean sections incurred during
+> hospitalization) except ectopic pregnancy' are excluded. This exclusion
+> applies to the treatment of childbirth and caesarean sections ..."
+
+With the bracket fix alone it had answered `conditional` in 2 of 3. Why the
+true exception being printed makes the difference was not investigated.
+
+*The ectopic pregnancy is paid, and once for the right reason.* The code's
+lookup now returns nothing for this question (the stored exception
+"ectopic pregnancy" shares "pregnancy" with it), so the safety rule stays
+out of the way. Two samples printed:
+
+> sample 1: "Clause 18 (18) of the policy covers maternity expenses, except
+> for ectopic pregnancy. Since the situation described is an ectopic
+> pregnancy, clause 18 (18) does not apply."
+>
+> sample 2: "... Since this is not an ectopic pregnancy, the claim is
+> covered."
+
+The first is the only answer in any arm of M42 to M44 that connects
+"growing in my fallopian tube" to the exception, though it also says the
+clause "covers" maternity, which it does not. The second reaches the right
+verdict by reasoning that is wrong twice. So this question is right 6 of 6
+by verdict and about half right by reasoning, on two samples.
+
+*The caesarean after a scooter is still wrong, for a reason that is now
+visible.* The true exception contains "pregnancy" as well, the question
+says "eight months pregnant", and the guard stands the safety rule down
+exactly as the false exception made it do. The guard cannot tell that
+"pregnant" here describes a delivery and not an ectopic pregnancy. It
+matches word stems. This is the third item on M43's list and nothing here
+addresses it.
+
+## Why it was kept, when the score is the same
+
+M11 kept a change on these grounds and this is the same case: it is
+verdict-neutral and it stops the system asserting something false about a
+policy in its own voice. Before, the prompt told the model that Star's
+maternity exclusion "does NOT apply" to lawful termination of pregnancy.
+Now the line under clause 18 says what the clause says.
+
+It also passes the test the bracket fix failed twice. No question that was
+right is wrong: the comparison is seven for seven by name, in two sessions
+for the arm that was merged.
+
+And the two wrong answers are now attributable. Under BASE, the scooter
+question was wrong because of a falsehood in the stored data. Under A+B it
+is wrong because a word-stem guard cannot tell a delivery from an ectopic
+pregnancy. The first was a defect in the data; the second is a known limit
+of a named piece of code.
+
+`PROMPT_VERSION` is now `v66-true-exceptions`. No prompt wording changed,
+but what is printed under one clause did.
+
+## What was not done
+
+- **The scooter question and the fall question are still wrong**, 6 of 6
+  each. The list of known wrong answers stays at thirteen.
+- **Exceptions are still stored per clause, not per lettered item.** On
+  clause 18 "due to an accident" belongs to miscarriage and is printed over
+  childbirth too. That is what the model follows on the scooter question.
+  Storing them per item would mean changing the analysis schema and
+  re-analysing every policy.
+- **The new rule found one exception on three policies.** It has been shown
+  to do one thing. The survey above lists sixty-two exception words with no
+  stored exception; the rule is deliberately too narrow to reach the others.
+- **Documents already analysed in the app keep their old exceptions.** The
+  check runs when a document is analysed. A policy uploaded before this
+  change has to be uploaded again to get the corrected list. The eval
+  rebuilds its clauses from the cache on every run, so it sees the change.
+- **`evals/REPORT.md` covers the synthetic sets only**, none of whose
+  requests changed. It was regenerated for the new version stamp: 40
+  replayed, 0 regenerated.
+- **Two sessions, one day**, for the merged arm; one session for arm A.
+
+## Check it yourself
+
+```bash
+# the three new tests, no model
+cd api && .venv/Scripts/python -m pytest tests/test_grounding.py -q -k "closed_bracket or list_item or long_condition"
+
+# the seven questions (needs Star's PDF: python evals/real/fetch_policies.py)
+cd .. && api/.venv/Scripts/python evals/run_scenario_eval.py --no-report --resample --repeats 3 \
+  --policy samples/real/star-arogya-sanjeevani.pdf \
+  --cases evals/real/scenarios-star-heldout-maternity.json
+```
+
+**Predict before you look:** the new rule reads "except ectopic pregnancy"
+because those words end item (a). Suppose the insurer had printed the clause
+as one paragraph, with "a." and "b." inline: "... except ectopic pregnancy
+b. Expenses towards miscarriage ...". What does `trailing_exceptions`
+return?
+
+<details>
+<summary>Answer</summary>
+
+Nothing. The rule finds the end of an item by splitting on lines that hold
+only a label, and there is no such line, so the whole clause is one item.
+That item ends "... during the policy period", which is not an exception
+word followed by a few plain words. The exception would be missed, the
+false one would still be dropped by the bracket fix, and this clause would
+be back to the state M43 measured at 4 of 7. The rule depends on how the
+PDF happened to lay the clause out. It is a narrow reading of one layout,
+which is what it was built as, and why the entry says it has been shown to
+do one thing.
 </details>

@@ -260,6 +260,39 @@ _MARKER = re.compile(r"\b(?:" + "|".join(re.escape(m) for m in EXCEPTION_MARKERS
 _SENTENCE_END = re.compile(r"[.!?]\s")
 
 
+# A bracket that has opened and closed. An exception word inside it governs
+# only what is inside: in "miscarriage (unless due to an accident) and lawful
+# medical termination of pregnancy", the "unless" does not reach termination.
+# Measured twice on its own and reverted both times (it scored worse); kept
+# only together with trailing_exceptions below, which restores the true
+# exception whose job the false one had been doing by accident.
+_CLOSED_BRACKET = re.compile(r"\([^()]*\)")
+# A line holding nothing but a list label: "a.", "ii)", "3.".
+_ITEM_LABEL = re.compile(r"(?m)^\s*(?:[a-z]|[ivx]{1,4}|\d{1,2})[.)]\s*$", re.IGNORECASE)
+# An exception word, then one to five plain words running to the end of the item.
+_TRAILING_EXCEPTION = re.compile(
+    r"\b(?:" + "|".join(re.escape(m) for m in EXCEPTION_MARKERS) + r")\s+((?:[a-z-]+ ){0,4}[a-z-]+)[.;]?$"
+)
+
+
+def trailing_exceptions(source_text: str) -> list[str]:
+    """Exceptions a clause states at the very end of a list item, read by grammar.
+
+    The model is asked for a clause's exceptions and does not always return
+    them all: Star's maternity exclusion ends its first item "... except
+    ectopic pregnancy" and that was never extracted. Only the plainest shape is
+    read here - a few words after the exception word, with no punctuation,
+    running to the end of the item - because anything longer is a condition
+    that needs reading, not a phrase that can be copied.
+    """
+    found = []
+    for item in _ITEM_LABEL.split(source_text):
+        match = _TRAILING_EXCEPTION.search(normalize(item))
+        if match:
+            found.append(match.group(1))
+    return found
+
+
 def verify_exception(span: str, source_text: str) -> bool:
     """True if `span` is a carve-out the clause actually states.
 
@@ -274,7 +307,7 @@ def verify_exception(span: str, source_text: str) -> bool:
     start = haystack.find(needle)
     while start != -1:
         sentence_so_far = _SENTENCE_END.split(haystack[:start])[-1]
-        if _MARKER.search(sentence_so_far):
+        if _MARKER.search(_CLOSED_BRACKET.sub(" ", sentence_so_far)):
             return True
         start = haystack.find(needle, start + 1)
     return False
