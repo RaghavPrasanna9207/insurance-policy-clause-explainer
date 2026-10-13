@@ -44,7 +44,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from app.config import settings
-from app.grounding import QuoteCheck, verified_prefix, verify_citations
+from app.grounding import QuoteCheck, plain, verified_prefix, verify_citations
 from app.llm import client
 from app.llm.prompts import (
     FACTS_SYSTEM,
@@ -819,7 +819,7 @@ async def narrow(
 # measured, instead lets the insured choose which policy settles first. Matched
 # on the subject they share; what each one decides is left to the model to read.
 _ANOTHER_POLICY = re.compile(
-    r"\brateable\b|\bcontribution\b|\b(?:other|multiple) (?:polic(?:y|ies)|insurance)\b",
+    r"\brateable\b|\bcontribution\b|\b(?:other|multiple)\s+(?:polic(?:y|ies)|insurance)\b",
     re.IGNORECASE,
 )
 
@@ -1690,6 +1690,11 @@ async def run_scenario(
     only way to learn whether a verdict is stable is to ask again. Nothing
     resampled is written back, so the stored answer remains the baseline.
     """
+    # A phone keyboard types "don’t" with a curly apostrophe, and a pasted
+    # question may carry line breaks or doubled spaces. Every lookup below
+    # matches plain text: "I don’t have another policy" was read as holding
+    # one, because the rule that spots a negation is spelled with "don't".
+    scenario = plain(scenario)
     facts = await extract_facts(scenario)
     missing = missing_facts(facts)
 

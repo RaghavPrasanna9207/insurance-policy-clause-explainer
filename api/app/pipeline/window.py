@@ -70,7 +70,7 @@ _SIDE = {
 # finds 1.6 alone; the others spell their numbers ("sixty days") and their
 # windows came from analysis.
 _STATED_WINDOW = re.compile(
-    r"\b(\d+)\s*days?\b[^.]{0,80}?\b(?:(?:prior\s+to|preceding|before)\s+(?:the\s+)?(?:date\s+of\s+)?admission"
+    r"\b(\d+)\)?(?:-|\s*)days?\b[^.]{0,80}?\b(?:(?:prior\s+to|preceding|before)\s+(?:the\s+)?(?:date\s+of\s+)?admission"
     r"|(?:post|following|after)\s+(?:the\s+)?(?:date\s+of\s+)?discharge)", re.IGNORECASE)
 
 

@@ -42,7 +42,8 @@ from enum import StrEnum
 # wins, and is not about them.
 # "PED" too, case-sensitive: HDFC heads its option "PED waiting period
 # modification", and the lower-case letters turn up inside words ("speed").
-_PRE_EXISTING = re.compile(r"(?i:pre[\s-]?existing)|\bPED\b")
+# `[\s-]*`, not `?`: broken at a line end it reads "pre- existing" here.
+_PRE_EXISTING = re.compile(r"(?i:pre[\s-]*existing)|\bPED\b")
 _OPENING_CHARS = 60
 # A period that bars only the treatments its clause lists (IRDAI's "Specified
 # disease/procedure waiting period", maternity), recognised the same way. Only
@@ -59,7 +60,8 @@ _LISTED = re.compile(r"specified|maternity", re.IGNORECASE)
 # line; name that section here if a real policy has one.
 _GENERAL_SECTION = re.compile(r"wait|exclu", re.IGNORECASE)
 _HEADED_WAIT = re.compile(r"waiting\s+period", re.IGNORECASE)
-_DURATION = re.compile(r"\b(\d+)\s*(day|month|year)s?\b", re.IGNORECASE)
+# "24 months", "24-month", "twenty four (24) months".
+_DURATION = re.compile(r"\b(\d+)\)?(?:-|\s*)(day|month|year)s?\b", re.IGNORECASE)
 _DAYS_PER = {"day": 1, "month": 30, "year": 365}
 # The list is quoted into the line only up to this length. M23 set 600, which
 # left Star's ~1,970-character clause unquoted, and its dengue answer applied

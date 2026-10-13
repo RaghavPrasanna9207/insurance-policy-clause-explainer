@@ -73,16 +73,49 @@ _TRAILING_REF = re.compile(r"[\s.,;:]*[\[(][^\[\]]{0,60}[\])]\s*$")
 MIN_QUOTE_CHARS = 25
 
 
+# A hyphen with whitespace after it, between two word characters: a word the
+# PDF broke at the end of a line ("pre-\nexisting", "para-\nsurgical").
+_LINE_END_HYPHEN = re.compile(r"(?<=\w)-\s+(?=\w)")
+
+
+def plain(text: str) -> str:
+    """The same words in plain characters, on one line. Case is kept.
+
+    Ligatures are split ("fi" set as one character becomes two), curly quotes
+    and dashes become ASCII, and every run of whitespace, line breaks included,
+    becomes one space. None of those say anything about what a clause or a
+    question means, so no rule that reads text should see them.
+    """
+    text = unicodedata.normalize("NFKC", text)
+    for fancy, ascii_char in _PUNCTUATION_MAP.items():
+        text = text.replace(fancy, ascii_char)
+    return _WHITESPACE.sub(" ", text).strip()
+
+
 def normalize(text: str) -> str:
     """Reduce text to what a quotation check should actually compare.
 
     Collapses whitespace (PDF reflow), unifies typographic punctuation, and
     lowercases. Deliberately preserves every word and their order.
     """
-    text = unicodedata.normalize("NFKC", text)
-    for fancy, plain in _PUNCTUATION_MAP.items():
-        text = text.replace(fancy, plain)
-    return _WHITESPACE.sub(" ", text).strip().lower()
+    return plain(text).lower()
+
+
+def _quotable(text: str) -> str:
+    """`normalize`, with a word broken by a hyphen at a line end rejoined.
+
+    A correct quotation of "pre-existing" failed against a clause printed
+    "pre-\\nexisting": 12 places in the two real policies measured. Applied to
+    both sides of the comparison, so it cannot make differing words match.
+
+    QUOTATIONS ONLY, and that is a measured decision, not an oversight. The
+    same join in `verify_exception` lets through a true exception that the
+    line break had been hiding (HDFC's Geography clause: "except under Section
+    B-\\n2.8 ..."). Printing it changed 8 HDFC questions' requests and one of
+    them, dengue at four months, went from right 3/3 to wrong 3/3 on an
+    unrelated clause. So the exception check still reads the unjoined text.
+    """
+    return _LINE_END_HYPHEN.sub("-", normalize(text))
 
 
 @dataclass
@@ -122,13 +155,13 @@ def _verify_elided(quote: str, source_text: str) -> bool:
     mattered; that is a question about meaning, and this check is about
     provenance. The elision stays visible in the quotation the reader is shown.
     """
-    pieces = [p for p in (normalize(line) for line in quote.split("\n")) if p]
+    pieces = [p for p in (_quotable(line) for line in quote.split("\n")) if p]
     # One piece would have passed the contiguous check already; reaching here
     # with one piece means it genuinely is not in the clause.
     if len(pieces) < 2:
         return False
 
-    haystack = normalize(source_text)
+    haystack = _quotable(source_text)
     cursor = 0
     for piece in pieces:
         if len(piece) < MIN_QUOTE_CHARS:
@@ -145,13 +178,13 @@ def verify_quote(quote: str, source_text: str) -> tuple[bool, str]:
     if not quote or not quote.strip():
         return False, "empty quote"
 
-    normalized_quote = _TRAILING_REF.sub("", normalize(quote)).strip()
+    normalized_quote = _TRAILING_REF.sub("", _quotable(quote)).strip()
     if len(normalized_quote) < MIN_QUOTE_CHARS:
         return False, f"quote too short to verify (<{MIN_QUOTE_CHARS} chars)"
 
     # The strictest reading first, so an unbroken quotation is still checked
     # exactly as it always was, and the elision path is only ever a fallback.
-    if normalized_quote in normalize(source_text):
+    if normalized_quote in _quotable(source_text):
         return True, ""
     if _verify_elided(quote, source_text):
         return True, ""
@@ -182,11 +215,11 @@ def verified_prefix(quote: str, source_text: str) -> str | None:
     so what the reader sees is still a copy of the model's quotation, shortened.
     """
     tokens = quote.split()
-    haystack = normalize(source_text)
-    whole = len(normalize(quote))
+    haystack = _quotable(source_text)
+    whole = len(_quotable(quote))
     for k in range(len(tokens) - 1, 0, -1):
         kept = " ".join(tokens[:k]).rstrip(" ,;:")
-        needle = normalize(kept)
+        needle = _quotable(kept)
         if len(needle) < MIN_QUOTE_CHARS or len(needle) < MIN_KEPT_SHARE * whole:
             return None
         if needle in haystack:
@@ -260,6 +293,54 @@ _MARKER = re.compile(r"\b(?:" + "|".join(re.escape(m) for m in EXCEPTION_MARKERS
 _SENTENCE_END = re.compile(r"[.!?]\s")
 
 
+# A bracket that has opened and closed. An exception word inside it governs
+# only what is inside: in "miscarriage (unless due to an accident) and lawful
+# medical termination of pregnancy", the "unless" does not reach termination.
+# Measured twice on its own and reverted both times (it scored worse); kept
+# only together with trailing_exceptions below, which restores the true
+# exception whose job the false one had been doing by accident.
+_CLOSED_BRACKET = re.compile(r"\([^()]*\)")
+# A line holding nothing but a list label: "a.", "ii)", "3.".
+#
+# Matched on normalised text, where line breaks are already spaces, so it makes
+# no difference whether the PDF puts each label on a line of its own or runs
+# the items together in a paragraph. The first version split on label-only
+# LINES and so read the layout, not the clause.
+_ITEM_LABEL = re.compile(r"(?:^|\s)\(?(?:[a-z]|[ivx]{1,4}|\d{1,2})[.)](?=\s|$)")
+# An exception word, then one to five plain words running to the end of the item.
+_TRAILING_EXCEPTION = re.compile(
+    r"\b(?:" + "|".join(re.escape(m) for m in EXCEPTION_MARKERS) + r")\s+((?:[a-z-]+ ){0,4}[a-z-]+)[.;]?$"
+)
+
+
+_MAX_ITEMS = 4
+
+
+def trailing_exceptions(source_text: str) -> list[str]:
+    """Exceptions a clause states at the very end of a list item, read by grammar.
+
+    The model is asked for a clause's exceptions and does not always return
+    them all: Star's maternity exclusion ends its first item "... except
+    ectopic pregnancy" and that was never extracted. Only the plainest shape is
+    read here - a few words after the exception word, with no punctuation,
+    running to the end of the item - because anything longer is a condition
+    that needs reading, not a phrase that can be copied.
+
+    Nothing is read from a clause with many items. An exception is stored for
+    the whole clause, so one that ends item (o) of sixteen general exclusions
+    ("... unless necessitated by an accident") would be printed over all
+    sixteen. HDFC's general exclusions clause has exactly that item.
+    """
+    items = [i.strip() for i in _ITEM_LABEL.split(normalize(source_text)) if i.strip()]
+    # ponytail: exceptions are per clause, so a long list is skipped outright.
+    # 4 = a heading and three items; Star's maternity clause is 3, HDFC's
+    # general exclusions 17+, nothing between was measured. Storing exceptions
+    # per item would remove the need for this.
+    if len(items) > _MAX_ITEMS:
+        return []
+    return [m.group(1) for m in map(_TRAILING_EXCEPTION.search, items) if m]
+
+
 def verify_exception(span: str, source_text: str) -> bool:
     """True if `span` is a carve-out the clause actually states.
 
@@ -274,7 +355,7 @@ def verify_exception(span: str, source_text: str) -> bool:
     start = haystack.find(needle)
     while start != -1:
         sentence_so_far = _SENTENCE_END.split(haystack[:start])[-1]
-        if _MARKER.search(sentence_so_far):
+        if _MARKER.search(_CLOSED_BRACKET.sub(" ", sentence_so_far)):
             return True
         start = haystack.find(needle, start + 1)
     return False

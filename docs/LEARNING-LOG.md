@@ -15676,6 +15676,10 @@ a second session could not have changed the decision.
   prompt is true and what it does to the answer are separate
   measurements.**
 
+(Later: both were closed in M44, which removed the false exception together
+with a rule that reads the missing one from the clause. M42 and M43 are the
+measurements that led there.)
+
 Still open, unchanged: the false exception on Star's clause 18, and the
 missing one (ectopic pregnancy). A reader able to apply clause 18 on a
 first reading would need neither the false line nor the check; whether a
@@ -16860,6 +16864,9 @@ Not built here; recorded so the next attempt starts further on.
 Each is its own measured change. All three would have to hold on the same
 seven questions.
 
+(Later: M44 did the first, and found the third came with it. The second is
+still open.)
+
 ## What was not done
 
 - **Nothing was merged in `api/`.** The system answers these seven
@@ -16907,4 +16914,747 @@ history. A complete and correct exception list removes the fault this
 milestone found and leaves this one. The guard is a word match in both
 directions, which is the limit M33 recorded when it refused a rule that
 relied on a word *not* being shared.
+</details>
+
+---
+
+# M44 — The missing exception read from the clause, and the false one finally removed
+
+## The problem
+
+Star Health's maternity exclusion has two lettered parts:
+
+```
+18.  Maternity - Code Excl 18
+a. Medical treatment expenses traceable to childbirth (including complicated
+   deliveries and caesarean sections incurred during hospitalization) except
+   ectopic pregnancy
+b. Expenses towards miscarriage (unless due to an accident) and lawful
+   medical termination of pregnancy during the Policy Period
+```
+
+When the policy is analysed, the model is asked for each clause's
+exceptions, and code keeps the ones that pass a check. For this clause the
+stored list was:
+
+```
+"due to an accident"
+"lawful medical termination of pregnancy during the Policy Period"
+```
+
+One is false (termination is excluded, not excepted) and one true exception
+is missing (ectopic pregnancy). The list is used twice: it is printed under
+the clause in the reasoning prompt, as "EXCEPTIONS - this clause does NOT
+apply when: ...", and it is read by code, which stands a safety rule down
+when the person's question shares a word with one of the exceptions.
+
+A fix for the false one had now been measured twice and reverted twice. M43
+found why it kept losing: with the false exception gone, nothing restrained
+that safety rule on a question about an ectopic pregnancy, and the rule
+told the model to refuse a claim the policy pays. The false exception had
+been restraining it by accident, because it shares the word "pregnancy"
+with the true one that was never stored. M43 ended with a list of what
+would have to be true for the fix to be kept. The first item was: get the
+true exception into the list.
+
+## Measured before building: how many exceptions are missing
+
+The obvious repair is general: wherever a clause has an exception word
+("unless", "except", "other than", "save for", "provided that", "shall not
+apply") with no stored exception after it, copy the words that follow. So
+every such place was listed first, on all three policies, with no model
+call:
+
+| policy | clauses | exception words | with a stored exception after | without |
+|---|---|---|---|---|
+| synthetic | 40 | 6 | 3 | 3 |
+| Star Arogya Sanjeevani | 79 | 20 | 6 | 14 |
+| HDFC Optima Secure | 115 | 52 | 7 | 45 |
+
+(The "with / without" split was made by a loose test, a stored exception
+appearing within 200 characters after the word, so the last two columns are
+approximate.)
+
+Sixty-two places. Reading them settled what not to build. Most are not
+exceptions a person could claim under. They are conditions ("provided that
+such expenses relate to the same condition"), items of a list of
+non-payable things ("food charges (other than patient's diet provided by
+hospital)"), or procedure ("except on grounds of established fraud"). And
+the ones that are real exceptions sit inside long clauses with many
+lettered items. HDFC's general exclusions clause has at least sixteen items, and one
+of them ends "unless necessitated by an accident". Exceptions are stored
+per clause, not per item, so copying that phrase would print "this clause
+does NOT apply when: necessitated by an accident" over all of them, and
+would stand the safety rule down for any HDFC question that mentions an
+accident. That is the same fault as the false exception on clause 18, made
+by code this time, on a clause every HDFC question meets.
+
+**Rejected: a general "copy what follows every exception word".** It would
+change the prompt of most real-policy questions and assert more falsehoods
+than it removed.
+
+## What was built
+
+Only the plainest shape is read: an exception word followed by one to five
+plain words, with no punctuation, running to the very end of a list item.
+`api/app/grounding.py`:
+
+```python
+# A list label: "a.", "(b)", "ii)", "3.". Matched on normalised text, where
+# line breaks are already spaces.
+_ITEM_LABEL = re.compile(r"(?:^|\s)\(?(?:[a-z]|[ivx]{1,4}|\d{1,2})[.)](?=\s|$)")
+# An exception word, then one to five plain words running to the end of the item.
+_TRAILING_EXCEPTION = re.compile(
+    r"\b(?:" + "|".join(re.escape(m) for m in EXCEPTION_MARKERS) + r")\s+((?:[a-z-]+ ){0,4}[a-z-]+)[.;]?$"
+)
+_MAX_ITEMS = 4
+
+
+def trailing_exceptions(source_text: str) -> list[str]:
+    items = [i.strip() for i in _ITEM_LABEL.split(normalize(source_text)) if i.strip()]
+    if len(items) > _MAX_ITEMS:
+        return []
+    return [m.group(1) for m in map(_TRAILING_EXCEPTION.search, items) if m]
+```
+
+Walking through it on clause 18. The text is normalised first (lower case,
+every run of whitespace including line breaks collapsed to one space), then
+cut wherever a list label stands: "18.", "a.", "b.". That leaves three
+items: the heading, item (a) and item (b). Item (a) ends "... incurred
+during hospitalization) except ectopic pregnancy": an exception word, two
+plain words, end of item. It matches, and "ectopic pregnancy" is returned.
+Item (b) ends "... during the policy period", with its "unless" far back
+and a bracket in between, so it does not match.
+
+That is the second version of this function. The first is Failure 106,
+below, and `_MAX_ITEMS` is explained there.
+
+Why so narrow. A phrase of a few words with no punctuation, closing an
+item, can be copied without understanding it. Anything longer ("unless such
+surgery is necessitated by an Accident, Burn or Cancer, and is certified
+by ...") is a condition with parts, and deciding where it ends is reading,
+which is the model's job and the existing check's.
+
+It is applied where the model's exceptions are filtered, after the cache,
+so no clause is analysed again. `api/app/pipeline/analyze.py`, in
+`_analyze_batch()`:
+
+```python
+kept = [e for e in analysis.exceptions if verify_exception(e, text_by_id[key])]
+...
+if analysis.clause_type == "exclusion":
+    kept += [
+        e for e in trailing_exceptions(text_by_id[key])
+        if not any(e in normalize(k) for k in kept)
+    ]
+analysis.exceptions = kept
+```
+
+Exclusions only, because the rule that reads exceptions in code
+(`naming_exclusions`) reads only exclusions. Nothing is added that the
+model already returned.
+
+And the bracket fix from M38, unchanged, in `verify_exception`:
+
+```python
+_CLOSED_BRACKET = re.compile(r"\([^()]*\)")
+...
+        if _MARKER.search(_CLOSED_BRACKET.sub(" ", sentence_so_far)):
+            return True
+```
+
+## Its reach, with no model
+
+Every stored exception on the three policies, before and after:
+
+```
+before: 17 exceptions
+after the new rule alone: 18      added:   Star 18, "ectopic pregnancy"
+after both changes:       17      added:   Star 18, "ectopic pregnancy"
+                                  dropped: Star 18, "lawful medical termination of
+                                           pregnancy during the Policy Period"
+```
+
+One line added and one removed, both on the same clause, and nothing else
+on any policy. Clause 18's stored exceptions are now the two the clause
+states:
+
+```
+"due to an accident"
+"ectopic pregnancy"
+```
+
+`evals/compare_requests.py` reports that 7 of the 114 eval questions send a
+different request: the same seven as in M43, all on Star's policy with
+clause 18 in their prompt.
+
+## Measured
+
+Three arms. BASE is `main`. A is the new rule alone, so the false exception
+is still there beside the true one. A+B is both changes. Three fresh
+answers per question per arm. Ollama 0.35.1, 13 October 2026. BASE's
+numbers are M43's two sessions; A was run in the second of those; A+B in
+that session and again after a server restart.
+
+Right answers of three:
+
+| question | expected | BASE | A | A+B |
+|---|---|---|---|---|
+| `star-caesarean` | not_covered | 3, 3 ✓ | 3 ✓ | 3, 3 ✓ |
+| `star-gallstones-no-timing` | insufficient_information | 3, 3 ✓ | 2 ✓ | 3, 3 ✓ |
+| termination, planned | not_covered | 3, 3 ✓ | 3 ✓ | 3, 3 ✓ |
+| lost baby at eleven weeks | not_covered | 3, 3 ✓ | 3 ✓ | 3, 3 ✓ |
+| miscarriage after a fall | conditional | 0, 0 ✗ | 0 ✗ | 0, 0 ✗ |
+| pregnancy in the tube | conditional | 3, 3 ✓ | 3 ✓ | 3, 3 ✓ |
+| caesarean after a scooter | not_covered | 0, 0 ✗ | 0 ✗ | 0, 0 ✗ |
+| **right by majority** | | **5 of 7** | **5 of 7** | **5 of 7** |
+
+For comparison, the bracket fix alone (M43) scored 4 of 7.
+
+**The score did not move.** The same two questions are wrong in every arm.
+What changed is underneath.
+
+*The ordinary caesarean is now read correctly the first time.* In M38 and
+M43 this question was right only because the model's wrong first answer
+(`covered`, citing clause 18) had a shape the safety rule catches. With
+both changes, both printed samples refuse it on the first answer:
+
+> not_covered, citing 18 —
+> "... 'Medical treatment expenses traceable to childbirth (including
+> complicated deliveries and caesarean sections incurred during
+> hospitalization) except ectopic pregnancy' are excluded. This exclusion
+> applies to the treatment of childbirth and caesarean sections ..."
+
+With the bracket fix alone it had answered `conditional` in 2 of 3. Why the
+true exception being printed makes the difference was not investigated.
+
+*The ectopic pregnancy is paid, and once for the right reason.* The code's
+lookup now returns nothing for this question (the stored exception
+"ectopic pregnancy" shares "pregnancy" with it), so the safety rule stays
+out of the way. Two samples printed:
+
+> sample 1: "Clause 18 (18) of the policy covers maternity expenses, except
+> for ectopic pregnancy. Since the situation described is an ectopic
+> pregnancy, clause 18 (18) does not apply."
+>
+> sample 2: "... Since this is not an ectopic pregnancy, the claim is
+> covered."
+
+The first is the only answer in any arm of M42 to M44 that connects
+"growing in my fallopian tube" to the exception, though it also says the
+clause "covers" maternity, which it does not. The second reaches the right
+verdict by reasoning that is wrong twice. So this question is right 6 of 6
+by verdict and about half right by reasoning, on two samples.
+
+*The caesarean after a scooter is still wrong, for a reason that is now
+visible.* The true exception contains "pregnancy" as well, the question
+says "eight months pregnant", and the guard stands the safety rule down
+exactly as the false exception made it do. The guard cannot tell that
+"pregnant" here describes a delivery and not an ectopic pregnancy. It
+matches word stems. This is the third item on M43's list and nothing here
+addresses it.
+
+## Why it was kept, when the score is the same
+
+M11 kept a change on these grounds and this is the same case: it is
+verdict-neutral and it stops the system asserting something false about a
+policy in its own voice. Before, the prompt told the model that Star's
+maternity exclusion "does NOT apply" to lawful termination of pregnancy.
+Now the line under clause 18 says what the clause says.
+
+It also passes the test the bracket fix failed twice. No question that was
+right is wrong: the comparison is seven for seven by name, in two sessions
+for the arm that was merged.
+
+And the two wrong answers are now attributable. Under BASE, the scooter
+question was wrong because of a falsehood in the stored data. Under A+B it
+is wrong because a word-stem guard cannot tell a delivery from an ectopic
+pregnancy. The first was a defect in the data; the second is a known limit
+of a named piece of code.
+
+`PROMPT_VERSION` is now `v66-true-exceptions`. No prompt wording changed,
+but what is printed under one clause did.
+
+## Failure 106: the first version read the page layout, not the clause
+
+The version that was measured above found the end of a list item like this:
+
+```python
+# A line holding nothing but a list label: "a.", "ii)", "3.".
+_ITEM_LABEL = re.compile(r"(?m)^\s*(?:[a-z]|[ivx]{1,4}|\d{1,2})[.)]\s*$", re.IGNORECASE)
+...
+    for item in _ITEM_LABEL.split(source_text):
+        match = _TRAILING_EXCEPTION.search(normalize(item))
+```
+
+It split the raw text on lines containing nothing but a label. Star's PDF
+happens to put "a." and "b." on lines of their own, so it worked, and the
+entry's first draft recorded the consequence as a limitation: printed as one
+paragraph, "... except ectopic pregnancy b. Expenses towards miscarriage
+...", the same clause would yield nothing, the false exception would still
+be dropped by the bracket fix, and the clause would be back in the state
+M43 measured at 4 of 7.
+
+That is not a limitation to write down. It is a rule that works by accident
+of typesetting. Whether a label sits on its own line is decided by the
+insurer's page layout and by how the PDF library reflows it, and neither
+has anything to do with what the clause says. The fix was to normalise
+first and then look for labels, so that a line break and a space are the
+same thing:
+
+```python
+_ITEM_LABEL = re.compile(r"(?:^|\s)\(?(?:[a-z]|[ivx]{1,4}|\d{1,2})[.)](?=\s|$)")
+...
+    items = [i.strip() for i in _ITEM_LABEL.split(normalize(source_text)) if i.strip()]
+```
+
+A test now runs the clause through four layouts (labels on their own lines;
+one paragraph; "(a)" and "(b)"; "i)" and "ii)") and expects "ectopic
+pregnancy" from each.
+
+**Making the rule see more labels exposed a second problem.** The survey at
+the top of this entry rejected a general rule because of one item in HDFC's
+general exclusions, which ends "unless necessitated by an accident": copied
+out, it would be printed over all sixteen-odd items of that clause. The
+narrow rule did not copy it, and the reason turned out to be a missing
+space. The PDF text reads "... by an accident. p.any treatment", with no
+space after "p.", so "p." was not recognised as a label and the item did
+not appear to end there. With a space it is copied:
+
+```
+"o. Dental treatment unless necessitated by an accident. p.Any treatment ..."   -> []
+"o. Dental treatment unless necessitated by an accident. p. Any treatment ..."  -> ['necessitated by an accident']
+```
+
+So the rule's good behaviour on HDFC also rested on typesetting. The
+underlying fault is the one M38 first named: an exception is stored for the
+whole clause and not for the item it belongs to. A short clause can
+tolerate that; a list of sixteen cannot. Hence the limit: a clause that
+splits into more than `_MAX_ITEMS` (four) parts yields nothing.
+
+```python
+if len(items) > _MAX_ITEMS:
+    return []
+```
+
+Four is a heading and three items. Star's maternity clause is three parts
+and HDFC's general exclusions more than seventeen; no clause between those
+sizes was measured, so the number separates the two known cases and nothing
+more. It errs toward reading nothing, which is the safe direction: a
+missing exception leaves the clause's own words in front of the model,
+while a wrongly attached one is the program asserting a falsehood.
+
+**Nothing had to be measured again.** After both changes the stored
+exceptions on all three policies were listed and compared with the version
+that was sampled: the same seventeen, line for line. Identical stored
+exceptions mean identical requests, so the answers in the table above are
+the answers of this code.
+
+The lesson is about the sentence that almost shipped. "It depends on how
+the PDF lays the clause out" was written as an honest caveat, and an honest
+caveat about a defect is still a defect. **When a limitation can be stated
+as "works only if the input happens to be formatted this way", the next
+step is to fix it, and a note comes second.**
+
+## What was not done
+
+- **The scooter question and the fall question are still wrong**, 6 of 6
+  each. The list of known wrong answers stays at thirteen.
+- **Exceptions are still stored per clause, not per lettered item.** On
+  clause 18 "due to an accident" belongs to miscarriage and is printed over
+  childbirth too. That is what the model follows on the scooter question.
+  Storing them per item would mean changing the analysis schema and
+  re-analysing every policy.
+- **The new rule found one exception on three policies.** It has been shown
+  to do one thing. The survey above lists sixty-two exception words with no
+  stored exception; the rule is deliberately too narrow to reach the others.
+- **Documents already analysed in the app keep their old exceptions.** The
+  check runs when a document is analysed. A policy uploaded before this
+  change has to be uploaded again to get the corrected list. The eval
+  rebuilds its clauses from the cache on every run, so it sees the change.
+- **`evals/REPORT.md` covers the synthetic sets only**, none of whose
+  requests changed. It was regenerated for the new version stamp: 40
+  replayed, 0 regenerated.
+- **Two sessions, one day**, for the merged arm; one session for arm A.
+
+## Check it yourself
+
+```bash
+# the new tests, no model
+cd api && .venv/Scripts/python -m pytest tests/test_grounding.py -q -k "closed_bracket or list_item or long_condition or layout or long_list"
+
+# the seven questions (needs Star's PDF: python evals/real/fetch_policies.py)
+cd .. && api/.venv/Scripts/python evals/run_scenario_eval.py --no-report --resample --repeats 3 \
+  --policy samples/real/star-arogya-sanjeevani.pdf \
+  --cases evals/real/scenarios-star-heldout-maternity.json
+```
+
+**Predict before you look:** a policy has a short clause, "7. Dental a.
+Dental treatment is excluded unless necessitated by an accident. b.
+Dentures are excluded." What does `trailing_exceptions` return, and is the
+line the prompt would then print true?
+
+<details>
+<summary>Answer</summary>
+
+It returns `['necessitated by an accident']`: three parts, under the limit,
+and item (a) ends with an exception word and four plain words. The prompt
+would print "EXCEPTIONS - this clause does NOT apply when: necessitated by
+an accident" under the whole clause. That is true of item (a) and not
+stated for item (b): the policy does not say dentures are paid for after an
+accident. So even inside the limit the rule can attach an exception more
+widely than the clause does, which is the fault clause 18 itself still has
+with "due to an accident". The limit keeps the over-attachment to two or
+three items and away from sixteen. It does not remove it. Removing it means
+storing each exception with the item it belongs to.
+</details>
+
+---
+
+# M45 — Every text rule, run against the same words set differently
+
+## The problem
+
+M44's first version of a rule worked because Star's PDF prints "a." and "b."
+on lines of their own. Printed as a paragraph, the same clause would have
+been read differently (Failure 106). That is one instance of a kind of
+fault: **a rule that reads how text is typeset when it should read what the
+text says.** Where a line breaks, whether an apostrophe is straight or
+curly, whether "fi" is two characters or one ligature: none of it is in the
+policy or in the person's question. It comes from the PDF and the keyboard.
+
+This project has about fifty hand-written text patterns outside the model:
+which clause is a waiting period, how long it is, whether a question
+mentions another policy, how many cross-references a clause makes. Any of
+them could have the same fault. This milestone checks all of them.
+
+## The instrument
+
+Reading that many patterns and imagining inputs finds what one thinks to
+imagine. So the check is mechanical, and it is `evals/check_format.py`:
+
+1. Collect every compiled pattern in the pipeline's modules.
+2. Take real text: every clause of the three policies (234), and every eval
+   question (114).
+3. For each text, make copies with **only the typesetting changed**:
+
+   | for clause text | for questions |
+   |---|---|
+   | line breaks turned into spaces | straight apostrophes made curly |
+   | a hyphen at a line end joined to the next line | everything in capitals |
+   | typographic characters made ASCII (ligatures, curly quotes, dashes) | spaces doubled |
+
+4. Run each pattern on the original and on each copy. **A different number
+   of matches means the pattern's answer depends on the typesetting.**
+
+No model is involved; the clause analysis replays from the cache.
+
+A line of its output is a lead and not a verdict. Some patterns are applied
+to text that has already been normalised, so a difference on raw text never
+happens in the running program. One uses layout on purpose: the reading
+grade treats each line as a unit when a text has no full stops, because a
+list of item names has no sentences (an earlier fix, for a list that
+reported grade 94). So every lead was followed to where the pattern is
+used, and the ones that looked real were tested a second way: run the
+actual function on the clauses as stored and on the same clauses reflowed,
+and compare what comes out.
+
+What the real policies contain, which is what makes these faults reachable:
+
+```
+                 line-end     en/em    curly     ligatures
+                 hyphens      dashes   quotes    (fi, fl as one character)
+synthetic            0           0        0          0
+Star                 8          18       28         95
+HDFC                 8          52      107          0
+```
+
+The synthetic policy has none of them. It was typed for this repository in
+plain characters, so **nothing measured on the synthetic policy could ever
+have shown one of these faults.**
+
+## What it found
+
+Five faults that reach the running program, and three that are latent (the
+pattern is wrong, and no text in the three policies happens to trigger it).
+
+### 1. A correct quotation was rejected when the PDF broke a word
+
+The quotation check normalises both the model's quotation and the clause
+(lower case, whitespace collapsed) and asks whether one contains the other.
+A clause printed
+
+```
+... treatment of a pre-
+existing disease ...
+```
+
+normalises to "pre- existing", with a space. A model that quotes it as
+"pre-existing" is quoting correctly and fails the check. Tested by taking
+every sentence that spans a line-end hyphen, reflowing it, and verifying it
+against its own clause: **rejected in 12 places** across Star and HDFC, 0
+on the synthetic policy. Each is an honest quotation that would be shown to
+a user as "unverified".
+
+Fixed in `api/app/grounding.py` by joining such a break before comparing,
+on both sides:
+
+```python
+_LINE_END_HYPHEN = re.compile(r"(?<=\w)-\s+(?=\w)")
+
+def _quotable(text: str) -> str:
+    return _LINE_END_HYPHEN.sub("-", normalize(text))
+```
+
+`verify_quote`, its elided-quotation fallback and `verified_prefix` use
+`_quotable`. Because both sides get the same treatment it cannot make
+different words match; a test checks that "long-existing" still fails
+against "pre-\nexisting". After the fix: rejected in 0 places.
+
+### 2. A curly apostrophe hid a negation
+
+The rule that decides whether a person holds a second policy skips a
+sentence containing a negation, and the negation list is spelled with a
+straight apostrophe:
+
+```python
+# api/app/pipeline/scenario.py
+_NOT_HELD_NOW = re.compile(r"\b(?:no|not|never|don't|no longer|used to|previous|old|...)\b", re.IGNORECASE)
+```
+
+A phone keyboard types "don’t" with a curly one. "I don’t have another
+health policy with anyone" was therefore read as holding another policy,
+which puts a line about the contribution clause into the prompt.
+
+Fixed at the root and not in that one pattern. The question is made plain
+once, where it enters, so that every lookup, present and future, sees the
+same characters:
+
+```python
+# api/app/pipeline/scenario.py, run_scenario()
+scenario = plain(scenario)
+```
+
+```python
+# api/app/grounding.py
+def plain(text: str) -> str:
+    """The same words in plain characters, on one line. Case is kept."""
+    text = unicodedata.normalize("NFKC", text)
+    for fancy, ascii_char in _PUNCTUATION_MAP.items():
+        text = text.replace(fancy, ascii_char)
+    return _WHITESPACE.sub(" ", text).strip()
+```
+
+**New concept: NFKC.** Unicode has several ways to write what a reader sees
+as the same thing. The "fi" in "specified" can be two characters, `f` and
+`i`, or one, the ligature `ﬁ`, which typesetting software substitutes
+because it looks better. To a program they are different strings, and
+`"specified" in text` is false for the ligature form. NFKC is a standard
+normalisation that replaces such "compatibility" characters with their
+plain equivalents. It does not touch curly quotes or dashes, which are
+different characters and not alternate forms, so those are mapped by hand
+in `_PUNCTUATION_MAP`. (Earlier milestones met ligatures twice, in two
+functions, and fixed them there. This milestone's finding is that the fix
+belonged in one shared place.)
+
+### 3. Cross-references were undercounted when a phrase wrapped
+
+A clause's risk score includes how many times it sends the reader elsewhere
+("subject to", "as defined in", "specified in", ...). The pattern spells
+those phrases with ordinary spaces and was run on the clause as stored, so
+"subject\nto" across a line break did not count, and neither did "speciﬁed
+in" with a ligature. **12 clauses** of the two real policies had a lower
+count than their text warrants. Fixed by counting on plain text:
+
+```python
+# api/app/pipeline/score.py
+crossrefs = len(_RE_CROSSREF.findall(plain(seg.text)))
+```
+
+### 4. Ligatures split words in the reading grade
+
+The reading grade counts words with `[A-Za-z][A-Za-z'-]*`. A ligature is
+not in `A-Za-z`, so "speciﬁed" counted as two short words, "speci" and
+"ed". The word count differed on **57 clauses** of the real policies. The
+effect on any one score is small. Fixed by applying NFKC at the top of
+`flesch_kincaid_grade`, keeping line breaks, which that function uses.
+
+### 5, 6, 7. Latent: wrong patterns that nothing in three policies triggers
+
+| pattern | what it missed | fix |
+|---|---|---|
+| `pre[\s-]?existing` in `waiting.py` | "Pre-\nExisting", which reads "pre- existing" (two characters between) once whitespace is collapsed. Star and HDFC have this break in four clauses, none in the 60-character opening the rule reads | `pre[\s-]*existing` |
+| `(?:other\|multiple) (?:polic...)` in `scenario.py` | "multiple\npolicies". Star has this break; the clause is still found by another phrase | `\s+` |
+| `(\d+)\s*(day\|month\|year)` in three files | "24-month", "twenty four (24) months". Each real policy has one "N-day" form, outside the clauses these rules read; none has the bracketed form | `(\d+)\)?(?:-\|\s*)(day\|...)` |
+
+The duration fix had a first version worth recording. `[\s-]*` between the
+number and the unit also matches "3 - Day" in "Section 3 - Day Care
+Treatment", reading a heading as three days. The kept version allows either
+whitespace or a single hyphen, and a test pins the heading case.
+
+`per\s+day` also became `per[\s-]+day`.
+
+## Failure 107: the fix uncovered a true exception, and printing it broke an answer
+
+The line-end hyphen join was first put in `normalize()` itself, which the
+check on extracted *exceptions* also uses. The list of stored exceptions
+was compared before and after, as it has been for every change since M38,
+and it had one new line:
+
+```
+HDFC 1.20 | Section B-2.8 (E-Opinion for Critical Illness), Section B-2.9 Global
+            Health Cover (Emergency Treatments Only), ... as may be specified in
+            the Schedule of Coverage in the Policy Schedule
+```
+
+Clause 1.20 is HDFC's Geography clause:
+
+```
+This Policy provides coverage throughout the territory of India, except under Section B-
+2.8 (E-Opinion for Critical Illness), Section B-2.9 Global Health Cover ...
+```
+
+The model had extracted that exception correctly when the policy was
+analysed. The check dropped it, because the model wrote "B-2.8" and the
+clause reads "B-\n2.8". **A true exception had been thrown away by a line
+break**, the same fault as finding 1, in a different caller.
+
+Restoring it is correct. It also changes the prompt of 8 HDFC questions, so
+it was measured, three fresh answers each, old code against new in one
+server session, on the first four:
+
+| question | expected | old code | with the exception restored |
+|---|---|---|---|
+| `hdfc-typhoid-45-days` | covered | 3/3 | 2/3 |
+| `hdfc-dengue-four-months` | covered | **3/3** | **0/3** |
+| `hdfc-typhoid-20-days` | not_covered | 3/3 | 3/3 |
+| `hdfc-accident-ten-days` | covered | 3/3 | 3/3 |
+
+Dengue four months into a policy, with no earlier insurance, went from paid
+to refused. One answer printed in full:
+
+> not_covered, citing Excl01 —
+> "The claim is not covered due to the 36-month Pre-Existing Disease
+> Waiting Period (Excl01). ... which is not enough time to satisfy the
+> waiting period for a new illness like dengue."
+
+The geography exception is not mentioned. A line added under one clause
+moved the model's reading of a different one. That is Failure 28's
+mechanism (a paragraph of instructions reclassified clauses it never
+mentioned) and Failure 99's outcome (a correct addition, a worse answer),
+this time on HDFC.
+
+The remaining four questions were not run. One right answer made wrong, 3
+of 3, is enough to refuse a change under this project's rule.
+
+**What was done.** The join was moved out of `normalize()` into
+`_quotable()`, used by the quotation checks only. The exception check reads
+the text as before and the Geography exception stays dropped. After that
+the stored exceptions are again identical to M44's, and
+`evals/compare_requests.py` reports **0 of 114 questions send a different
+request**.
+
+So the system knowingly keeps one format-dependent behaviour, and the code
+says so where it happens:
+
+```python
+def _quotable(text: str) -> str:
+    """...
+    QUOTATIONS ONLY, and that is a measured decision, not an oversight. The
+    same join in `verify_exception` lets through a true exception that the
+    line break had been hiding (HDFC's Geography clause ...). Printing it
+    changed 8 HDFC questions' requests and one of them, dengue at four
+    months, went from right 3/3 to wrong 3/3 on an unrelated clause.
+    """
+```
+
+This is the third time in four milestones that making the stored data more
+correct made an answer worse (M38, M43, here). It is the same lesson as
+Concept 59 with a sharper edge: on HDFC there is no second error to go and
+find. The exception is true, the clause is right, and the model, shown one
+more true line among a hundred clauses, misapplies a different one.
+
+## What the fixes changed, measured
+
+| check | result |
+|---|---|
+| stored exceptions on three policies | identical, 17 lines |
+| eval questions whose request changes | 0 of 114 |
+| synthetic sets (classification, ranking, verdicts) | 0.973, 8 of 9, 0.925: unchanged; 40 replayed, 0 regenerated |
+| correct quotations across a line-end hyphen rejected | 12 before, 0 after |
+| backend tests | 327 pass; `api/tests/test_format.py` holds one test per fault |
+
+No answer to any eval question can have changed, because no request did.
+What changes is behaviour on inputs the eval does not contain: a question
+typed with a curly apostrophe, a quotation across a broken word, and the
+risk scores of some clauses on real policies.
+
+`PROMPT_VERSION` is unchanged: no prompt differs for any measured input.
+
+## What was not checked, and what is still wrong
+
+- **The segmenter.** Deciding where a clause starts is layout by nature:
+  font size, bold, numbering. It was built against six real PDFs and has
+  its own entries. This check ran its patterns but cannot say whether a
+  different layout would be segmented correctly; only another PDF can.
+- **The Geography exception is still dropped** (Failure 107), by decision.
+- **Sentence ends.** The exception check ends a sentence at a full stop
+  followed by a space, so "Rs. 5,000" or "No. 3" ends one early. It errs
+  toward dropping an exception, which is the safe direction, and was left.
+- **A word broken across lines counts as two** in the reading grade
+  ("para-\nsurgical"). 19 clauses, one word each.
+- **Only three policies' text.** A fourth PDF may typeset something none of
+  these does: a soft hyphen, a non-breaking hyphen, a different ligature.
+  The latent findings above are the evidence that such cases exist.
+- **Documents already analysed in the app** keep their stored scores until
+  uploaded again.
+
+## Concept 60: test a rule against the same input in a different form
+
+A unit test checks that a rule gives the right answer on an input someone
+wrote. It says nothing about inputs that mean the same and look different,
+and hand-written test inputs are always in the cleanest form: one line,
+straight quotes, single spaces. The tests in this repository were
+written that way, and every one of these faults passed them.
+
+The technique that found them needs no expected answers at all. Take real
+inputs, apply a transformation that must not change the meaning, and
+require the output to be the same. Testers call this a **metamorphic
+test**: the relation between two outputs is checked, and the correct value
+of either is not needed. It is cheap exactly where ordinary tests are
+expensive, on large real inputs nobody has labelled.
+
+Two conditions make it work. The transformation has to be truly
+meaning-preserving for the rule in question, which is why each lead was
+checked by hand: collapsing line breaks is not neutral for a function that
+deliberately treats lines as units. And the inputs have to be real. Run on
+the synthetic policy alone, this check reports nothing, because the
+synthetic policy has no typesetting to vary.
+
+## Check it yourself
+
+```bash
+# the leads, on the three policies and all eval questions (no model)
+python evals/check_format.py
+
+# one test per fault
+cd api && .venv/Scripts/python -m pytest tests/test_format.py -q
+```
+
+**Predict before you look:** `check_format.py` still lists
+`score._RE_CROSSREF` as differing on six clauses when line breaks are
+turned into spaces, after the fix. Is the fix not working?
+
+<details>
+<summary>Answer</summary>
+
+It is working. The script runs each bare pattern on raw text, and the
+pattern itself was not changed: it still spells "subject to" with an
+ordinary space. The fix is at the place the pattern is used, where the
+clause is made plain before the pattern runs
+(`_RE_CROSSREF.findall(plain(seg.text))`). The script cannot see that,
+which is why its header says a line of output is a lead and each one has to
+be followed to where the pattern is applied. The test that shows the fix is
+in `api/tests/test_format.py`: a wrapped phrase and a ligature phrase, made
+plain, give the same count as the clean ones.
 </details>

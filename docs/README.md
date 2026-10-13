@@ -408,6 +408,18 @@ M38's fix for the false maternity exception, re-measured now that there are seve
 - **Concept 59: fixing one of two compensating errors makes things worse** - when a correct fix measures worse, look for the second error it uncovered.
 - **What would have to be true for this fix to be kept** - three separate conditions, each its own measured change.
 
+### M44 - The missing exception read from the clause, and the false one finally removed
+The fix that lost twice, kept on the third attempt once the second error was repaired with it. A survey of all three policies shows why the general repair was not built; a narrow rule adds exactly one line, "ectopic pregnancy". Same score as before (5 of 7), no question worse, and the prompt no longer states something false about the policy.
+- **Measured before building** - sixty-two exception words with no stored exception, and why copying what follows them would assert more falsehoods than it removed.
+- **Why it was kept, when the score is the same** - verdict-neutral, removes a falsehood, and the two remaining wrong answers now have a cause in named code and not in bad data.
+- **Failure 106: the first version read the page layout, not the clause** - it worked only because Star's PDF puts "a." and "b." on their own lines, and its good behaviour on HDFC rested on a missing space. Fixed so layout does not matter, with a limit that reads nothing from long lists.
+
+### M45 - Every text rule, run against the same words set differently
+After Failure 106, a mechanical check of all fifty-odd hand-written text patterns: run each on real clauses and questions, and again with only the typesetting changed. Five faults that reach the running program, three latent ones, all invisible on the synthetic policy because it has no typesetting to vary. Read it for the technique, which needs no expected answers.
+- **What it found** - a correct quotation rejected across a line-end hyphen (12 places), a curly apostrophe hiding "don't", cross-references and reading grades miscounted on wrapped phrases and ligatures.
+- **Failure 107: the fix uncovered a true exception, and printing it broke an answer** - HDFC's Geography exception had been dropped by a line break; restoring it turned a paid dengue claim into a refusal on an unrelated clause, so it stays dropped, by decision.
+- **Concept 60: test a rule against the same input in a different form** - metamorphic testing, and why it only works on real inputs. Also introduces NFKC.
+
 ---
 
 ## Related documents

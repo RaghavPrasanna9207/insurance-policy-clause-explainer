@@ -61,7 +61,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.config import settings
-from app.grounding import verify_exception
+from app.grounding import normalize, trailing_exceptions, verify_exception
 from app.llm import client
 from app.llm.prompts import CLASSIFY_SYSTEM, render_clause_batch
 from app.pipeline.segment import Segment
@@ -70,7 +70,7 @@ from app.taxonomy import ClauseType
 log = logging.getLogger(__name__)
 
 # "24 months", "1 year": a time_windows entry that is a duration and nothing else.
-_BARE_DURATION = re.compile(r"(\d+)\s*(day|month|year)s?", re.IGNORECASE)
+_BARE_DURATION = re.compile(r"(\d+)(?:-|\s*)(day|month|year)s?", re.IGNORECASE)
 _DAYS_PER = {"day": 1, "month": 30, "year": 365}
 
 
@@ -410,7 +410,7 @@ def correct_stay_period(analysis: ClauseAnalysis, text: str) -> None:
         analysis.clause_type = ClauseType.COVERAGE.value
 
 
-_PER_DAY = re.compile(r"per\s+day|per\s+diem|/\s*day\b|\bdaily\b", re.IGNORECASE)
+_PER_DAY = re.compile(r"per[\s-]+day|per\s+diem|/\s*day\b|\bdaily\b", re.IGNORECASE)
 _DAILY_CAPS = (
     "cap_percent_of_sum_insured", "icu_cap_percent_of_sum_insured",
     "cap_max_inr_per_day", "icu_cap_max_inr_per_day",
@@ -461,6 +461,17 @@ async def _analyze_batch(
                 "clause %s: dropped exception(s) the clause does not state: %s",
                 key, [e for e in analysis.exceptions if e not in kept],
             )
+        # The model does not always return every exception. A missing one is
+        # not harmless: the scenario step stands a check down when the question
+        # uses an exception's words, so an exclusion with its true exception
+        # absent gets applied to the one thing it spares (Star's maternity
+        # exclusion and ectopic pregnancy). Exclusions only: that check reads
+        # nothing else, and on the three policies measured this adds one line.
+        if analysis.clause_type == "exclusion":
+            kept += [
+                e for e in trailing_exceptions(text_by_id[key])
+                if not any(e in normalize(k) for k in kept)
+            ]
         analysis.exceptions = kept
         correct_stay_period(analysis, text_by_id[key])
         correct_daily_cap(analysis, text_by_id[key])
