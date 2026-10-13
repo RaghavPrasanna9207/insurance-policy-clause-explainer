@@ -13855,6 +13855,32 @@ FINAL: insufficient_information
 
 Six fresh samples of six. A correct answer, re-asked and refused.
 
+> **Notes added on 13 October 2026, after reading this entry against the code.**
+>
+> *"Six" is two different counts.* Six eval questions meet this rule's
+> precondition, which is that `Computed.excluding` is not empty: the code's
+> word lookup found an exclusion using a word from what the person described.
+> Separately, this one question was sampled six times after the restart and
+> was refused all six times. The heading means the second. The other five
+> questions were not named when this was written.
+>
+> *The last two lines of the trace were not explained.* The re-ask named
+> Excl02, the model came back with `not_covered` citing Excl01, and the final
+> verdict is `insufficient_information`. The code offers a mechanism. After
+> any re-ask, a citation the arithmetic has ruled out is dropped, and a
+> verdict left with no citation at all is downgraded
+> (`api/app/pipeline/scenario.py`, in `run_scenario`):
+>
+> ```python
+> citations = [c for c in citations if c not in irrelevant]
+> if verdict != Verdict.INSUFFICIENT_INFORMATION and not citations:
+>     verdict = Verdict.INSUFFICIENT_INFORMATION
+> ```
+>
+> If Excl01 was a waiting period the code had computed as served, that is
+> what happened here. This was read from the code and not re-run, so it is
+> the likely explanation and not a measured one.
+
 Two accidents met. `Excl02` is HDFC's specified-disease *waiting period*,
 which analysis typed `exclusion`. And "infection" is rare enough in that
 policy that the word lookup counted Excl02 as naming the person's
@@ -13882,6 +13908,26 @@ procedure has three steps, not two:
 
 Step 3 is what caught this. A rule's reach is defined by its precondition,
 not by what the last run happened to answer.
+
+(Concept 55, from M31, is "precision before recall, when a check can do
+harm": a rule that re-asks is judged first by how many right answers it
+disturbs. Failure 94 is the caesarean question whose fresh samples were right
+2 of 2 on one day, 0 of 8 three days later and 1 of 4 after a server restart,
+with the request unchanged.)
+
+**What this failure does and does not support (added 13 October 2026).** It
+supports "sample live": the first live session already showed the fault, 3
+of 3 falling to 2 of 3, before any restart. The restart turned that into 6
+of 6 and made it impossible to dismiss as noise. So "in more than one server
+session" rests on Failure 94, not on this failure. And the fix itself was
+measured in one session only, the restarted one, which is less than step 3
+asks of a rule.
+
+**What the fix leaves in place.** Excl02 is still typed `exclusion` when it
+is a waiting period. The `timed` guard works because that clause also has an
+extracted waiting period, so it appears in `computed.waiting`. A mistyped
+waiting-period clause whose period was *not* extracted would get no such
+protection.
 
 ## Rule 3, refused: a listed waiting period that does not name the condition
 
@@ -15076,6 +15122,46 @@ case it was built for has not been tested by the eval at all.
 Four candidates were built. None was merged. This entry records each with
 the number that ruled it out, because the reasons are the result.
 
+> **Notes added on 13 October 2026, after reading this entry against the
+> repository.**
+>
+> *The four candidates were never numbered.* They are: (1) the co-payment
+> re-ask of section 1; (2) the re-ask wordings for the appendix, back-trouble
+> and thyroid misses in section 2; (3) the untimed-general-wait rule for the
+> gallbladder case, also in section 2; (4) the citation rule for the
+> shoplifting case in section 3. The ambulance fault in section 3 was
+> examined and no rule was built for it.
+>
+> *"Eight open cases" was an undercount.* The list above was put together
+> from the cases recent milestones had worked on. The next full run of every
+> set ("M38 follow-up", further on) found nine wrong verdicts, not six. Three
+> were missing here: `ho-war-injury`, `ho-short-procedure` and
+> `star-ho-flew-from-india-treated-toronto`. With the two citation faults that
+> makes eleven open cases. No rule was tried on those three, so nothing in
+> this entry is evidence about them.
+>
+> *The probe questions and the rejected patches are in the repository*, in
+> `evals/probes/m37/`. They were copied there on this date from a temporary
+> working folder; until then this entry pointed at files a reader of the
+> repository did not have.
+
+The questions not quoted elsewhere in this entry, so that each id means
+something:
+
+- `ho3-two-policies-appendix`: "I have two health insurance policies, this
+  one and a family floater from another company. I had my appendix removed
+  and spent five days in hospital, and I am claiming on both. I have held
+  this policy two years and I am 38." Expected `conditional`.
+- `ho4-thyroid-after-cover`: "I was diagnosed with a thyroid problem after I
+  took out this cover, and I was hospitalised for it this month. I have held
+  the policy for 20 months and I am 50." Expected `covered`.
+- `ho4-back-trouble-on-and-off`: "I have had back trouble on and off and was
+  admitted for back surgery. I have held this policy for two years." Expected
+  `insufficient_information`.
+- `ambulance-admissible`: "I was taken to hospital by road ambulance after a
+  heart attack and admitted, and the hospital claim has been accepted. I have
+  held the policy eight years." Expected `covered`, citing 2.5.
+
 **Every rule in this system does one thing: under some condition, it asks
 the model its question a second time.** The code never sets a verdict. So a
 rule is only as good as the model's behaviour when asked again, and what
@@ -15106,10 +15192,22 @@ Three wordings, each fixing the last one's failure:
 | severe sinusitis, 61→63 | | | **pays 3/3** |
 | dengue, 68→71 (written to be fixed) | | | insufficient 3/3 |
 
+How to read that table. Each cell is three fresh answers to the *re-ask*.
+The first answer was set to `insufficient_information` by hand, at no model
+call, so that the rule was reached; the re-ask request does not contain the
+first answer, so it is the same request a real first answer of that kind
+produces. For the kidney, hernia, sinusitis and dengue sentences, fact
+extraction had returned a "time held" the person never stated (the second
+finding below), which stops the rule from firing, so that duration was
+removed by hand as well. The full record, one line per run, is
+`evals/probes/m37/copay-results.txt`.
+
 v3 separates old conditions from new ones and then pays a hernia and
 sinusitis, both of which the policy's clause 3.3 lists with a 24-month
 wait. A guard in code can catch "hernia", which appears in the clause.
-Nothing catches sinusitis: the clause says "ENT disorders". And the dengue
+Nothing catches sinusitis: the clause says "diseases of the ear, nose and
+throat". (This entry first quoted the clause as "ENT disorders", which is
+not its wording.) And the dengue
 question, as acute as the pneumonia one, is not fixed. The final wording
 works on the one sentence it was tuned against.
 
@@ -15145,9 +15243,11 @@ difference:
   was found than reading "last year" as one year, which can be three weeks
   and would mark the 30-day wait served.
 
-**`ho2-gallbladder-no-timing` had a candidate.** "I need my gallbladder
-removed ... how much will the policy pay?" with no time held given;
-expected `insufficient_information`; answered `conditional`. The rule: a
+**`ho2-gallbladder-no-timing` had a candidate.** "I had my gallbladder
+removed. I'm 45." with no time held given;
+expected `insufficient_information`; answered `conditional`. (This entry
+first gave the question as "I need my gallbladder removed ... how much will
+the policy pay?", which is not the eval's sentence.) The rule: a
 paying verdict while the general 30-day wait cannot be timed is asked a
 two-way question. On the eval: 0 first requests changed, 1 stored answer
 re-asked (the target), and the target is fixed 3 of 3.
@@ -15236,6 +15336,27 @@ refusal (M32's mirror rule is the other) asks only *which clause*, in a
 situation where the code has itself computed that the claim is refused.
 This one had no such computation behind it, only a word lookup.
 
+> **Correction, 13 October 2026.** Two sentences in the paragraph above are
+> wrong, and the code shows it. This candidate was not the first rule to
+> re-ask a refusal, and the existing ones do not all ask only "which clause".
+> Two rules already in `find_contradictions`
+> (`api/app/pipeline/scenario.py`) re-ask a refusal and can move it:
+>
+> - The first rule in that function tells an answer that cites a clause against the
+>   claim that the arithmetic cleared that clause ("You cited clause X as a
+>   reason this claim is refused, but it was calculated: ..."). A refusal
+>   resting on a served waiting period is pushed toward paying.
+> - M35's rule takes any definite verdict, a refusal included, that cites a
+>   waiting period nobody can time, and says "the answer is
+>   insufficient_information".
+>
+> What does separate this candidate from every rule that was kept is the
+> last sentence: **each kept rule has a computation behind it** (a duration
+> compared with a clause's number, or a duration known to be missing), and
+> its re-ask states that result. This one had a word in the question
+> matching a word in a clause, and could only ask. The lesson about
+> direction stands. The claim to be the first does not.
+
 ## What was merged
 
 Nothing in the code. This entry, and a row in the project README.
@@ -15263,11 +15384,50 @@ is the hosted-model comparison this project has planned and not yet run,
 and these eight questions, with the probe sentences written for them, are
 now the test set for it.
 
+**How much of that the evidence carries (added 13 October 2026).** Less
+than the paragraphs above claim, in four ways.
+
+- *"The ceiling of the design" is too wide.* Two rules of the same shape as
+  the rejected citation rule, a word lookup followed by a re-ask, were merged
+  in M34 (drinking) and M36 (the person's own offence) and are still in
+  `find_contradictions`. The design had not stopped working. What this
+  milestone shows is narrower: for these eight cases, four attempts did not
+  find a rule that fixed the target without moving a right answer nearby.
+- *"Mostly takes the option that changes its answer"* does not fit this
+  entry's own session 1, in which five guard questions kept their clause 2
+  of 2. The supported statement is that it did so often enough, and
+  unpredictably enough between sessions, to make the rule unsafe.
+- *The samples are few.* Several rejections rest on 2 of 2, or 1 of 1, in an
+  entry whose fourth bullet says sessions disagree. For refusing a rule that
+  is the cautious direction: one payable claim turned away, or one refused
+  claim paid, is reason enough not to merge. It is not enough to say how
+  often the rule would misfire.
+- *"A stronger reader" is a hypothesis.* No other model was run on these
+  questions. Until the comparison is made, this entry does not show that a
+  larger model answers any of them correctly.
+
+The test set, counting the three cases found by the later full run, is
+eleven questions and the probe sentences in `evals/probes/m37/`.
+
 ## Check it yourself
 
 Nothing was added, so there is no new test. The measurements can be
-repeated: the scratch folders of this milestone hold each candidate as a
-patch with its probe questions. The quickest one to see is the last:
+repeated: `evals/probes/m37/` holds each candidate as a patch against
+`api/app/pipeline/scenario.py` as it stood after M36, with its probe
+questions:
+
+```
+copay-probes.json      copay-results.txt      copay-rejected.diff
+heldout-probes.json    heldout-untimed-wait-rejected.diff
+                       heldout-rules-G-L-P-N-rejected.diff
+citation-probes.txt    citation-rejected.diff
+```
+
+The sinusitis question was written after `copay-probes.json` and is not in
+it: "I bought this policy when I was 61 and I am 63 now. I was admitted with
+severe sinusitis." The scripts that ran the probes were not copied, so the
+patches are a record of what was tried, to be applied by hand. The quickest
+thing to see needs none of them:
 
 ```bash
 api/.venv/Scripts/python evals/run_scenario_eval.py --no-report --repeats 3 --only breach-of-law
@@ -15335,8 +15495,9 @@ in part (a), ectopic pregnancy, is missing: the model never returned it.
 ## Why the wrong one gets through
 
 Extracted exceptions are already checked in code, because the model was
-measured returning wrong ones (5 of 8 on the synthetic policy, when the
-check was first written). The check, in `api/app/grounding.py`:
+measured returning wrong ones (on the synthetic policy, 5 of the 8 clauses
+given an exception were given a wrong one, when the
+check was first written; M11, Failure 33). The check, in `api/app/grounding.py`:
 
 ```python
 def verify_exception(span: str, source_text: str) -> bool:
@@ -15451,6 +15612,52 @@ Only one server session was measured. Both arms were unanimous, and a
 change that turns a refusal into a payment in any session is not merged, so
 a second session could not have changed the decision.
 
+> **What that paragraph leaves out (added 13 October 2026).** Four things,
+> none of which changes the decision not to merge, and all of which change
+> how firmly the heading can be said.
+>
+> *This is the question Failure 94 is about, and this entry never says so.*
+> Failure 94 (M32) recorded `star-caesarean` as right in 2 fresh samples of 2
+> on one day, 0 of 8 three days later and 1 of 4 after a server restart, all
+> on an unchanged request, and drew the rule that agreement inside one run
+> does not show an answer is stable. Three samples against three, in one
+> session, is exactly the evidence that rule says not to trust. "Unanimous"
+> is good enough to refuse a change. It is not good enough to say the answer
+> was right *because of* the false line. What was measured is that in one
+> session the two went together.
+>
+> *The mechanism is shown by one answer for each arm.* The entry does not
+> say whether all three samples of an arm reasoned the same way. And the
+> answer quoted for the "without the fix" arm argues from "except ectopic
+> pregnancy", which is the clause's own wording, not from the false exception
+> printed under it. That the false line is what makes the model cite clause
+> 18 is an inference from the two arms differing, not something an answer
+> states.
+>
+> *The other route to `conditional` was not ruled out.* M33 found that on
+> this policy a first answer of `covered` is re-asked about the 5%
+> co-payment, and that the re-ask can turn a wrong `covered` into a
+> plausible-looking `conditional` citing clause 9. The "with the fix" arm is
+> reported above as "first answer: conditional ... not asked again". Whether
+> those were first answers or the result of that co-payment re-ask was not
+> re-checked and cannot be without running the model.
+>
+> *The cost of keeping the false line was not weighed.* The rule applied to
+> the fix, that a change which turns a refusal into a payment is not merged,
+> was not applied to the line itself. The program still prints, under
+> Star's maternity exclusion, "this clause does NOT apply when: lawful
+> medical termination of pregnancy during the Policy Period". That is the
+> opposite of the policy, on a question a real person could ask. No eval
+> question asks it: none of the files in `evals/real/` mentions termination,
+> miscarriage or ectopic pregnancy. So the system is known to assert
+> something false about this policy, and what it answers to the question the
+> falsehood is about has never been measured. The honest summary of this
+> milestone is that one measured wrong payment was avoided by keeping one
+> unmeasured risk of another.
+>
+> Neither the prompt version (`v65-own-offence`) nor the Ollama version
+> (0.35.1) was stated above; both are needed to repeat the measurement.
+
 ## What to take from this
 
 - **A right answer is not evidence of a right process.** The eval scored
@@ -15478,7 +15685,8 @@ measure.
 ## Check it yourself
 
 Nothing was merged, so there is no new test. To see the answer the stored
-exceptions lead to:
+exceptions lead to (this needs Star's PDF, which is not in the repository;
+`python evals/real/fetch_policies.py` downloads it into `samples/real/`):
 
 ```bash
 api/.venv/Scripts/python evals/run_scenario_eval.py --no-report --repeats 3 \
@@ -15965,4 +16173,146 @@ line is not in the clause. `verified_prefix()` then keeps the longest leading
 part that is in the clause, provided it is at least 60% of the quotation, and
 that part is what is shown. In M11 the same quotation was shown as unverified,
 because `verified_prefix()` did not exist yet.
+</details>
+
+---
+
+# M41 — Three more entries read against the code, and evidence that was not in the repository
+
+## The problem
+
+M40 read three early entries (Failures 21, 32/33 and 78) against the code as
+it stands and found four kinds of fault: sentences true when written and
+false now, stories that stopped a step early, counts that disagreed with
+their own tables, and claims a size larger than their evidence. It also said
+the other hundred entries had not been checked.
+
+This milestone checks three more, chosen because they are the most recent
+and carry the project's conclusions about where its design stops:
+
+- **Failure 95** (M33): a rule with no false alarms on stored answers that
+  refused a correct claim on fresh ones.
+- **Failure 102** (M37): the last attempt at the remaining wrong answers,
+  and the claim that they mark a ceiling.
+- **Failure 103** (M38): a correct fix reverted because the answer got
+  worse.
+
+Again no model was run. The check was reading: the entry, the code and eval
+files it names, and `git log`.
+
+## What was found
+
+**The recent entries are accurate about the code.** Every function, guard,
+case id and quoted clause in Failures 95 and 103 matches the repository
+today. The rule and its `timed` guard from Failure 95 are in
+`find_contradictions` as quoted, with a test. The fix in Failure 103 is
+gone, as the entry says. Nothing from M37 was merged, as it says. The
+"true then, false now" fault of M40 is a fault of old entries; these are
+days old.
+
+**Their faults are of the fourth kind: the claim outruns the evidence.**
+And the three do it in the same direction.
+
+| entry | what it concluded | what it measured |
+|---|---|---|
+| Failure 95 | sample every reachable case live, in more than one server session | the first live session already caught it; the fix was measured in one session |
+| Failure 102 | this is the ceiling of check-and-ask-again with this model | four attempts on eight cases, several rejected on 2 samples of 2; two rules of the same shape are merged and working |
+| Failure 103 | the answer was right *because of* the false line | 3 samples against 3, in one session, on a question an earlier entry had shown to be unstable across sessions |
+
+Each conclusion is probably right. None is established by the entry that
+states it. Each entry now carries a dated note saying how much its evidence
+supports, and the original text is left as written.
+
+**One entry was wrong about the code it stood next to.** M37 said its
+rejected rule was "the first to re-ask an answer that already refused", and
+that existing rules ask a refusal "only which clause". Two rules in
+`find_contradictions` already re-ask a refusal and can move the verdict.
+The distinction that survives is the entry's last sentence: every kept rule
+has a computation behind it, and the rejected one had a word match.
+
+**Two quotations were wrong.** M37 gave an eval question and a clause in
+words that are in neither file. Both were correct in meaning and wrong as
+quotations. A quotation in this log is checked by nothing; the project
+verifies the model's quotations against the policy and never its own
+against the repository.
+
+**The most serious finding was not in the text.** M37 called its probe
+questions "the test set" for the planned hosted-model comparison and said
+they were in "the scratch folders of this milestone". Those folders were a
+temporary directory outside the repository. Anyone cloning the project had
+none of the questions, and the files were one disk clean-up from being
+lost. They were still there, and are now in `evals/probes/m37/`:
+
+```
+copay-probes.json      copay-results.txt      copay-rejected.diff
+heldout-probes.json    heldout-untimed-wait-rejected.diff
+                       heldout-rules-G-L-P-N-rejected.diff
+citation-probes.txt    citation-rejected.diff
+```
+
+Each probe file opens by saying it was written before any model call of its
+attempt, and gives for every question the answer wanted and the answers
+that would count as the rule doing harm. That is what makes them usable as
+a test set and not a list of sentences.
+
+**And one cost that an entry had not faced.** M38 kept a line in the prompt
+that tells the model Star's maternity exclusion "does NOT apply" to lawful
+termination of pregnancy, because removing it made the one eval question
+about that clause worse. The entry did not say that no eval question asks
+about termination, so what the system answers to the very question the
+false line concerns has never been measured. That is now written into the
+entry. It was not fixed here: an eval question for it would have to be
+written before any run and measured with the model.
+
+## Concept 57: evidence belongs where the claim is
+
+A measurement is only as durable as the least durable thing it depends on.
+This log is committed. The questions behind one of its main conclusions
+were not, and the entry read as if they were. The same gap, smaller, is in
+every "the reviewer read the other seven quotes" and "the other five
+questions were also 3/3": the sentence is in the repository and the thing
+it summarises is not.
+
+The rule that follows is short. **If an entry says "these are the test
+set", "the measurements can be repeated", or "see the probes", the files go
+into the same commit as the entry.** A temporary folder is for work in
+progress. The moment a result is cited, what produced it is no longer
+temporary.
+
+## What this does not show
+
+Six entries of 103 have now been read this way. The six were chosen for
+being worth retelling, not at random, so they say little about the rest
+except that both kinds of fault exist: stale statements in the old entries,
+overreach in the new ones.
+
+The notes added in this milestone and in M40 are themselves unreviewed
+claims about the code on 13 October 2026.
+
+## Check it yourself
+
+```bash
+# the probe questions, with the answer each was written to get
+cat evals/probes/m37/citation-probes.txt
+
+# the two rules that already re-ask a refusal and can move it: the first
+# and the last of the three lines this prints
+grep -n "You cited clause\|turns on a fact they did not give" api/app/pipeline/scenario.py
+```
+
+**Predict before you look:** Failure 103 compared three samples with the
+false line against three without, in one server session, and both arms were
+unanimous. Failure 94 is about the same question. What does Failure 94 say
+about a unanimous result from one session?
+
+<details>
+<summary>Answer</summary>
+
+That it shows the answer is stable in that run and nothing more. On this
+same question, fresh samples of one unchanged request were right 2 of 2 on
+one day, 0 of 8 three days later, and 1 of 4 after the server was
+restarted. Eight in a row agreed with each other and disagreed with the two
+before them. So "3 of 3 with the line, 0 of 3 without" is a reason not to
+merge the fix, since it paid a refused claim at least once, and it is not
+proof that the line is what made the answer right.
 </details>

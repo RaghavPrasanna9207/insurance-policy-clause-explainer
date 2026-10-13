@@ -1,0 +1,31 @@
+PROBES FOR CASE A - written before any was run. Synthetic policy. In each the lookup fires, the claim is
+refused for a DIFFERENT reason, and the looked-up clause (4.4 breach of law / 4.2 alcohol) must NOT be cited.
+Usage: sh run.sh probe 2 "<question>"
+
+P1 (breach lookup) expect not_covered citing 4.1 (cosmetic); 4.4 must not appear
+   I was arrested at a protest last year and released without charge. This month I want a nose job purely to improve my appearance. I have held the policy six years.
+P2 (breach lookup) expect not_covered citing 4.3 (hazardous sports); 4.4 must not appear
+   I was arrested for shoplifting two years ago. Last week I broke my leg bungee jumping on holiday and was admitted. I have held the policy five years.
+P3 (breach lookup) expect not_covered citing 3.1 (30-day wait); 4.4 must not appear
+   I was convicted of trespassing some years ago. I bought this policy three weeks ago and have now been admitted with typhoid.
+P4 (intoxication lookup) expect not_covered citing 4.1 (cosmetic); 4.2 must not appear
+   I was drinking heavily at a wedding last year. This month I want a nose job purely to improve my looks. I have held the policy six years.
+P5 (intoxication lookup) expect not_covered citing 4.5 (infertility); 4.2 must not appear
+   I had a few beers at a party last month. This week I started IVF treatment for infertility. I have held the policy four years.
+
+POSITIVE (the clause SHOULD be cited after the re-ask)
+A1 breach-of-law, first answer = the stored one (not_covered citing 4.3): sh run.sh stored breach-of-law 3   -> expect 4.4 denies
+A2 intoxication-injury, first answer fabricated as not_covered citing 4.3: sh run.sh forced intoxication-injury 2 4.3 -> expect 4.2 denies
+
+ROUND 2 - added after P3 FAILED under wording 1 (typhoid at three weeks, rightly refused under 3.1, re-asked and
+moved to 4.4 "convicted of trespassing some years ago", 2 of 2). Written before wording 2 was run.
+P6 (breach lookup, not a waiting period, an illness-type treatment) expect not_covered citing 4.5; 4.4 must not appear
+   I was convicted of trespassing some years ago. Last month I had IVF treatment for infertility. I have held the policy four years.
+P7 (breach lookup; the refusing clause is a COVERAGE clause's condition, neither an exclusion nor a waiting period)
+   expect not_covered citing 2.6 (AYUSH only in an accredited hospital); 4.4 must not appear. Written before it was run.
+   I was convicted of trespassing some years ago. Last month I had Ayurvedic treatment as an in-patient at a small private clinic that has no accreditation. I have held the policy five years.
+
+ROUND 3 - P7 FAILED too (2.6 replaced by 4.4, 2 of 2), under wording 2. The rule was then narrowed in CODE to refusals
+citing other exclusions only (so P3 and P7 are no longer asked at all). Written before the narrowed rule was run:
+P8 (breach lookup; refusing clause is an exclusion that names the treatment less loudly) expect not_covered citing 4.6; 4.4 must not appear
+   I was convicted of trespassing some years ago. Last week I had a decayed tooth extracted by my dentist. I have held the policy five years.

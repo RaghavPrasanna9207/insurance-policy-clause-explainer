@@ -1,0 +1,30 @@
+copay3 - third attempt on copay-applies-emergency. VERDICT: LEAVE. 45 model generations used of 70.
+Ollama 0.35.1. Final candidate = snap/ (v4) = candidate_NOT_RECOMMENDED.diff. snap_v1/_v2/_v3 = earlier wordings.
+"forced" = first answer replaced by insufficient_information at no model call; the re-ask request has no assistant turn,
+so it is the same request a natural insufficient_information first answer produces. All re-asks are fresh generations.
+"n" suffix = the model's own extraction stated a duration (it subtracted the ages itself), which keeps the rule from
+firing; the duration was removed by hand so the rule is reached (what happened unprompted on the eval sentence).
+
+OFFLINE (replay_snap.txt): 109 replayed; precondition met 1 (this case); stored answers re-asked 1; first requests changed 0.
+
+LIVE                                        wording  result (3 fresh re-asks unless said)            file
+EVAL pneumonia 70->72, NATURAL, unchanged 1st req     conditional citing 5.3, 3/3 - rule never reached   live1_eval.txt
+     (the stored / previously measured answer is insufficient_information 3/3: this case is session-dependent)
+EVAL forced                                 v1       conditional 3/3 (muddled: "conditional due to uncertainty")  live2
+P2 old heart trouble 65->67 forced          v1       conditional 3/3   ** PAYS AN OLD CONDITION **       live3
+P2 forced                                   v2       insufficient_information 3/3                       live4
+EVAL forced                                 v2       insufficient_information 3/3 (no fix)              live5
+EVAL forced                                 v3       conditional citing 5.3 (+3.2 "delays") 3/3         live6
+P2 forced                                   v3       insufficient_information 3/3                       live7
+P3 asthma since childhood 64->67 forced     v3       insufficient_information 3/3                       live8
+N2n kidney disease "for many years" forced  v3       insufficient_information 3/3                       live10
+N3n hernia operation 61->63 forced          v3       conditional 3/3   ** PAYS A LISTED CONDITION, wait not settled **  live12
+N4 flare-up of my COPD 66->69 forced        v3       insufficient_information 3/3                       live13
+N3 hernia                                   v4       rule does not fire (code guards: procedure named; clause names "hernia")  live14, 0 gens
+N5n severe sinusitis 61->63 forced          v4=v3 text  conditional 3/3 ** PAYS A LISTED CONDITION (ENT, 3.3), no code guard reaches it **  live16
+N1n dengue 68->71 forced                    v4=v3 text  insufficient_information 3/3  (the acute probe that SHOULD become conditional does not)  live18
+P2 heart, base code, natural, 1 sample               insufficient_information                           live19
+
+Extraction: of 5 new sentences extracted live once each, 4 came back WITH a duration the person never stated
+(kidney 2y, hernia 2y, sinusitis 2y, dengue 3y); COPD and the eval sentence did not. raw_*.json.
+Not run: E2n (diabetes with duration removed), P3g (code guard, offline only: does not fire).

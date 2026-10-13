@@ -1,0 +1,120 @@
+--- a/api/app/pipeline/scenario.py	2026-10-12 20:06:43.723100300 +0530
++++ b/api/app/pipeline/scenario.py	2026-10-12 20:06:43.740701600 +0530
+@@ -1114,6 +1114,46 @@
+     breach_of_law: dict[str, str] = field(default_factory=dict)
+     # Exclusion id -> the words of the described procedure or condition it uses.
+     excluding: dict[str, list[str]] = field(default_factory=dict)
++    # (age when the policy began, age now), when those two are all that is
++    # known about how long the policy has been held. See ages_bounding_time_held.
++    ages: tuple[int, int] | None = None
++
++
++def ages_bounding_time_held(facts: dict[str, Any]) -> tuple[int, int] | None:
++    """(age at inception, age now) when they bound an UNSTATED time held, else None.
++
++    "I took this policy out when I was 70 and I am 72 now" states no duration,
++    and whole ages do not give one: 70 and 72 is anything over one year and
++    under three. So nothing is written into the facts and no waiting period is
++    marked served from it. Putting "2 years" into the facts was measured twice:
++    the model refused pneumonia under a 36-month pre-existing diseases wait, and
++    with a rule against that, paid "my old heart trouble" one year in.
++
++    Two years apart or more, because 66 and 67 can be one day: the bound
++    "at least a year less" would then say nothing.
++
++    None when the person is known to have had the illness before the policy,
++    or for at least as long as the policy may have been held: that is a
++    history, and the one question these ages are used to ask is about an
++    illness with none.
++
++    None when a procedure is named. Specified-disease waiting periods list
++    mostly operations (cataract, hernia, joint replacement), and measured on
++    "61 then, 63 now, I need a hernia operation" the question below was
++    answered conditional, 3 samples of 3, while citing the 24-month period
++    as "unclear whether served".
++    """
++    age, start = facts.get("age"), facts.get("age_at_policy_start")
++    if duration_days(facts, "time_since_policy_start") is not None or stated(facts.get("procedure")):
++        return None
++    if not age or not start or age - start < 2:
++        return None
++    known = duration_days(facts, "condition_known_for")
++    if facts.get("pre_existing_condition") == "yes" or (
++        known is not None and known >= (age - start - 1) * _DAYS_PER_UNIT["years"]
++    ):
++        return None
++    return start, age
+ 
+ 
+ def naming_exclusions(
+@@ -1168,6 +1208,7 @@
+         intoxication=intoxication_clauses(scenario, clauses),
+         breach_of_law=breach_of_law_clauses(scenario, clauses),
+         excluding=naming_exclusions(facts, clauses, scenario),
++        ages=ages_bounding_time_held(facts),
+     )
+ 
+ 
+@@ -1587,6 +1628,62 @@
+                     f"missing_information. Answer otherwise only if some other clause "
+                     f"refuses this claim outright."
+                 )
++
++    # "Cannot tell", beside a co-payment computed as applying, when the only
++    # thing missing is how long the policy has been held and two stated ages
++    # bound it. `copay-applies-emergency`, "took this policy out when I was 70
++    # and I am 72 now ... admitted with pneumonia last month": every waiting
++    # period read NOT STATED and the answer was insufficient_information, 3
++    # samples of 3, though the 30-day wait is over on any reading of 70 and 72
++    # and nothing else concerns a pneumonia nobody called old.
++    #
++    # The first request is untouched (see ages_bounding_time_held for why the
++    # ages are not turned into a duration there). Only this answer is asked
++    # again, as a question with two outcomes, and whether the illness is new
++    # or has a history is language, so the model reads it. The outcome that
++    # KEEPS the answer is listed last: for this model the option beside the
++    # instruction to answer gets the benefit of the doubt (M36, Failure 100),
++    # and here the doubt must go to "cannot tell", never to paying.
++    if verdict == Verdict.INSUFFICIENT_INFORMATION and computed.ages:
++        applies = [c for c in computed.reductions
++                   if c.status is reduction.ReductionStatus.APPLIES]
++        start, age = computed.ages
++        low, high = age - start - 1, age - start + 1
++        over, open_ = [], []
++        for check in computed.waiting:
++            name = f"clause {check.clause_id} ({check.subject or 'waiting period'}, {waiting._either(check.required_days)})"
++            (over if check.required_days[-1] <= low * _DAYS_PER_UNIT["years"] else open_).append(name)
++        # Not when an untimed period uses the person's own words for what is
++        # being treated: it probably concerns them, and the answer stands.
++        names = any(c.named for c in computed.waiting if not c.pre_existing)
++        if applies and over and open_ and not names:
++            cuts = " and ".join(c.clause_id for c in applies)
++            untimed = "; ".join(open_)
++            problems.append(
++                f"- How long the policy has been held was not stated, but two ages "
++                f"were: {start} when it began and {age} now. So it has been held more "
++                f"than {waiting._human(low * 365)} and less than {waiting._human(high * 365)} "
++                f"(subtraction, not opinion). That is long enough for "
++                f"{'; '.join(over)} to be over. It is NOT enough to tell for "
++                f"{untimed}. It was also calculated that {applies[0].describe()}. "
++                f"Decide one thing from the person's own words: what is being "
++                f"treated. (a) An illness the person says nothing about having had "
++                f"before, and which is not a treatment that any of {untimed} lists "
++                f"or names. Saying nothing counts: a person who gives no history is "
++                f"describing a new illness, and a pre-existing diseases period does "
++                f"not concern it. Then none of those clauses concerns this claim and "
++                f"none of them is cited; the claim is paid less the co-payment: "
++                f"conditional, citing clause {cuts} with effect reduces. (b) "
++                f"Something the person's own words call old, long-standing, "
++                f"recurring, a flare-up or already under treatment, or a treatment "
++                f"one of those clauses lists or names, or a claim that turns on some "
++                f"other fact the person did not give. Then that clause concerns this "
++                f"claim and whether it is over cannot be told, so nobody can say "
++                f"whether this claim is paid. That is not conditional: conditional "
++                f"means the claim IS paid, with a cut. The answer stays "
++                f"insufficient_information, citing that clause. Say which, (a) or "
++                f"(b), and the person's words that show it, in the reasoning."
++            )
+     return problems, irrelevant
+ 
+ 
