@@ -67,6 +67,10 @@ class Line:
     bbox: tuple[float, float, float, float]  # x0, y0, x1, y1 in PDF points
     char_start: int
     char_end: int
+    # Whether the words are bold, not just the number in front of them. HDFC
+    # bolds every list number, so "1. it needs ongoing monitoring", an item in
+    # a definition, is `bold` like a real clause heading; only its words differ.
+    words_bold: bool = False
     # Per-span rectangles, kept so the future PDF highlighter can draw exact
     # boxes. Unused by the current side-by-side UI; storing it now avoids a
     # data migration later.
@@ -115,17 +119,25 @@ def _page_lines(page: fitz.Page, page_no: int) -> list[Line]:
             if not spans:
                 continue
 
-            text = _RE_CONTROL.sub(" ", "".join(s["text"] for s in spans)).strip()
+            # Text from every span, blank ones included: Word sets the space
+            # after a list number as a span of its own, and without it "1. Pre-
+            # Existing" reads "1.Pre-Existing", which is no longer a clause
+            # number. Styling below comes from the visible spans only, so a
+            # stray space in another font cannot make a line bold or large.
+            text = _RE_CONTROL.sub(" ", "".join(s["text"] for s in raw_line["spans"])).strip()
             if not text:
                 continue
 
             # A line's "size" is its largest span: a line mixing a bold 13pt
             # heading with a stray 9pt character is a heading.
             largest = max(spans, key=lambda s: s["size"])
-            bold = any(
-                (s["flags"] & _FLAG_BOLD) or "bold" in s["font"].lower()
-                for s in spans
-            )
+            def is_bold(s: dict) -> bool:
+                return bool(s["flags"] & _FLAG_BOLD) or "bold" in s["font"].lower()
+
+            bold = any(is_bold(s) for s in spans)
+            # Past the first span, which is where a list number sits when it is
+            # set apart; a line of one span is all words.
+            words_bold = any(is_bold(s) for s in spans[1:]) if len(spans) > 1 else bold
             lines.append(
                 Line(
                     text=text,
@@ -135,6 +147,7 @@ def _page_lines(page: fitz.Page, page_no: int) -> list[Line]:
                     bbox=tuple(round(v, 2) for v in raw_line["bbox"]),
                     char_start=0,  # assigned once furniture is removed
                     char_end=0,
+                    words_bold=words_bold,
                     span_bboxes=[tuple(round(v, 2) for v in s["bbox"]) for s in spans],
                 )
             )

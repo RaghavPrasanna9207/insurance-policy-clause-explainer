@@ -404,13 +404,17 @@ def segment(result: IngestResult) -> list[Segment]:
 
         text = _as_read(lines, i)
         numbering = _numbering(text)
+        # The words' styling, not the number's: a lone marker joined to its
+        # words reads them off the next line.
+        words_bold = lines[i + 1].bold if text != line.text else line.words_bold
         # Strong numbering stands on its own. Weak numbering is only believed
         # when the styling backs it up. Getting this the wrong way round - as
         # this code originally did, requiring styling in every case - silently
-        # loses every clause in an unstyled PDF.
+        # loses every clause in an unstyled PDF. A bold number before plain
+        # words is not backing: that is how HDFC sets a list inside a definition.
         is_clause_start = numbering is not None and (
             numbering[1]
-            or line.bold
+            or words_bold
             or line.size >= body_size * CLAUSE_SIZE_RATIO
         )
         # The opposite mistake, in a document that does use styling: its list

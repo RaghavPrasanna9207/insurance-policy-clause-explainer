@@ -205,7 +205,7 @@ def _document(rows: list[tuple[str, float, float, bool]]) -> "IngestResult":
 
     lines, cursor = [], 0
     for text, x, y, bold in rows:
-        lines.append(Line(text=text, page=0, size=11.0, bold=bold,
+        lines.append(Line(text=text, page=0, size=11.0, bold=bold, words_bold=bold,
                           bbox=(x, y, x + 200, y + 18),
                           char_start=cursor, char_end=cursor + len(text)))
         cursor += len(text) + 1
@@ -480,3 +480,29 @@ def test_a_bold_annexure_heading_starts_a_section_and_a_mention_does_not():
     assert len(annexure) == 1 and annexure[0].section_path.startswith("Annexure B")
     # The plain-type mention stays in the text it belongs to.
     assert "Annexure B to this Policy" in annexure[0].text
+
+
+def test_a_bold_number_before_plain_words_is_a_list_item():
+    """HDFC bolds every list number. "1. it needs ongoing monitoring" is an item
+    in the definition of a chronic condition, and with only its number bold it
+    must stay inside the definition; a heading has its words bold too."""
+    from app.pipeline.ingest import IngestResult, Line
+
+    rows = [
+        ("1.1. Chronic Condition", True, True),
+        ("A disease which has one or more of these characteristics:", False, False),
+        ("1. it needs ongoing or long-term monitoring", True, False),
+        ("2. it recurs or is likely to recur", True, False),
+        ("1.2. Day Care Centre", True, True),
+        ("4.13. e-Consultation", True, True),
+    ]
+    lines, cursor = [], 0
+    for y, (text, bold, words_bold) in enumerate(rows):
+        lines.append(Line(text=text, page=0, size=11.0, bold=bold, words_bold=words_bold,
+                          bbox=(40, 20 * y, 240, 20 * y + 18),
+                          char_start=cursor, char_end=cursor + len(text)))
+        cursor += len(text) + 1
+    result = IngestResult(raw_text="\n".join(r[0] for r in rows), lines=lines,
+                          page_count=1, page_starts=[0])
+
+    assert [s.number for s in segment(result)] == ["1.1", "1.2", "4.13"]
