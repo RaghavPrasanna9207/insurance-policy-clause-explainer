@@ -97,6 +97,10 @@ _RE_CROSSREF = re.compile(
 _RE_SENTENCE = re.compile(r"[.!?]+")
 _RE_WORD = re.compile(r"[A-Za-z][A-Za-z'-]*")
 _RE_VOWEL_GROUP = re.compile(r"[aeiouy]+")
+# Letters on both sides: "Section B-\n2.8" and a phone number "044-\n4002"
+# are not a word continuing. Either case after the break, because the policies
+# break "Pre-\nExisting" and "E-\nOpinion" too.
+_RE_LINE_END_HYPHEN = re.compile(r"(?<=[A-Za-z])-[ \t]*\n\s*(?=[A-Za-z])")
 
 
 def _syllables(word: str) -> int:
@@ -130,6 +134,12 @@ def flesch_kincaid_grade(text: str) -> float:
     # set with one counted as two short words: 57 clauses of the two real
     # policies measured. Line breaks are kept; they are used below.
     text = unicodedata.normalize("NFKC", text)
+    # A word the PDF broke at a line end ("para-\nsurgical") is one word, and
+    # was counted as two short ones: 19 clauses of the two real policies. The
+    # hyphen is kept because it may be real ("pre-existing"); either way
+    # _RE_WORD reads one word. Not grounding._quotable: that also lowercases
+    # and flattens every line break, and the line is used below.
+    text = _RE_LINE_END_HYPHEN.sub("-", text)
     words = _RE_WORD.findall(text)
     if not words:
         return 0.0
