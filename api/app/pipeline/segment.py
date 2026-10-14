@@ -373,9 +373,11 @@ def segment(result: IngestResult) -> list[Segment]:
     buffer: list[Line] = []
     heading = ""
     number = ""
+    # The next number of a list running inside the current clause; 0 for none.
+    list_next = 0
 
     def flush() -> None:
-        nonlocal buffer, heading, number
+        nonlocal buffer, heading, number, list_next
         if not buffer:
             return
         start = buffer[0].char_start
@@ -398,6 +400,7 @@ def segment(result: IngestResult) -> list[Segment]:
         buffer = []
         heading = ""
         number = ""
+        list_next = 0
 
     lines = result.lines
     bold_numbers = _numbers_are_bold(lines, body_size)
@@ -433,6 +436,17 @@ def segment(result: IngestResult) -> list[Segment]:
         if (is_clause_start and bold_numbers and not line.bold
                 and _RE_SINGLE_LEVEL.match(numbering[0])):
             is_clause_start = False
+
+        # A list that restarts at 1 inside a clause numbered "2.12" belongs to
+        # it: HDFC's optional covers ("2.12 PED waiting period modification. On
+        # availing this option ...") list their choices as "1.", "2.", and split
+        # off, each read as a rule that always applies. It has to start at 1 and
+        # count up: Star's "2. AYUSH Treatment" after a "1.x" is a clause.
+        item = numbering[0].rstrip(".") if numbering else ""
+        if (is_clause_start and "." in number and item.isdigit()
+                and int(item) in (1, list_next)):
+            is_clause_start = False
+            list_next = int(item) + 1
 
         if is_clause_start:
             flush()

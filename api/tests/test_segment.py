@@ -528,3 +528,22 @@ def test_an_oversized_clause_is_cut_where_a_sentence_ends():
 
     assert len(pieces) > 1
     assert all(p.text.rstrip().endswith(".") for p in pieces)
+
+
+def test_a_list_restarting_at_one_stays_inside_its_clause():
+    """HDFC's "2.12 PED waiting period modification" lists its options as
+    "1. Modification ... to 24 months", "2. ... to 12 months". Split off, each
+    read as a waiting period that always applies. A number that does not
+    restart a list, like Star's "2. AYUSH Treatment" after "1.1", is a clause."""
+    rows = [
+        ("2.12", 43, 100, True),
+        ("PED waiting period modification", 66, 100, True),
+        ("On availing this option, the waiting period shall stand modified.", 43, 120, False),
+        ("1. Modification of PED waiting period from 36 months to 24 months", 43, 140, True),
+        ("2. Modification of PED waiting period from 36 months to 12 months", 43, 160, True),
+        ("1.1", 43, 200, True),
+        ("Hospitalization Expenses", 66, 200, True),
+        ("2. AYUSH Treatment: The Company shall indemnify", 43, 220, True),
+    ]
+
+    assert [s.number for s in segment(_document(rows))] == ["2.12", "1.1", "2"]
