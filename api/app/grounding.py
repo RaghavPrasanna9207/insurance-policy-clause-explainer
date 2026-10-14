@@ -290,7 +290,16 @@ _MARKER = re.compile(r"\b(?:" + "|".join(re.escape(m) for m in EXCEPTION_MARKERS
 # lakh" would end a sentence. Erring towards more boundaries only ever drops an
 # exception, which is the safe direction: the clause text is still in front of
 # the reader, only the emphasis is lost.
-_SENTENCE_END = re.compile(r"[.!?]\s")
+#
+# Not after an abbreviation either: "rs. 10,000", "toll free no. 1800" and
+# "(i.e. natural or legally adopted)" are in the real policies, and each would
+# cut a sentence in two and hide an exception word before it. "etc." and
+# "ltd." are left out on purpose: they often do end a sentence, and treating a
+# real end as none errs the unsafe way, letting the previous sentence's
+# exception word reach.
+_SENTENCE_END = re.compile(
+    r"(?<!\brs)(?<!\bno)(?<!\bsr)(?<!\bdr)(?<!\bviz)(?<!\bi\.e)(?<!\be\.g)[.!?]\s"
+)
 
 
 # A bracket that has opened and closed. An exception word inside it governs

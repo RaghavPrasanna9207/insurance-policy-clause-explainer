@@ -420,6 +420,12 @@ After Failure 106, a mechanical check of all fifty-odd hand-written text pattern
 - **Failure 107: the fix uncovered a true exception, and printing it broke an answer** - HDFC's Geography exception had been dropped by a line break; restoring it turned a paid dengue claim into a refusal on an unrelated clause, so it stays dropped, by decision.
 - **Concept 60: test a rule against the same input in a different form** - metamorphic testing, and why it only works on real inputs. Also introduces NFKC.
 
+### M46 - Three loose ends from the format audit
+Three small faults M45 listed and left, each fixed in isolation and then tested together against the real model. Read Failure 108 if you read one thing: a test that passed alone and failed in the suite.
+- **A word broken at a line end was two words to the reading grade** - 19 clauses; grades nudged, one neighbouring swap in the ranking.
+- **An abbreviation ended a sentence in the exception check** - "Rs. 10,000" cut a sentence and could drop a true exception. 0 of 102 stored exceptions change. Introduces **Concept 61: negative lookbehind**.
+- **Failure 108: a timing test that failed only after other tests had run** - a remembered Ollama version expiring between two calls; fixed in the test, confirmed 11 of 11 on the real model.
+
 ---
 
 ## Related documents

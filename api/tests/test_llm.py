@@ -87,11 +87,15 @@ async def test_schema_forces_a_value_even_for_an_unrelated_clause():
 
 
 @pytest.mark.llm
-async def test_cache_returns_identical_result_and_skips_the_model():
+async def test_cache_returns_identical_result_and_skips_the_model(monkeypatch):
     # Emptying is only safe on the test suite's own cache (conftest.py). Run
     # from the repository root, this line once emptied the evals' cache.
     assert "ipce-tests-" in str(cache._CACHE_PATH), f"refusing to clear {cache._CACHE_PATH}"
     cache.clear()
+    # Forget the Ollama version an earlier test remembered, so the ~0.4s request
+    # for it lands in the cold call. Left as it was, the minute could run out
+    # between the two calls and bill that request to the warm one.
+    monkeypatch.setattr(client, "_version", None)
 
     t0 = time.perf_counter()
     first = await client.complete_json(
