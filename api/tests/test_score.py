@@ -249,3 +249,12 @@ def test_a_list_of_item_names_does_not_report_an_impossible_grade():
     assert flesch_kincaid_grade(prose) == flesch_kincaid_grade(wrapped), (
         "where sentences exist, where the lines happen to break must not matter"
     )
+
+
+def test_a_word_broken_at_a_line_end_is_one_word():
+    """A PDF that breaks "para-surgical" across two lines stores it as
+    "para-\\nsurgical". Read as two short words, it made the clause look easier
+    than it is: 19 clauses of the two real policies were mis-graded this way."""
+    one_line = "Para-surgical procedures are payable. Pre-Existing Diseases are excluded."
+    broken = "Para-\nsurgical procedures are payable. Pre-\nExisting Diseases are excluded."
+    assert flesch_kincaid_grade(broken) == flesch_kincaid_grade(one_line)

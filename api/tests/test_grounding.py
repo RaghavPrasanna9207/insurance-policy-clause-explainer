@@ -295,6 +295,20 @@ def test_an_exception_word_in_an_earlier_sentence_does_not_count():
     assert not verify_exception("Treatment of obesity", source)
 
 
+@pytest.mark.parametrize("abbreviation", ["Rs. 10,000", "No. 3", "i.e. ", "e.g. ", "viz. "])
+def test_an_abbreviation_does_not_end_the_sentence(abbreviation):
+    """A full stop and a space end a sentence, but not after these: they would
+    cut the sentence before the exception word and drop a true exception."""
+    source = f"Excluded unless the claim, {abbreviation} as stated, is for an accident."
+    assert verify_exception("is for an accident", source)
+
+
+def test_etc_still_ends_a_sentence():
+    """Left off the list on purpose: "etc." often does end one."""
+    source = "Excluded except for X, Y etc. Treatment of obesity is excluded."
+    assert not verify_exception("Treatment of obesity", source)
+
+
 # Star Health's maternity exclusion, as the PDF gives it: labels on their own lines.
 MATERNITY = (
     "18.  Maternity - Code Excl 18\na.\nMedical treatment expenses traceable\n"
