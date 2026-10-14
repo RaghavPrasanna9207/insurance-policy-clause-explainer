@@ -17600,9 +17600,9 @@ risk scores of some clauses on real policies.
 - **The Geography exception is still dropped** (Failure 107), by decision.
 - **Sentence ends.** The exception check ends a sentence at a full stop
   followed by a space, so "Rs. 5,000" or "No. 3" ends one early. It errs
-  toward dropping an exception, which is the safe direction, and was left.
+  toward dropping an exception, which is the safe direction, and was left. *(Fixed in M46.)*
 - **A word broken across lines counts as two** in the reading grade
-  ("para-\nsurgical"). 19 clauses, one word each.
+  ("para-\nsurgical"). 19 clauses, one word each. *(Fixed in M46.)*
 - **Only three policies' text.** A fourth PDF may typeset something none of
   these does: a soft hyphen, a non-breaking hyphen, a different ligature.
   The latent findings above are the evidence that such cases exist.
@@ -17657,4 +17657,248 @@ which is why its header says a line of output is a lead and each one has to
 be followed to where the pattern is applied. The test that shows the fix is
 in `api/tests/test_format.py`: a wrapped phrase and a ligature phrase, made
 plain, give the same count as the clean ones.
+</details>
+
+---
+
+# M46 — Three loose ends from the format audit
+
+M45 ran every hand-written text rule against the same text set differently
+and fixed what reached the running program. It left a list of smaller
+faults. This milestone closes three of them. Each was done in its own
+branch; then the three were merged together and the whole test suite,
+including the tests that call the model, was run on the result.
+
+## 1. A word broken at a line end was two words to the reading grade
+
+**The problem.** Part of each clause's risk score is how hard it is to
+read, measured as a Flesch–Kincaid grade (introduced in an earlier entry):
+
+`0.39 × (words per sentence) + 11.8 × (syllables per word) − 15.59`
+
+`score.flesch_kincaid_grade` finds words with the pattern
+`[A-Za-z][A-Za-z'-]*`, which allows a hyphen inside a word. PDFs often
+break a long word at a line end with a hyphen, so the stored text reads
+`"para-\nsurgical"`. The line break ends the match, so the grade saw two
+short words instead of one long one. More words with fewer syllables each
+makes a clause look *easier* than it is. M45's check found this on 19
+clauses of the two real policies, one word each.
+
+**The fix** (`api/app/pipeline/score.py`):
+
+```python
+# Letters on both sides: "Section B-\n2.8" and a phone number "044-\n4002"
+# are not a word continuing. Either case after the break, because the policies
+# break "Pre-\nExisting" and "E-\nOpinion" too.
+_RE_LINE_END_HYPHEN = re.compile(r"(?<=[A-Za-z])-[ \t]*\n\s*(?=[A-Za-z])")
+...
+    text = unicodedata.normalize("NFKC", text)
+    text = _RE_LINE_END_HYPHEN.sub("-", text)
+    words = _RE_WORD.findall(text)
+```
+
+The hyphen and line break become a plain hyphen, "para-surgical", which
+the word pattern reads as one word.
+
+**Rejected:**
+
+- **Reusing `grounding._quotable`**, which M45 wrote to rejoin broken words
+  for the quotation check. It also lowercases and turns every line break
+  into a space. The reading grade needs the line breaks: in a text with no
+  full stops (Star's list of items not covered), each line counts as one
+  sentence. Without that, the list read as one 221-word sentence and scored
+  a grade of 94.
+- **Grounding's own pattern `(?<=\w)-\s+(?=\w)`.** It joins at any
+  whitespace, so "pre- and post-hospitalisation" would become "pre-and".
+- **Dropping the hyphen** ("preexisting"). We cannot tell whether the
+  hyphen was real or added by the line break, and keeping it costs nothing.
+  Dropping it would also merge the vowels of "pre-ex…" into one syllable.
+- **Joining only before a lowercase letter.** That was the first plan; it
+  caught 15 of the 19. The other four break capitalised words like
+  "Pre-\nExisting".
+
+**Measured** (all three policies scored with and without the join, clause
+analyses replayed from the cache, no model calls): grades rose by 0.02 to
+0.31 on 19 clauses, 8 in Star and 11 in HDFC, none in the synthetic policy.
+The risk ranking changed in one place: HDFC clause 2.12, which breaks
+"Pre-Existing" twice, swapped with its neighbour at ranks 28 and 29. Fixing
+one miscounted word per clause should nudge grades, not reorder the map.
+
+## 2. An abbreviation ended a sentence in the exception check
+
+**The problem.** At analysis time the model lists each clause's exceptions
+("this clause does not apply when ..."), and the app prints them under the
+clause. Before printing, `verify_exception` in `api/app/grounding.py`
+checks each one: the span must be in the clause text, and an exception word
+("unless", "except", "provided that" ...) must come before it *in the same
+sentence*:
+
+```python
+sentence_so_far = _SENTENCE_END.split(haystack[:start])[-1]
+if _MARKER.search(_CLOSED_BRACKET.sub(" ", sentence_so_far)):
+    return True
+```
+
+A sentence ended at any full stop followed by a space,
+`re.compile(r"[.!?]\s")`. So in "excluded unless the deductible of Rs.
+10,000 is paid by ...", the sentence was cut after "Rs.", the "unless" fell
+into the previous sentence, and a true exception was dropped. "No. 3",
+"i.e." and "e.g." did the same. Dropping is the safe way to fail, because
+the clause text is still on screen, but it loses exactly what the check
+exists to keep.
+
+**Which abbreviations are real.** The PDF text of all three policies was
+searched for short words followed by ". ". Star has "no." (11 times, e.g.
+"toll free no. 1800"), "i.e.", "dr.", plus "etc." and "ltd."; HDFC has
+"rs." (20, e.g. "deductible of rs. 10,000"), "sr. no.", "i.e.", "reg.".
+
+**The fix:**
+
+```python
+_SENTENCE_END = re.compile(
+    r"(?<!\brs)(?<!\bno)(?<!\bsr)(?<!\bdr)(?<!\bviz)(?<!\bi\.e)(?<!\be\.g)[.!?]\s"
+)
+```
+
+## Concept 61: negative lookbehind
+
+`(?<!X)` in a regular expression means "match here only if X does not come
+directly before this point". It consumes no characters: it looks back and
+either allows or forbids the match. Above, a full stop ends a sentence
+unless "rs", "no", "i.e" and so on sit immediately before it.
+
+Two details matter. Python's `re` requires every lookbehind to have a fixed
+width, so `(?<!rs|i\.e)` (two and three characters) is an error; the list is
+written as several lookbehinds in a row, each of fixed width. And the `\b`
+(word boundary) inside each one stops "rs" matching the end of a longer
+word: "hours." still ends a sentence.
+
+**Rejected:**
+
+- **Adding "etc." and "ltd."** Both often *do* end a sentence (Star prints
+  "co ltd." 28 times at the end of a line). Treating a real end as none
+  fails the unsafe way: the previous sentence's "except" would reach a span
+  it does not govern and print a false exception. A test pins this
+  (`test_etc_still_ends_a_sentence`).
+- **"A sentence ends only before a capital letter."** The check runs on
+  normalised, lowercased text; reading case would need a second copy.
+
+**Measured before keeping it**, because an earlier change of this kind was
+reverted (Failure 107: restoring HDFC's Geography exception turned a paid
+dengue claim into a refusal). Both measurements make no model calls:
+
+1. All 102 (exception, clause) pairs the analysis stage checks, across the
+   three policies, replayed from the cache: old and new rule disagree on
+   **0**.
+2. `evals/compare_requests.py` against the previous code: **0 of 114** eval
+   questions send a different request.
+
+So nothing measured today moves. Only one clause with an exception (HDFC
+2.9) contains one of these abbreviations. The change protects the next
+policy, whose exception may sit after a "Rs.".
+
+## Failure 108: a timing test that failed only after other tests had run
+
+**Setup.** One test in `api/tests/test_llm.py` proves that a repeated model
+call is answered from the response cache. It empties the cache, makes the
+same call twice against the real Ollama, and requires the second to be at
+least five times faster:
+
+```python
+assert warm_seconds < cold_seconds / 5, (
+    f"cache appears not to be hit: cold={cold_seconds:.2f}s warm={warm_seconds:.2f}s"
+)
+```
+
+Every cached call first needs Ollama's version number, because the version
+is part of the cache key (an Ollama update changes answers). Asking costs
+about 0.43 s (Failure 71), so the client remembers it for one minute in a
+module-level variable (`api/app/llm/client.py`):
+
+```python
+_VERSION_TTL_SECONDS = 60.0
+_version: tuple[float, str] | None = None
+
+async def runtime_version() -> str:
+    ...
+    if _version is not None and now - _version[0] < _VERSION_TTL_SECONDS:
+        return _version[1]
+    ...  # HTTP request to /api/version, about 0.43 s
+```
+
+**What happened.** The test always passed alone. In the full suite it
+failed in about 2 of 8 runs, with a "cache hit" far slower than a SQLite
+lookup.
+
+**Why.** A module-level variable outlives the test that set it. Alone, the
+remembered version starts empty, so the version request happens inside the
+first (cold) call, and the second (warm) call is a pure lookup. In the full
+suite, the live tests in `api/tests/test_api.py` run first and leave a
+remembered version behind. If it is, say, 59 seconds old when this test
+starts, the cold call still uses it; one second of model time later the
+minute is up, and the *warm* call pays the 0.43 s request. With a 1 s cold
+call the limit is 0.2 s, so the test fails although the answer did come
+from the cache. The gap between `test_api.py`'s last version request and
+this test is about the same every run and happens to sit near one minute,
+which is why the failure was frequent rather than rare.
+
+It was shown without the model by replacing the model call with a 1.0 s
+sleep and the version request with a 0.43 s sleep, then setting the
+remembered version's age before the test body: ages 0–58.5 s and 60.5 s up
+passed; 59–59.8 s all failed with `cold=1.02s warm=0.44s`.
+
+**The fix** is in the test, not the app. It clears the remembered version
+itself, so the request always lands in the cold call:
+
+```python
+async def test_cache_returns_identical_result_and_skips_the_model(monkeypatch):
+    ...
+    cache.clear()
+    # Forget the Ollama version an earlier test remembered, so the ~0.4s request
+    # for it lands in the cold call. Left as it was, the minute could run out
+    # between the two calls and bill that request to the warm one.
+    monkeypatch.setattr(client, "_version", None)
+```
+
+`monkeypatch` restores the old value when the test ends, so no other test
+sees the change.
+
+**Rejected:** a retry or a looser limit (hides the cause; a test that
+passes on its second try proves nothing); checking a model-call counter
+instead of time (would lose the property this test protects: Failure 71 was
+caught because a cache hit had become *slow*); changing the client's
+one-minute memory (the app is right; the test's assumption was wrong).
+
+**Confirmed on the real model:** with the three changes of this milestone
+merged, the full suite (334 tests, 8 of them calling Ollama 0.35.1) passed
+11 runs out of 11. Had the fix done nothing, a 2-in-8 failure rate would
+give 11 clean runs by chance about 4% of the time.
+
+**The lesson.** A test that passes alone and fails in the suite is reading
+state another test left behind. This test already reset the obvious shared
+state (it emptied the response cache) but not the version cache in front
+of it, and because that cache expires, the failure depended on the clock as
+well as on test order.
+
+## Check it yourself
+
+```bash
+cd api
+# 1. the same text, one word broken across a line: identical grades
+.venv/Scripts/python -c "from app.pipeline.score import flesch_kincaid_grade as g; print(g('Pre-existing diseases are excluded.'), g('Pre-\nexisting diseases are excluded.'))"
+# 2. abbreviations, and "etc." still ending a sentence
+.venv/Scripts/python -m pytest -q tests/test_grounding.py -k "abbreviation or etc"
+# 3. the cache test, after the live API tests (needs Ollama running)
+.venv/Scripts/python -m pytest tests/test_api.py tests/test_llm.py -m llm -q
+```
+
+**Predict before you look:** if the client's one-minute memory were changed
+to five seconds, would the cache test still be reliable?
+
+<details>
+<summary>Answer</summary>
+
+Yes. The test now forces the version request into the cold call, and a warm
+call takes milliseconds, far less than five seconds, so the memory cannot
+expire between the two calls.
 </details>
