@@ -506,3 +506,25 @@ def test_a_bold_number_before_plain_words_is_a_list_item():
                           page_count=1, page_starts=[0])
 
     assert [s.number for s in segment(result)] == ["1.1", "1.2", "4.13"]
+
+
+def test_an_oversized_clause_is_cut_where_a_sentence_ends():
+    """The cap once cut at the last line break, mid-sentence: HDFC's waiting
+    period definition was split before "diseases/treatments are not covered",
+    and that tail alone read as a 36-month wait on every claim."""
+    from app.pipeline.segment import _split_oversized
+
+    sentence = "Def. 7. A term means a thing that is defined here in full.\n"
+    wrapped = "Def. 8. Waiting Period means a period during which specified\n"
+    # Sized so the last line break inside the 3,000-character window is the
+    # one after "specified": the old rule cut exactly there.
+    tail = "diseases are not covered" + " here" * 40 + ".\n"
+    text = sentence * 48 + wrapped + tail + sentence * 10
+    assert text.rfind("\n", 0, MAX_CLAUSE_CHARS) == len(sentence * 48 + wrapped) - 1
+    seg = Segment(order_idx=0, section_path="", number="1.2", heading="1.2. Definitions",
+                  text=text, page_start=0, page_end=0, char_start=0, char_end=len(text))
+
+    pieces = _split_oversized(seg, text)
+
+    assert len(pieces) > 1
+    assert all(p.text.rstrip().endswith(".") for p in pieces)

@@ -57,6 +57,8 @@ HEADING_MAX_CHARS = 90
 # comfortable single unit for the analyzer, while capping the damage done by a
 # document with no detectable structure at all.
 MAX_CLAUSE_CHARS = 3000
+# A line break after a full stop, colon or semicolon: where a sentence ends.
+_RE_SENTENCE_LINE_END = re.compile(r"(?<=[.:;])[ \t]*\n")
 
 # "4.", "4.2", "4.2.1" followed by whitespace.
 _RE_DECIMAL = re.compile(r"^(\d+(?:\.\d+)*)\.?\s+(?=\S)")
@@ -287,8 +289,15 @@ def _split_oversized(seg: Segment, raw_text: str) -> list[Segment]:
     while start < seg.char_end:
         end = min(start + MAX_CLAUSE_CHARS, seg.char_end)
         if end < seg.char_end:
-            # Prefer the last newline inside the window so we cut between lines.
-            nl = raw_text.rfind("\n", start, end)
+            # Prefer a line that ends a sentence, so a piece never starts
+            # mid-sentence: HDFC's "Def. 30. Waiting Period means a period ...
+            # during which specified | diseases/treatments are not covered" was
+            # cut there, and the tail alone read as a 36-month wait on every
+            # claim. Only in the window's second half, so pieces stay large;
+            # failing that, the last newline, as before.
+            ends = [m.end() - 1 for m in _RE_SENTENCE_LINE_END.finditer(
+                raw_text, start + MAX_CLAUSE_CHARS // 2, end)]
+            nl = ends[-1] if ends else raw_text.rfind("\n", start, end)
             if nl > start:
                 end = nl
         pieces.append(
