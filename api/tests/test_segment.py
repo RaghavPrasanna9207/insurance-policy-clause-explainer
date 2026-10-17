@@ -607,3 +607,20 @@ def test_an_amount_of_money_is_not_a_clause_number():
     assert _numbering("7.5 Lakhs") is None
     assert _numbering("1.10 Crore Sum Insured (that is 10 Lakh base)") is None
     assert _numbering("1.4 Day Care Treatment") == ("1.4", True)
+
+
+def test_an_unnumbered_definition_starts_a_clause():
+    """ICICI numbers none of its definitions: they ran together and were cut
+    every 3,000 characters, mid-definition. A bold quoted term followed by
+    "means", "shall mean" or a dash starts one, even with its opening quote
+    missing. A quoted phrase in plain running text does not."""
+    rows = [
+        ("b. DEFINITIONS:", 43, 0, True),
+        ('"Accident" means a sudden, unforeseen and involuntary event.', 43, 20, True),
+        ('Condition Precedent" shall mean a Policy term or condition.', 43, 40, True),
+        ('"Hospital" - A hospital means any institution established for care.', 43, 60, True),
+        ('Note that "Hospital" means a registered one here.', 43, 80, False),
+    ]
+    headings = [s.heading for s in segment(_document(rows))]
+
+    assert headings == ["Accident", "Condition Precedent", "Hospital"]

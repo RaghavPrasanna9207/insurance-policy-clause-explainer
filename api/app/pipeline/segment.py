@@ -153,6 +153,13 @@ _RE_ANNEXURE_HEAD = re.compile(r"^annexure[\s-]+(?:[a-z]|[ivxl]+|\d+)\b", re.I)
 #     clauses 4.x, while HDFC's "1. Standard General Terms & Clauses" restarts
 #     inside its Section D and stays a clause.
 _RE_OUTLINE_HEAD = re.compile(r"^([a-h]|\d{1,2})\.\s+([A-Za-z][A-Za-z &]{2,45}?)\s*[.:]?$")
+# An unnumbered definition: a bold term in quotes, then "means". ICICI numbers
+# none of its 60-odd definitions, so they ran together and were cut every 3,000
+# characters, mid-definition. The opening quote is optional: ICICI drops it in
+# two places ("Condition Precedent" shall mean ...).
+_RE_DEFINED_TERM = re.compile(
+    r"^[\"“]?([A-Z][\w&/() \"“”-]{1,60}?)[\"”]\s*"
+    r"(?:[-–:]\s|(?:means|refers\s+to|shall\s+mean|includes)\b)")
 _OUTLINE_FILLER = frozenset({"standard", "general", "other", "specific", "terms", "and", "&", "the"})
 _RE_OUTLINE_NAME = re.compile(
     r"^(?:preamble|definition|benefit|coverage|exclusion|condition|clause)s?$")
@@ -475,6 +482,11 @@ def segment(result: IngestResult) -> list[Segment]:
             section = outline
             if text != line.text:
                 skip = i + 1
+            continue
+        if line.bold and (term := _RE_DEFINED_TERM.match(text)):
+            flush()
+            heading = term.group(1)
+            buffer = [line]
             continue
         numbering = _numbering(text)
         # The words' styling, not the number's: a lone marker joined to its
