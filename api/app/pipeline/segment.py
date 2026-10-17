@@ -34,6 +34,7 @@ Each line is classified as SECTION heading, CLAUSE heading, or BODY, using:
 """
 
 import re
+import unicodedata
 from dataclasses import dataclass, field
 
 from app.pipeline.ingest import IngestResult, Line
@@ -133,6 +134,23 @@ _RE_SECTION_HEAD = re.compile(
 # every mention of an annexure in running text ("Annexure B to this Policy
 # incurred ...") was not.
 _RE_ANNEXURE_HEAD = re.compile(r"^annexure[\s-]+(?:[a-z]|[ivxl]+|\d+)\b", re.I)
+
+# A top-level heading in body-size type, numbered like an outline: ICICI's
+# "a. PREAMBLE:", "c. Benefits", "d. EXCLUSIONS:"; Niva's "5." beside "Exclusions".
+# Size and capitals miss both, so the clauses under them kept the section above:
+# Niva's 30-day and pre-existing-disease waits were filed under "Optional
+# Benefit:", and the waiting-period rule read them as add-on-only.
+# Three guards, each from a line on five PDFs that the loose version took:
+#   - letters a-h only: "i. Standard Definitions" and "v. In case of ..." are items;
+#   - the words, less filler, must be one name for a part of a policy: "Other
+#     Terms and Conditions" is, "Secure Benefit" and "Renewal Premium:" are not;
+#   - a number must carry on the top-level count: Niva's "5." comes after
+#     clauses 4.x, while HDFC's "1. Standard General Terms & Clauses" restarts
+#     inside its Section D and stays a clause.
+_RE_OUTLINE_HEAD = re.compile(r"^([a-h]|\d{1,2})\.\s+([A-Za-z][A-Za-z &]{2,45}?)\s*[.:]?$")
+_OUTLINE_FILLER = frozenset({"standard", "general", "other", "specific", "terms", "and", "&", "the"})
+_RE_OUTLINE_NAME = re.compile(
+    r"^(?:preamble|definition|benefit|coverage|exclusion|condition|clause)s?$")
 
 # Section names that recur across IRDAI health policies. A secondary signal for
 # policies whose headings carry neither styling nor a "SECTION n" prefix.
@@ -246,6 +264,27 @@ def _looks_like_section(line: Line, body_size: float) -> bool:
         if _RE_SECTION_WORD.search(stripped.lower()):
             return True
     return False
+
+
+def _outline_section(lines: list[Line], i: int, text: str, current: str) -> str | None:
+    """The heading, if `text` is an outline-numbered section heading.
+
+    `current` is the number of the clause being built, for the top-level count.
+    """
+    m = _RE_OUTLINE_HEAD.match(unicodedata.normalize("NFKC", text.strip()))
+    if not m:
+        return None
+    name = " ".join(w for w in m.group(2).lower().split() if w not in _OUTLINE_FILLER)
+    if not _RE_OUTLINE_NAME.match(name):
+        return None
+    label = m.group(1)
+    if label.isdigit():
+        if not current.startswith(f"{int(label) - 1}."):
+            return None
+        after = [_as_read(lines, j) for j in range(i + 1, min(i + 4, len(lines)))]
+        if not any(t.startswith(f"{label}.1") for t in after):
+            return None
+    return m.group(0)
 
 
 def _as_read(lines: list[Line], i: int) -> str:
@@ -409,7 +448,10 @@ def segment(result: IngestResult) -> list[Segment]:
     lines = result.lines
     bold_numbers = _numbers_are_bold(lines, body_size)
 
+    skip = -1  # the words line of an outline heading, already read with its marker
     for i, line in enumerate(lines):
+        if i == skip:
+            continue
         # Order matters: section headings are checked first, because a section
         # heading like "4. EXCLUSIONS" also matches the clause numbering
         # pattern. Size is what tells them apart.
@@ -419,6 +461,12 @@ def segment(result: IngestResult) -> list[Segment]:
             continue
 
         text = _as_read(lines, i)
+        if outline := _outline_section(lines, i, text, number):
+            flush()
+            section = outline
+            if text != line.text:
+                skip = i + 1
+            continue
         numbering = _numbering(text)
         # The words' styling, not the number's: a lone marker joined to its
         # words reads them off the next line.

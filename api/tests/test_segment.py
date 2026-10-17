@@ -566,3 +566,32 @@ def test_a_list_restarting_at_one_stays_inside_its_clause():
     ]
 
     assert [s.number for s in segment(_document(rows))] == ["2.12", "1.1", "2"]
+
+
+def test_an_outline_numbered_heading_at_body_size_starts_a_section():
+    """ICICI's "b. DEFINITIONS:" and Niva's "5." beside "Exclusions" are set at
+    body size, so the clauses under them kept the section above; Niva's waits
+    were filed under "Optional Benefit:". A lettered item that is not the name
+    of a part of a policy, and a "1." restarting inside a section, are not."""
+    rows = [
+        ("a. PREAMBLE:", 43, 0, True),
+        ("This Policy is a contract of insurance.", 43, 20, False),
+        ("b. DEFINITIONS:", 43, 40, True),
+        ("2.1. Accident means a sudden event.", 43, 60, True),
+        ("d. Secure Benefit", 43, 80, True),
+        ("4.21. Room Type Modification", 43, 100, True),
+        ("5.", 23, 120, True),
+        ("Exclusions", 43, 120, True),
+        ("5.1. Standard Exclusions", 43, 140, True),
+        ("SECTION D. GENERAL TERMS AND CLAUSES", 43, 160, True),
+        ("1. Standard General Terms & Clauses", 43, 180, True),
+        ("1.1. Disclosure of Information", 43, 200, True),
+    ]
+    by_number = {s.number: s for s in segment(_document(rows))}
+
+    assert by_number["2.1"].section_path == "b. DEFINITIONS:"
+    assert "d. Secure Benefit" in by_number["2.1"].text
+    assert by_number["5.1"].section_path == "5. Exclusions"
+    assert "5" not in by_number and "Exclusions" not in by_number["4.21"].text
+    # HDFC: a "1." restarting inside a section is a clause, not a new section.
+    assert by_number["1"].section_path == by_number["1.1"].section_path         == "SECTION D. GENERAL TERMS AND CLAUSES"
