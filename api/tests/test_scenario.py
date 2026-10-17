@@ -109,6 +109,54 @@ def test_an_oversized_policy_gives_up_definitions_before_coverage():
     assert [c.clause_type for c in kept] == ["coverage", "exclusion"]
 
 
+def test_a_clause_the_code_names_is_kept_whatever_its_rank():
+    """M49: the computed blocks name a clause ("clause 2: requires 30 days");
+    trimming it away would leave the prompt talking about a clause it hides."""
+    clauses = [_clause("1", 90.0), _clause("2", 1.0, clause_type="definition"), _clause("3", 80.0)]
+
+    kept = shortlist(clauses, token_budget=160, keep={"2"})
+
+    assert "2" in [c.number for c in kept] and len(kept) == 2
+
+
+async def test_the_pick_reads_every_clause_and_only_its_result_is_fitted(monkeypatch):
+    """M49: a policy over the budget used to lose its definitions and lowest-
+    impact clauses before the model read anything (HDFC lost 33 on every
+    question). The pick now sees all of them; the trim comes after."""
+    from app.pipeline import scenario as S
+
+    clauses = [_clause(str(n), float(n), clause_type="definition" if n < 3 else "exclusion")
+               for n in range(1, 7)]
+    seen = {}
+
+    async def facts(_):
+        return {}
+
+    async def narrow(scenario, f, given, computed):
+        seen["picked_from"] = [c.number for c in given]
+        return given[:4]
+
+    class Stop(Exception):
+        pass
+
+    async def reason(scenario, f, considered, computed, **_):
+        seen["reasoned_over"] = [c.number for c in considered]
+        raise Stop
+
+    monkeypatch.setattr(S, "extract_facts", facts)
+    monkeypatch.setattr(S, "narrow", narrow)
+    monkeypatch.setattr(S, "reason", reason)
+    monkeypatch.setattr(S, "PICK_ABOVE_TOKENS", 0)
+    monkeypatch.setattr(S, "clause_token_budget", lambda: 160)  # room for two
+
+    with pytest.raises(Stop):
+        await S.run_scenario("I was in hospital.", clauses)
+
+    assert seen["picked_from"] == ["1", "2", "3", "4", "5", "6"]
+    # Of the four picked, the two that fit: exclusions before definitions.
+    assert seen["reasoned_over"] == ["3", "4"]
+
+
 def test_one_clause_too_large_does_not_end_the_selection():
     """A long annexure that does not fit must not push out every short clause after it."""
     clauses = [_clause("1", 90.0), _clause("A", 80.0, text="x" * 3_000), _clause("2", 70.0)]
