@@ -433,6 +433,13 @@ A fourth insurer's PDF exposed a fault in reading the text: the space after "1."
 - **Failure 111: an optional cover's choices read as always applying** - a list restarting at 1 inside "2.12" now stays in it.
 - **Failure 112: the right refusal for the wrong reason** - diagnosed from stored answers without the model; the consistency check now also questions a refusal that cites no window clause. Introduces **Concept 62: a right verdict for a wrong reason is a wrong answer**.
 
+### M48 - A fourth insurer's clause structure, checked against the other four after every change
+ICICI Lombard's wording, split into clauses with no model involved: from 92 clauses (median 2,934 characters) to 250 (median 466). Every edit was checked against a saved copy of all five policies' clauses, which reshaped three fixes. Read it for the snapshot technique and for how a loose rule is tightened one counter-example at a time.
+- **Concept 63: a snapshot of the whole output, compared after every change** - characterization testing for code whose risk is the cases nobody thought of.
+- **Failure 113: Niva's standard waiting periods were filed under "Optional Benefit"** - found by checking the code's marked shortcuts against real PDFs; fixed for ICICI, still blocked on Niva by a page stored bottom-first.
+- **Failure 114: "7.5 Lakhs" was a clause number** - plus two slips of mine: a shell that turned `\b` into a backspace, and a commit made over a failing test.
+- Page numbers under a tall letterhead; unnumbered definitions; and why ICICI's size is a design decision.
+
 ---
 
 ## Related documents

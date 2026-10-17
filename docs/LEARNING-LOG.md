@@ -18296,3 +18296,306 @@ which is true because the number is bold. Had it been switched to
 `words_bold` (the rejected change above), the plain words would have made
 it a list item, which is exactly how Star lost 23 clauses.
 </details>
+
+---
+
+# M48 — A fourth insurer's clause structure, checked against the other four after every change
+
+Written 2026-10-17, on branch `m48-icici-segmenter`, cut from M47's branch
+(M48 needs M47's kept space after list numbers). No model was run for any of
+it: the segmenter, the stage that cuts a policy's text into clauses, uses no
+model (Concept 5), so every change here could be checked by running it.
+
+**The policy.** ICICI Lombard Elevate (111 pages, made in Microsoft Word),
+fetched by `evals/real/fetch_policies.py` like the other real wordings and
+never committed. Before M47 the segmenter found 92 clauses in it with a
+median length of 2,934 characters, and the 3,000-character size cap cut 58
+of them, because almost nothing marked where a clause began.
+
+**The constraint.** The HDFC and Star question sets have not yet been re-run
+on M47's code. If this milestone changed their clause text as well, the next
+re-run could not say which milestone moved an answer. So every change here
+had to leave the synthetic, Star and HDFC clauses byte-identical, and that
+was checked after every edit, with one exception, stated where it happens.
+
+## Concept 63: a snapshot of the whole output, compared after every change
+
+A unit test checks the cases someone thought of. The segmenter's real risk
+is the cases nobody thought of: a new rule that also fires on some line in
+another insurer's document. So before the first change, a script saved the
+segmenter's full output for all five PDFs (every clause's number, section,
+heading and text) as JSON, and after every edit it re-ran and compared:
+
+```
+synthetic-health-policy: 40 -> 40 clauses, IDENTICAL
+hdfc-optima-secure: 126 -> 126 clauses, IDENTICAL
+icici-elevate: 190 -> 250 clauses, TEXT CHANGED
+niva-reassure-2: 143 -> 143 clauses, IDENTICAL
+star-arogya-sanjeevani: 79 -> 79 clauses, IDENTICAL
+```
+
+This is sometimes called a *characterization* or *golden-master* test: it
+does not say what the output should be, only whether it changed. That is
+exactly the question here. Any "TEXT CHANGED" outside ICICI was a lead to
+follow line by line, and three of the fixes below were reshaped because of
+one. After each accepted fix the snapshot was saved again, so the next
+comparison showed only the next fix's effect. The script lives in a
+scratch folder and is not committed; it takes about ten seconds.
+
+## Before the fixes: the shortcuts marked "later", checked against the PDFs
+
+The code marks deliberate simplifications with a `ponytail:` comment naming
+their limit. Ten exist. Four depend on the person's words (lists of places
+abroad, Indian cities, words for drink, first-person offences), so no
+document can test them. The six that depend on the policy text were checked
+against all five PDFs by script:
+
+| Shortcut | What it gives up | Found |
+|---|---|---|
+| `grounding.py`: no exceptions read from a clause of more than 4 items | per-item exceptions | Known ones only (HDFC's general exclusions, Star's 29-item list), plus ICICI's maternity "ectopic pregnancy", the same one Star had |
+| `waiting.py`: a waiting period outside a section named for waits or exclusions gets the narrow "only what this clause lists" line | general periods in oddly named sections | **A real bug on Niva** (below) |
+| `waiting.py`: a list over 2,500 characters is not quoted | long lists | Only definitions and tables, which the rule already ignores |
+| `waiting.py`: a period that never says "wait" loses its computed line | other wordings | Nothing found |
+| `segment.py`: an exclusion code after its text stays with the item above | trailing codes | Matters only for ICICI, whose exclusions are numbered anyway |
+| `segment.py`: "Sec." and "etc." still count as sentence ends | rare cuts | Two ICICI cuts after "etc.", both real sentence ends |
+
+## Failure 113: Niva's standard waiting periods were filed under "Optional Benefit"
+
+**What the check found.** `waiting.py` decides how widely a waiting period
+applies partly from the clause's section:
+
+```python
+listed = (bool(_LISTED.search(f"{heading} {text[:_OPENING_CHARS]}"))
+          or bool(section) and not _GENERAL_SECTION.search(section))
+```
+
+`_GENERAL_SECTION` is `wait|exclu`. A period in any other section is treated
+as *listed*: it bars only the conditions its own clause names. Niva's
+pre-existing-disease, specified-disease and 30-day waits (5.1.1–5.1.3) had
+the section "Optional Beneﬁt:". So the 30-day wait, which bars every
+illness in the first month, would have been read as barring only what it
+lists, and an illness on day 10 would not have been refused by it. Niva has
+no eval questions, which is why nothing caught it. Main has the same
+labels; this was not caused by M47.
+
+**Why.** Niva sets its top-level headings at body size: a bold "5." and,
+on the same row, a bold "Exclusions". The section rule needs a heading to
+be large, or in capitals, or shaped like "SECTION 7". None applied, so "5.
+Exclusions" was read as an empty clause, and the last heading that *was*
+large, "Optional Beneﬁt:" (12 pt), stayed the section for everything after
+it. ICICI has the same problem in another form: its top level is "a.
+PREAMBLE:", "b. DEFINITIONS:", "c. Benefits" (not even bold), "d.
+EXCLUSIONS:", all at body size.
+
+**The fix**, in `api/app/pipeline/segment.py`: an outline-numbered heading
+at body size starts a section.
+
+```python
+_RE_OUTLINE_HEAD = re.compile(r"^([a-h]|\d{1,2})\.\s+([A-Za-z][A-Za-z &]{2,45}?)\s*[.:]?$")
+_OUTLINE_FILLER = frozenset({"standard", "general", "other", "specific", "terms", "and", "&", "the"})
+_RE_OUTLINE_NAME = re.compile(
+    r"^(?:preamble|definition|benefit|coverage|exclusion|condition|clause)s?$")
+```
+
+The first version was looser: a letter or number, a short line, and any
+word from the existing list of section words. The snapshot showed HDFC and
+Star changing, and the list of lines it had taken explained why: Star's "a.
+refund proportionate premium", HDFC's "d. Secure Benefit", roman numerals
+("i. Standard Definitions"), Niva's "a. Renewal Premium:". Each guard in
+the final version answers one of them:
+
+- **letters a–h only**, so "i." and "v." (roman numerals) are items;
+- **the words, less filler, must be exactly one name for a part of a
+  policy**: "Other Terms and Conditions" reduces to "conditions" and passes;
+  "Secure Benefit" reduces to "secure benefit" and does not;
+- **a number must carry on the document's top-level count**: "5." is a
+  section only if the clause just before it is numbered "4.x", and only if
+  "5.1" follows within three lines. HDFC's "1. Standard General Terms &
+  Clauses" restarts the count inside its Section D, so it stays a clause.
+
+```python
+    if label.isdigit():
+        if not current.startswith(f"{int(label) - 1}."):
+            return None
+        after = [_as_read(lines, j) for j in range(i + 1, min(i + 4, len(lines)))]
+        if not any(t.startswith(f"{label}.1") for t in after):
+            return None
+```
+
+When "5." and "Exclusions" are two lines on one row, the words line is
+skipped after the heading is taken, or it would become a one-word clause.
+
+**Result:** ICICI's six top-level sections are found, and Niva's "6.
+General Terms and Clauses". Synthetic, Star and HDFC are byte-identical.
+
+**But Niva's "5. Exclusions" still is not found, and the waits are still
+misfiled.** The count guard failed on it, and the reason is a second fault:
+Niva's PDF stores page 9 bottom-first. The 30-day wait, at 663 points down
+the page, comes out of PyMuPDF *before* "5. Exclusions" at 250. So when "5."
+arrives, the clause being built is already "5.1.3", not "4.x". Even with the
+heading found, the 30-day wait would sit in the section before it, because
+it is read earlier.
+
+The fix would be to put each page into reading order. That was tried before
+and reverted: sorting lines by position read Star's two-column pages
+straight across. A quick measure of "the next block starts higher up in the
+same column" flagged 20 to 106 pages in every real policy, mostly page
+headers and footers written first, so it cannot tell a scrambled page from
+a normal one. **Left as a decision**, because any reading-order change
+touches the text of every policy.
+
+## Failure 114: "7.5 Lakhs" was a clause number, and my fix broke a test I did not look at
+
+**The fault.** ICICI's health-check table has a cell "7.5 Lakhs" (₹7.5 lakh
+of sum insured) on a line of its own. A dotted number followed by a capital
+is *strong* clause numbering, so it became clause 7.5, twice.
+
+**First fix, too wide.** A guard rejecting a number followed by a unit:
+lakhs, crores, days, months, years, hours. The snapshot showed the
+synthetic policy changing: "1.4 Day Care Treatment" is a real clause, and
+"Day" matched "days?". Time units cannot be on the list. The final guard
+is money only:
+
+```python
+_RE_UNIT = re.compile(r"(?:lakhs?|lacs?|crores?)\b", re.I)
+...
+        rest = text[m.end() :]
+        if _RE_UNIT.match(rest):
+            return None
+```
+
+This one change was accepted outside ICICI. HDFC's plan-comparison chart
+has the same "7.5 Lakhs" cell, read as clause 7.5, and Niva has an example
+line "1.10 Crore Sum Insured (that is 10 Lakh base ...)" read as clause
+1.10. Both are false clauses. Keeping a known false clause in HDFC only to
+keep its text identical would be fixing the rule for one insurer's layout
+and documenting the rest away. The change in HDFC is confined to the plan
+chart, which no eval question touches.
+
+**Two slips along the way, both mine:**
+
+1. The pattern was first written through a shell command, and the shell
+   turned `\b` (word boundary) into a backspace character. The rule
+   silently matched nothing, and the snapshot reported "IDENTICAL" for
+   ICICI too. That "no change" where a change was expected is what gave it
+   away.
+2. The commit (`a5999bb`) went in with a failing test. The command ran the
+   tests and then committed, separated by `;`, which runs the next command
+   whatever the last one returned. The failing test was the old
+   `test_prose_starting_with_a_number_is_not_a_clause`, which said "1.5
+   lakhs and fifteen in-patient beds" is *weak* numbering. Under the new
+   rule it is no numbering at all, which is the stronger and correct answer.
+   Fixed in the next commit (`d9db92c`), not by rewriting history. After
+   that, commits were chained with `&&`, so a failure stops them.
+
+## Page numbers below a tall letterhead
+
+Running headers, footers and page numbers are removed by repetition: a line
+in the top or bottom 12% of the page (`MARGIN_BAND`) that recurs on at least
+half the pages is furniture. ICICI prints its page number 16.7% down the
+page, under a tall letterhead, so all 111 of them sat inside clause text,
+often mid-sentence, where a quotation spanning the page break could never
+be found.
+
+Widening the band risks catching real text on other policies. The page
+number has a sharper signature: a line that is only digits, at the same
+height on at least half the pages.
+
+```python
+        if line.bbox[1] < height * MARGIN_BAND:
+            band = "top"
+        elif line.bbox[3] > height * (1 - MARGIN_BAND):
+            band = "bottom"
+        elif line.text.strip().isdigit():
+            # ... furniture if it holds that place on half the pages.
+            return "number", f"{line.bbox[1] / height:.2f}"
+```
+
+The first version checked digits *before* the bands. HDFC changed: its page
+numbers, already removed by the bottom band, sit at slightly different
+heights on different pages, so keyed by exact height they no longer
+repeated, and four came back. Checked after the bands, they are untouched.
+Lone numbers inside ICICI's clause text went from 440 to 329: exactly 111
+removed, one per page. The rest are table cells.
+
+**Known limit**, written into the comment: a number standing at the same
+height on half the pages would be removed too. The test's first version did
+exactly that (a body number placed identically on every page) and failed;
+real table cells reach that height on 6 of 111 pages.
+
+## Unnumbered definitions
+
+ICICI numbers none of its definitions, so section b ran as one block cut
+every 3,000 characters, mid-definition. Each definition does begin the same
+way: a bold term in quotes, then "means", "refers to", "shall mean",
+"includes", or a dash.
+
+```python
+_RE_DEFINED_TERM = re.compile(
+    r"^[\"“]?([A-Z][\w&/() \"“”-]{1,60}?)[\"”]\s*"
+    r"(?:[-–:]\s|(?:means|refers\s+to|shall\s+mean|includes)\b)")
+```
+
+The opening quote is optional because ICICI drops it twice ('Condition
+Precedent" shall mean'). Quotes are allowed inside the term for '"Surgery"
+or Surgical Procedure" means'. The line must be bold, so a quoted phrase in
+running text does not start a clause. Result: 68 definition clauses, none
+cut by the size cap, and no clause outside the definitions section started
+by this rule. Three definitions are still missed: two whose term wraps onto
+a second line, and one that starts mid-line after another definition.
+Catching them would need guessing where a term began.
+
+## ICICI, before and after
+
+| | Before M47 | After M48 |
+|---|---|---|
+| Clauses | 92 | 250 |
+| Median length (characters) | 2,934 | 466 |
+| Pieces cut by the size cap | 58 | 23 |
+| Sections found | 3 | 9 |
+
+(M47 alone, which kept the space after list numbers, took the clause count
+from 92 to 186.)
+
+The 23 remaining cuts are in clauses that really are long: the wellness
+program and Elevate HER add-on tables, the claims procedure.
+
+## Not done
+
+- **Tables** are still read one cell per line.
+- **Exclusion ids.** ICICI's exclusions are numbered 1–25, each printing its
+  IRDAI code ("Code- Excl01"). HDFC's lettered items take the code as their
+  id; extending that to numbered items would change Star's and Niva's ids.
+- **Reading order** (Failure 113): a decision, not a fix.
+- Lines that are only a Symbol-font bullet (U+F0B7), and "1‑year" written
+  with a non-breaking hyphen, which the waiting-period duration pattern does
+  not read.
+
+**ICICI is too large for the model's context, and that is a design
+decision.** The reasoning prompt has room for about 23,800 tokens of clause
+text (`clause_token_budget()`). ICICI's clauses are 57,400 tokens; its
+benefits section alone is 37,500. HDFC is over too, at 36,800, which is why
+33 of its clauses (definitions and procedural ones) are already left out of
+every prompt. When a policy does not fit, `shortlist()` drops definitions
+and procedural clauses first, then the lowest-impact clauses, *before* the
+model's picking step sees them. For ICICI that means some benefit clauses
+are dropped unread on every question.
+
+## Check it yourself
+
+```bash
+cd api
+.venv/Scripts/python -m pytest -q tests/test_segment.py -k "outline or money or unnumbered_definition"
+.venv/Scripts/python -m pytest -q tests/test_ingest.py -k letterhead
+```
+
+**Predict before you look:** the outline rule takes "c. Benefits" as a
+section. Would it take "c. Benefit Payable"?
+
+<details>
+<summary>Answer</summary>
+
+No. Less filler, "benefit payable" is two words, and the name must be
+exactly one of the listed parts of a policy (with an optional plural "s").
+That is the guard that keeps HDFC's "d. Secure Benefit" a clause.
+</details>
