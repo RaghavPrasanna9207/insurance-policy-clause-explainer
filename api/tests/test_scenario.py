@@ -1230,6 +1230,13 @@ def test_paying_for_an_expense_outside_its_window_is_a_contradiction():
     # The right refusal, and a payment inside the window, are left alone.
     assert find_contradictions([_citation("1.6", "denies")], "not_covered", computed(7)) == ([], [])
     assert find_contradictions([_citation("1.6", "permits")], "covered", computed(5)) == ([], [])
+    # M47, `hdfc-tests-75-days-before`: "cannot tell" when the arithmetic can.
+    problems, _ = find_contradictions([], "insufficient_information", computed(7))
+    assert len(problems) == 1 and "can be answered" in problems[0] and "citing 1.6" in problems[0]
+    assert find_contradictions([], "insufficient_information", computed(5)) == ([], [])
+    # ...and a refusal for a reason the arithmetic did not give (main: AYUSH 1.4).
+    problems, _ = find_contradictions([_citation("1.4", "denies")], "not_covered", computed(7))
+    assert len(problems) == 1 and "Cite 1.6" in problems[0]
 
 
 def test_covered_inside_an_unserved_general_waiting_period_is_a_contradiction():

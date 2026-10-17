@@ -1441,13 +1441,44 @@ def find_contradictions(
     # it. Measured on HDFC, physiotherapy seven months after discharge against
     # 1.6's 180 days: told "clause 1.6 does NOT pay", the answer was
     # conditional - once behind a 20% co-payment no clause states, once calling
-    # the window a waiting period that "has not yet elapsed". Only a paying
-    # verdict is asked about, and not when some window does cover the expense.
-    # Nothing is dropped: the citations may well be right.
-    if verdict in (Verdict.COVERED, Verdict.CONDITIONAL):
-        raised = [w for w in computed.windows
-                  if w.status is not window.WindowStatus.NOT_RAISED]
-        if raised and all(w.status is window.WindowStatus.OUTSIDE for w in raised):
+    # the window a waiting period that "has not yet elapsed". Nothing is asked
+    # when some window does cover the expense. Nothing is dropped: the citations
+    # may well be right.
+    #
+    # M47 added the other two verdicts, both from `hdfc-tests-75-days-before`
+    # (tests 75 days before admission, 1.5 pays 60; the arithmetic said OUTSIDE):
+    #   - insufficient_information, 4 of 5 fresh samples in the eval's order. The
+    #     question was answerable, so "cannot tell" is not the safe answer here;
+    #     it hides the refusal the person needs to know about.
+    #   - not_covered citing no window clause, 5 of 5 asked alone, and the stored
+    #     answers on main and branch: refused because of the pre-existing-disease
+    #     wait (served) or the AYUSH clause. The right verdict for a reason that is
+    #     false, which the person would repeat to the insurer.
+    # The verdict is still the model's: this only asks again, with the
+    # calculation in front of it.
+    raised = [w for w in computed.windows
+              if w.status is not window.WindowStatus.NOT_RAISED]
+    if raised and all(w.status is window.WindowStatus.OUTSIDE for w in raised):
+        if verdict == Verdict.INSUFFICIENT_INFORMATION:
+            problems += [
+                f"- You answered {verdict}, but this question can be answered: "
+                f"it was calculated: {w.describe()} That is not a waiting "
+                f"period that will pass and not a reduction: an expense outside "
+                f"the window is not paid under that clause at all. Unless a "
+                f"different clause in the list pays for these expenses, the "
+                f"verdict is not_covered, citing {w.clause_id}."
+                for w in raised
+            ]
+        elif verdict == Verdict.NOT_COVERED:
+            cited = {c.clause_id for c in citations}
+            if not cited & {w.clause_id for w in raised}:
+                problems += [
+                    f"- You answered {verdict}, but cited none of the clauses that "
+                    f"decide it. It was calculated: {w.describe()} Cite "
+                    f"{w.clause_id} as denying this claim."
+                    for w in raised
+                ]
+        elif verdict in (Verdict.COVERED, Verdict.CONDITIONAL):
             problems += [
                 f"- You answered {verdict}, which means these expenses are paid, "
                 f"but it was calculated: {w.describe()} That is not a waiting "
