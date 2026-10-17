@@ -595,3 +595,14 @@ def test_an_outline_numbered_heading_at_body_size_starts_a_section():
     assert "5" not in by_number and "Exclusions" not in by_number["4.21"].text
     # HDFC: a "1." restarting inside a section is a clause, not a new section.
     assert by_number["1"].section_path == by_number["1.1"].section_path         == "SECTION D. GENERAL TERMS AND CLAUSES"
+
+
+def test_an_amount_of_money_is_not_a_clause_number():
+    """A sum-insured cell "7.5 Lakhs" alone on a line read as clause 7.5 (ICICI,
+    HDFC's plan chart). A time word cannot be on the list: "1.4 Day Care
+    Treatment" is a clause."""
+    from app.pipeline.segment import _numbering
+
+    assert _numbering("7.5 Lakhs") is None
+    assert _numbering("1.10 Crore Sum Insured (that is 10 Lakh base)") is None
+    assert _numbering("1.4 Day Care Treatment") == ("1.4", True)

@@ -67,6 +67,11 @@ _RE_SENTENCE_LINE_END = re.compile(r"(?<=[A-Za-z]{3}[.;])[ \t]*\n")
 
 # "4.", "4.2", "4.2.1" followed by whitespace.
 _RE_DECIMAL = re.compile(r"^(\d+(?:\.\d+)*)\.?\s+(?=\S)")
+# An amount of money after the number makes it a quantity: sum-insured tables
+# have cells like "7.5 Lakhs" on lines of their own (ICICI twice, HDFC's plan
+# chart once), read as clause 7.5 because the next letter is a capital. Money
+# only: "1.4 Day Care Treatment" is a clause, so time units cannot be listed.
+_RE_UNIT = re.compile(r"(?:lakhs?|lacs?|crores?)\b", re.I)
 # A bare integer with no dot and no trailing period ("24 hours ...") is NOT
 # clause numbering - it is prose that happens to start with a number, which
 # occurs constantly in insurance text ("24 hours", "10 in-patient beds",
@@ -223,6 +228,8 @@ def _numbering(text: str) -> tuple[str, bool] | None:
         return None
     if m := _RE_DECIMAL.match(text):
         rest = text[m.end() :]
+        if _RE_UNIT.match(rest):
+            return None
         looks_numbered = bool(rest) and rest[0].isupper()
         return m.group(0).strip(), looks_numbered
     return None
