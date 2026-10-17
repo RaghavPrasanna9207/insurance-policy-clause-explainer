@@ -18599,3 +18599,145 @@ No. Less filler, "benefit payable" is two words, and the name must be
 exactly one of the listed parts of a policy (with an optional plural "s").
 That is the guard that keeps HDFC's "d. Secure Benefit" a clause.
 </details>
+
+---
+
+# M49 — The model reads every clause before anything is cut to fit
+
+Written 2026-10-17, on branch `m49-pick-first`, cut from M48. Chosen by
+Raghav from four options (below). Unit-tested; **not yet measured with the
+model**, because the machine had no memory to spare for a run.
+
+## The problem
+
+The reasoning step sends the model the person's question plus the policy's
+clauses, and the model's context window (28,672 tokens on this machine)
+leaves room for about 23,800 tokens of clause text
+(`clause_token_budget()`). Two of the real policies do not fit:
+
+| Policy | Clause text (tokens) |
+|---|---|
+| Synthetic | ~3,300 |
+| Star | ~19,500 |
+| Niva | ~22,000 |
+| HDFC | ~36,800 |
+| ICICI | ~57,400 (benefits section alone ~37,500) |
+
+Two mechanisms already existed for long policies. `shortlist()` cuts a list
+of clauses down to the budget, giving up definitions and procedural clauses
+first, then the lowest-impact ones. `narrow()` has the model read the
+clauses in groups of about 3,000 tokens (`PICK_GROUP_TOKENS`) and pick up to
+three per group that bear on the question, plus every clause the code's own
+calculations name (`named_by_code`). The model reads a short list well and
+a long one badly, which is why the picking is done in small groups.
+
+The fault was their order in `run_scenario` (`api/app/pipeline/scenario.py`):
+
+```python
+    considered = shortlist(clauses)          # cut to the budget first
+    ...
+    computed = compute(facts, considered, scenario)
+    if clause_tokens(considered) > PICK_ABOVE_TOKENS:
+        considered = await narrow(scenario, facts, considered, computed)
+```
+
+The cut ran first, so the model's picking only ever saw what survived it.
+On HDFC that meant 33 clauses (20 procedural, 13 definitions) were dropped
+on every question before the model read a word. On ICICI it would have
+dropped benefit clauses too, chosen by an impact score rather than by
+relevance to the question. And the code's own arithmetic (`compute`: waiting
+periods, caps, time windows) ran only on the survivors, although the
+comment beside it said it ran "on every clause".
+
+## The options that were weighed
+
+- **A. Keep the order.** No work; ICICI loses benefit clauses unread.
+- **B. Pick first, then fit** (chosen). The picking already reads in small
+  groups, so its input has no size limit; only what it keeps has to fit.
+  Costs more picking calls per question.
+- **C. Show summaries of low-priority clauses instead of their text.**
+  Rejected: a quotation from a summary cannot be checked against the policy's
+  words (the verbatim span check), so those clauses could never be cited.
+- **D. A larger context window.** Not possible: 28,672 tokens is the largest
+  that runs entirely on this machine's 8 GB graphics card (measured in M16).
+
+## The change
+
+```python
+    computed = compute(facts, clauses, scenario)
+    ...
+    considered = clauses
+    if clause_tokens(clauses) > PICK_ABOVE_TOKENS:
+        considered = await narrow(scenario, facts, clauses, computed)
+    considered = shortlist(considered, keep=named_by_code(computed, scenario, clauses, facts))
+```
+
+Three things moved:
+
+1. **`compute` runs on every clause**, as its comment always claimed. A
+   waiting period is now checked even in a clause that would not have fitted.
+2. **`narrow` reads every clause.**
+3. **`shortlist` runs last, with a `keep` set**: the clauses the computed
+   blocks talk about are given room before any other.
+
+```python
+    ranked = sorted(
+        range(len(clauses)),
+        key=lambda i: (clauses[i].clause_id not in keep,
+                       clauses[i].clause_type in DROPPED_FIRST, -clauses[i].impact_score),
+    )
+```
+
+Without `keep`, the new order could do something the old one could not:
+compute a result for a clause ("clause 2#2: requires 24 months ... still
+applies"), then trim that clause away. The prompt would then refer to a
+clause it does not show, which the model can neither read nor cite.
+
+## What it reaches, worked out rather than measured
+
+For a policy that fits the budget, the old `shortlist(clauses)` kept every
+clause, so `compute` and `narrow` saw everything, exactly as they do now; and
+the final `shortlist` has nothing to drop, because what `narrow` keeps is a
+subset of something that fit. So **synthetic, Star and Niva send identical
+requests**, and only HDFC and ICICI change.
+
+This is an argument from the code, not a measurement. The usual instrument,
+`evals/compare_requests.py`, could not be run: it makes real picking calls
+wherever a pick request changed, which needs the model loaded.
+
+**Cost:** picking calls per question go from about 8 to about 14 on HDFC,
+and ICICI needs about 21. Not timed yet.
+
+**Tests** (`api/tests/test_scenario.py`):
+`test_a_clause_the_code_names_is_kept_whatever_its_rank` and
+`test_the_pick_reads_every_clause_and_only_its_result_is_fitted`. The second
+replaces the three model calls with stand-ins and records what each one
+received: the pick must receive all six clauses, and the reasoning step the
+two picked ones that fit. Both fail on the old order.
+
+## Not yet measured
+
+- **HDFC's 14 questions.** Every HDFC request changes. This must be measured
+  after M47's and M48's HDFC runs, or the three changes cannot be told apart.
+- **Time per question** with the extra picking calls.
+- **ICICI** has no eval questions yet.
+
+## Check it yourself
+
+```bash
+cd api
+.venv/Scripts/python -m pytest -q tests/test_scenario.py -k "code_names or pick_reads"
+```
+
+**Predict before you look:** Star is 19,500 tokens, over `PICK_ABOVE_TOKENS`
+(6,000) but under the budget. Does M49 change what Star's reasoning prompt
+contains?
+
+<details>
+<summary>Answer</summary>
+
+No. Before, `shortlist` kept all of Star (it fits), and `narrow` then picked
+from all of it. Now `narrow` picks from all of it directly, and the final
+`shortlist` keeps everything picked, because a subset of something that fits
+also fits. Same input to every step, so the same prompt.
+</details>

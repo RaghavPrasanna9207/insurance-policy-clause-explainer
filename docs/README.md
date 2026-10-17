@@ -440,6 +440,9 @@ ICICI Lombard's wording, split into clauses with no model involved: from 92 clau
 - **Failure 114: "7.5 Lakhs" was a clause number** - plus two slips of mine: a shell that turned `\b` into a backspace, and a commit made over a failing test.
 - Page numbers under a tall letterhead; unnumbered definitions; and why ICICI's size is a design decision.
 
+### M49 - The model reads every clause before anything is cut to fit
+For a policy too long for the context window, clauses used to be cut by type and impact before the model's picking step read them: HDFC lost 33 on every question. Now the pick reads everything in small groups and only its result is fitted, never dropping a clause the code's calculations name. Read it for the four options weighed and for a change whose reach was worked out from the code because it could not yet be measured.
+
 ---
 
 ## Related documents
