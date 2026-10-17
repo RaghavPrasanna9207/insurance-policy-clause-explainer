@@ -18203,9 +18203,14 @@ contradict the arithmetic.
   Failure 112's fix. The `insufficient_information` branch of the new rule
   is covered only by a unit test; whether it fires in the eval's real order
   is unknown.
-- **Replays may now retry.** Any stored eval answer that is `not_covered`,
-  with every window OUTSIDE and no window clause cited, will now trigger a
-  retry, so it is no longer a pure cache replay.
+- **Which stored answers the new rule re-asks.** Measured from the cache,
+  no model calls: every question's stored *first* answer was replayed and
+  tested against the new conditions. Of 92 questions (78 synthetic, 14
+  HDFC), five have every window OUTSIDE, and the rule re-asks exactly one:
+  `hdfc-tests-75-days-before`, the case it was written for. The other four
+  already refuse citing their window clause. Star could not be checked: its
+  six restored spaces changed eight clauses, whose analyses are not cached
+  yet, so none of its 22 questions has a stored answer on this branch.
 - **Star's 22 questions.** Only six spaces changed in Star, but every
   question's prompt changed with them, so no stored answer can be reused.
 - **ICICI** is a separate milestone: no section headings, "7.5 Lakhs" read
