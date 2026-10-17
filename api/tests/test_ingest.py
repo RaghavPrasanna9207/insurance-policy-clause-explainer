@@ -233,3 +233,25 @@ def test_words_bold_reads_the_words_not_the_number(tmp_path: Path):
     assert plain.bold and not plain.words_bold
     bold = ingest(_numbered_line_pdf(tmp_path, "hebo")).lines[0]
     assert bold.bold and bold.words_bold
+
+
+def test_a_page_number_below_a_tall_letterhead_is_not_text(tmp_path: Path):
+    """ICICI prints its page number 17% down the page, under the letterhead and
+    outside the margin band, so all 111 sat inside clause text. A number in the
+    body that does not repeat its place, like a table cell, stays."""
+    import fitz
+
+    path = tmp_path / "letterhead.pdf"
+    doc = fitz.open()
+    for n in range(1, 5):
+        page = doc.new_page()  # 595 x 842 points; 17% down is y = 143
+        page.insert_text((290, 150), str(n), fontsize=9)
+        page.insert_textbox(fitz.Rect(60, 200, 530, 760),
+                            "Body text.\n" * n + str(n * 7), fontsize=9)  # a new height each page
+    doc.save(path)
+    doc.close()
+
+    lines = [l.text.strip() for l in ingest(path).lines]
+
+    assert "1" not in lines and "4" not in lines
+    assert "7" in lines and "28" in lines

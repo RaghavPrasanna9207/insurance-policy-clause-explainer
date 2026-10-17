@@ -171,6 +171,12 @@ def _furniture(pages: list[list[Line]], heights: list[float]) -> set[int]:
             band = "top"
         elif line.bbox[3] > height * (1 - MARGIN_BAND):
             band = "bottom"
+        elif line.text.strip().isdigit():
+            # A bare page number outside the bands is known by its place: ICICI
+            # prints it 17% down the page, under a tall letterhead. Its height on
+            # the page is the key: furniture if it holds that place on half the
+            # pages. ICICI's table cells reach 6 of 111 at any one height.
+            return "number", f"{line.bbox[1] / height:.2f}"
         else:
             return None
         return band, _RE_DIGITS.sub("#", " ".join(line.text.split()))
