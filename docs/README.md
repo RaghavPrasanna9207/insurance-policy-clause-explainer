@@ -426,6 +426,13 @@ Three small faults M45 listed and left, each fixed in isolation and then tested 
 - **An abbreviation ended a sentence in the exception check** - "Rs. 10,000" cut a sentence and could drop a true exception. 0 of 102 stored exceptions change. Introduces **Concept 61: negative lookbehind**.
 - **Failure 108: a timing test that failed only after other tests had run** - a remembered Ollama version expiring between two calls; fixed in the test, confirmed 11 of 11 on the real model.
 
+### M47 - The space after a list number, and what losing it broke
+A fourth insurer's PDF exposed a fault in reading the text: the space after "1." was dropped, so numbered clauses merged into the one above (355 places in HDFC). Fixing it broke HDFC answers three different ways, each traced and fixed. Read it for a correct fix that uncovers further faults one after another, and for an answer that was "right" only because the score ignored its reason. The question sets are not yet re-run on the final code; the entry lists what is missing.
+- **Failure 109: the space after "1." was thrown away** - blank PDF spans dropped with the styling; plus a bold number is not a bold clause (HDFC's definition lists), and why the same rule could not be used for Star.
+- **Failure 110: the size cap cut a clause in mid-sentence** - the tail of a definition read as a 36-month wait on every claim; cuts now prefer a sentence end.
+- **Failure 111: an optional cover's choices read as always applying** - a list restarting at 1 inside "2.12" now stays in it.
+- **Failure 112: the right refusal for the wrong reason** - diagnosed from stored answers without the model; the consistency check now also questions a refusal that cites no window clause. Introduces **Concept 62: a right verdict for a wrong reason is a wrong answer**.
+
 ---
 
 ## Related documents

@@ -17902,3 +17902,337 @@ Yes. The test now forces the version request into the cold call, and a warm
 call takes milliseconds, far less than five seconds, so the memory cannot
 expire between the two calls.
 </details>
+
+---
+
+# M47 — The space after a list number, and what losing it broke
+
+Written 2026-10-17, on branch `m47-kept-space`. The HDFC and Star question
+sets have **not** yet been re-run on the final code; the section "Not yet
+measured" at the end says exactly what is missing.
+
+M46 left a list of things the format audit had not checked. One was the
+segmenter, the stage that cuts a policy's text into clauses, run on a
+policy it had never seen. ICICI Lombard's Elevate wording was fetched for
+that. On it the segmenter found 92 clauses where the document plainly has
+far more. The cause turned out to be in the stage *before* the segmenter,
+and to be damaging HDFC as well.
+
+## Failure 109: the space after "1." was thrown away, so "1. Pre-Existing" was not a clause
+
+**How text reaches the segmenter.** PyMuPDF does not hand back plain text.
+It returns each line as a list of *spans*: runs of characters that share
+one font, size and style. A line "**1.** Pre-Existing Diseases" with a bold
+number is at least two spans, "1." in bold and "Pre-Existing Diseases" in
+regular. The ingest stage (`api/app/pipeline/ingest.py`) joins a line's
+spans into its text and reads the line's styling (bold, size) from them.
+
+It skipped blank spans first, with good reason: a stray space set in some
+other font should not make a line count as bold or large. But it also built
+the text from that filtered list. Microsoft Word, which produced HDFC's and
+ICICI's PDFs, often sets the space after a list number as **a span of its
+own**. Dropping blank spans dropped that space, and "1. Pre-Existing"
+became "1.Pre-Existing".
+
+**Why that loses a clause.** The segmenter recognises a clause number with
+patterns like this one (`api/app/pipeline/segment.py`):
+
+```python
+# "4.", "4.2", "4.2.1" followed by whitespace.
+_RE_DECIMAL = re.compile(r"^(\d+(?:\.\d+)*)\.?\s+(?=\S)")
+```
+
+`\s+` needs at least one whitespace character after the number. With the
+space gone there is no match, the line is ordinary text, and the whole
+clause is glued onto the end of the clause before it, under that clause's
+number. HDFC had 355 lines joined this way; ICICI 564.
+
+**The fix** keeps two lists apart: the text comes from every span, the
+styling from the visible ones only.
+
+```python
+# Text from every span, blank ones included: Word sets the space
+# after a list number as a span of its own, and without it "1. Pre-
+# Existing" reads "1.Pre-Existing", which is no longer a clause
+# number. Styling below comes from the visible spans only, so a
+# stray space in another font cannot make a line bold or large.
+text = _RE_CONTROL.sub(" ", "".join(s["text"] for s in raw_line["spans"])).strip()
+```
+
+**Why fix it here and not in the pattern.** Letting `_RE_DECIMAL` accept
+"1.Pre-Existing" would find the clause, but the stored text would still
+read "1.Pre-Existing". That stored text is what the user sees, and it is
+what every quotation is checked against (the verbatim span check, described
+in an earlier entry). Repairing the text where it is first read fixes every
+stage after it at once.
+
+### The fix uncovered a second fault: a bold number is not a bold clause
+
+With the spaces back, HDFC grew clauses it should not have. Its definition
+of a chronic condition contains a list:
+
+> 1. it needs ongoing or long-term monitoring ...
+> 2. it needs ongoing or long-term control or relief of symptoms
+
+`_numbering` sorts clause numbers into two kinds. **Strong** numbering
+stands on its own: "(a)", "Clause 4.2", or a number followed by a capital
+letter ("4.2 Room Rent"). **Weak** numbering is a number followed by a
+lower-case word, which is often not a clause at all ("1.5 lakhs and ..."),
+so it counts as a clause start only if the styling backs it up: the line is
+bold, or set larger than the body. "1. it needs" is weak. HDFC prints
+**every** list number in bold, so the line counted as bold, and each item
+of the definition became a separate clause.
+
+What shows whether a line is a heading is its words, not its number. So
+ingest now also records `words_bold`: whether any span *after the first*
+(where a set-apart number sits) is bold.
+
+```python
+bold = any(is_bold(s) for s in spans)
+# Past the first span, which is where a list number sits when it is
+# set apart; a line of one span is all words.
+words_bold = any(is_bold(s) for s in spans[1:]) if len(spans) > 1 else bold
+```
+
+and the segmenter backs weak numbering with `words_bold` instead of `bold`:
+
+```python
+is_clause_start = numbering is not None and (
+    numbering[1]          # strong numbering stands on its own
+    or words_bold
+    or line.size >= body_size * CLAUSE_SIZE_RATIO
+)
+```
+
+**Rejected: using `words_bold` in the next rule too.** Right after this,
+another rule handles documents that mark clauses with bold numbers: there,
+a single-level number ("12.") on a line that is *not* bold is a list item
+("12. Hernia of all types" under a waiting-period heading), not a clause.
+
+```python
+if (is_clause_start and bold_numbers and not line.bold
+        and _RE_SINGLE_LEVEL.match(numbering[0])):
+    is_clause_start = False
+```
+
+Switching `line.bold` to `words_bold` there looked consistent. It took Star
+from 79 clauses to 56, because Star sets its exclusions as "**10.** Breach
+of law", a bold number before plain words, and those *are* clauses. The
+same styling means a clause in one insurer's document and a list item in
+another's, so `words_bold` was used only where weak numbering needs backing.
+
+**Effect of this fix alone** on HDFC's 14 questions (majority verdict of 3
+samples): main 14/14, this fix 9/14. Five answers got worse. The next two
+failures are why.
+
+## Failure 110: the size cap cut a clause in mid-sentence, and its tail read as a 36-month wait
+
+**Setup.** Any clause over `MAX_CLAUSE_CHARS` (3,000 characters) is cut
+into pieces by `_split_oversized`, so one runaway clause cannot swamp a
+model prompt. It cut at the last line break inside each 3,000-character
+window.
+
+With HDFC's clauses now split at different places, the cut fell inside
+Definition 30:
+
+> Def. 30. Waiting Period means a period ... during which specified
+> **|** diseases/treatments are not covered ...
+
+The piece after the **|** begins mid-sentence. Analysed alone, without
+"Waiting Period means", it reads as a rule that diseases and treatments are
+not covered for 36 months, and it was applied as a 36-month wait to every
+claim.
+
+**The fix** prefers a line that ends a sentence:
+
+```python
+# A line break after a full stop, colon or semicolon: where a sentence ends.
+_RE_SENTENCE_LINE_END = re.compile(r"(?<=[.:;])[ \t]*\n")
+...
+ends = [m.end() - 1 for m in _RE_SENTENCE_LINE_END.finditer(
+    raw_text, start + MAX_CLAUSE_CHARS // 2, end)]
+nl = ends[-1] if ends else raw_text.rfind("\n", start, end)
+```
+
+`(?<=...)` is a lookbehind, the positive twin of Concept 61's negative
+lookbehind: the line break must come right after a `.`, `:` or `;`.
+
+It searches only the **second half** of the window, so a sentence end near
+the start cannot produce a 200-character piece. If there is none, it falls
+back to the last line break, as before. Pieces starting mid-sentence: HDFC
+13 → 5, Star 5 → 2, ICICI 26 → 3. HDFC: 9/14 → 11/14.
+
+## Failure 111: an optional cover's choices split off and were read as always applying
+
+**Setup.** HDFC clause 2.12 is an *optional* cover, one the buyer can
+choose at purchase:
+
+> 2.12 PED waiting period modification. On availing this option ...
+> 1. Modification of PED waiting period from 36 months ... to 24 months
+> 2. Modification of PED waiting period from 36 months ... to 12 months
+
+Once the space after "1." was kept, "1. Modification ..." became a clause
+of its own. Cut away from "On availing this option", it read as a flat
+statement that the pre-existing-disease wait is 12 or 24 months, applied to
+everyone.
+
+**The fix**: inside a clause numbered with a dot ("2.12"), a list that
+starts at 1 and counts up belongs to that clause.
+
+```python
+# A list that restarts at 1 inside a clause numbered "2.12" belongs to
+# it ... It has to start at 1 and count up: Star's "2. AYUSH Treatment"
+# after a "1.x" is a clause.
+item = numbering[0].rstrip(".") if numbering else ""
+if (is_clause_start and "." in number and item.isdigit()
+        and int(item) in (1, list_next)):
+    is_clause_start = False
+    list_next = int(item) + 1
+```
+
+`list_next` holds the number the list expects next, and is reset to 0
+whenever a clause is closed, so only "1" can open a list. The counting is
+what keeps Star correct: there, "2. AYUSH Treatment" follows clauses
+numbered "1.1", "1.2" ..., and no list that started at 1 is running, so "2"
+remains a clause.
+
+**Known cost, accepted:** HDFC's short sub-heading "1. Claims Procedure"
+now attaches to the clause before it. It is 19 characters and no question
+turns on it. HDFC: 11/14 → 13/14.
+
+**Clause counts after all three fixes**, against main: synthetic 40 → 40
+(identical text), Star 79 → 79 (six spaces restored), HDFC 115 → 125,
+Niva 144 → 145, ICICI 92 → 186.
+
+## Failure 112: the right refusal for the wrong reason
+
+**The remaining miss.** `hdfc-tests-75-days-before`: "I had scans and blood
+tests 75 days before I was admitted for a planned surgery. I have held this
+policy for three years. Are those tests covered?" Clause 1.5 pays for
+expenses before an admission only within 60 days of it, so the expected
+answer is `not_covered`, citing 1.5. On the branch, 4 of 5 fresh samples
+answered `insufficient_information`.
+
+**Diagnosed without the model.** The first suspicion was that the
+segmentation changes had altered what the model reads. A script ran the
+question through main's code and the branch's, reading every model answer
+from the cache, and printed what the code computed and what the model was
+shown. The cache key includes the Ollama version, so even a cache read
+needs the Ollama server running, though not the model loaded. The script
+stopped on any cache miss rather than call the model. Results:
+
+- Clause 1.5's text is identical on both.
+- The code's window check (built in M29–M31) gives the same result on both:
+  window 60 days, expense 75 days before admission, **OUTSIDE**.
+- The model ignores that on both. Main's stored answer is `not_covered`
+  citing 1.4, the AYUSH treatment clause. The branch's is `not_covered`
+  citing Excl01, the 36-month pre-existing-disease wait, which three years
+  of cover has already served.
+
+Main's 14/14 counted this case as right because the majority score counts
+only the verdict. Citations are scored separately (`citation_ok` in
+`evals/run_scenario_eval.py`), and main failed them on this case. M47 did
+not cause the miss; it changed which wrong answer came out.
+
+## Concept 62: a right verdict for a wrong reason is a wrong answer
+
+A person told "not covered, because of the pre-existing-disease wait"
+argues the wrong point with the insurer. They may give up a claim they
+could have won some other way, or chase one they cannot. The verdict is one
+word; the reason is what the person acts on. That is why the eval checks
+`must_cite` beside the verdict, and why a verdict score should never be
+quoted without the citation score next to it.
+
+### The fix, and the first version that did nothing
+
+The consistency check (`find_contradictions` in
+`api/app/pipeline/scenario.py`, introduced in M31) compares the model's
+answer with what the code computed. When they disagree, it asks the model
+**once** more, with the disagreement written out. For expense windows it
+asked only when the verdict paid something (`covered` or `conditional`) for
+an expense outside every window.
+
+**First attempt:** also ask when the verdict is `insufficient_information`,
+since the arithmetic settles the question. Unit-tested, then tried live on
+five fresh samples of the question asked alone. **The rule never fired.**
+All five answered `not_covered` citing Excl01; none said "insufficient".
+Fresh answers on this Ollama depend on what the server was asked just before
+(Concept 43). Asked alone, five times in a row, the question met the same
+history each time, a different history from the eval's run. Five identical
+samples were evidence about one context, not about the rule.
+
+**What the samples did show** is that the real fault was the citation. So
+a second rule asks again when the verdict is `not_covered` but cites
+**none** of the window clauses the arithmetic says decide it:
+
+```python
+raised = [w for w in computed.windows
+          if w.status is not window.WindowStatus.NOT_RAISED]
+if raised and all(w.status is window.WindowStatus.OUTSIDE for w in raised):
+    if verdict == Verdict.INSUFFICIENT_INFORMATION:
+        problems += [... f"verdict is not_covered, citing {w.clause_id}." ...]
+    elif verdict == Verdict.NOT_COVERED:
+        cited = {c.clause_id for c in citations}
+        if not cited & {w.clause_id for w in raised}:
+            problems += [
+                f"- You answered {verdict}, but cited none of the clauses that "
+                f"decide it. It was calculated: {w.describe()} Cite "
+                f"{w.clause_id} as denying this claim."
+                for w in raised
+            ]
+    elif verdict in (Verdict.COVERED, Verdict.CONDITIONAL):
+        ...  # the M31 rule, unchanged
+```
+
+The code still never sets a verdict or a citation itself. It adds a
+sentence to the one retry. Here that retry was already being triggered by
+the Excl01 contradiction, so the new sentence cost no extra model call.
+
+**Result**, the same five fresh samples asked alone: **5/5 `not_covered`
+citing 1.5 as denying**, against 5/5 citing Excl01 before. 339 tests pass,
+and the new assertions fail with the rule switched off.
+
+**Rejected:** changing the prompt so the window result stands out. A prompt
+change reaches every question, and earlier milestones measured such changes
+moving unrelated answers. The check reaches only answers that already
+contradict the arithmetic.
+
+## Not yet measured
+
+- **HDFC's 14 questions on the final code.** 13/14 was measured before
+  Failure 112's fix. The `insufficient_information` branch of the new rule
+  is covered only by a unit test; whether it fires in the eval's real order
+  is unknown.
+- **Replays may now retry.** Any stored eval answer that is `not_covered`,
+  with every window OUTSIDE and no window clause cited, will now trigger a
+  retry, so it is no longer a pure cache replay.
+- **Star's 22 questions.** Only six spaces changed in Star, but every
+  question's prompt changed with them, so no stored answer can be reused.
+- **ICICI** is a separate milestone: no section headings, "7.5 Lakhs" read
+  as a clause number, page numbers inside clause text, unnumbered
+  definitions, tables, and a policy about twice the model's context window.
+
+## Check it yourself
+
+```bash
+cd api
+# 1. the kept space and the bold-words rule
+.venv/Scripts/python -m pytest -q tests/test_ingest.py tests/test_segment.py
+# 2. the window check, all three verdicts
+.venv/Scripts/python -m pytest -q tests/test_scenario.py -k outside_its_window
+```
+
+**Predict before you look:** Star sets its exclusions as "**10.** Breach of
+law", a bold number before plain words. Is "10. Breach of law" still a
+clause start on this branch?
+
+<details>
+<summary>Answer</summary>
+
+Yes. "10. Breach" is a number followed by a capital letter, which is
+*strong* numbering, so `words_bold` is never consulted. The rule that could
+drop it is the plain-list-item rule, and that rule still reads `line.bold`,
+which is true because the number is bold. Had it been switched to
+`words_bold` (the rejected change above), the plain words would have made
+it a list item, which is exactly how Star lost 23 clauses.
+</details>
