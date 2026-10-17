@@ -18062,6 +18062,30 @@ the start cannot produce a 200-character piece. If there is none, it falls
 back to the last line break, as before. Pieces starting mid-sentence: HDFC
 13 → 5, Star 5 → 2, ICICI 26 → 3. HDFC: 9/14 → 11/14.
 
+**A review then found the rule too loose** (2026-10-17). It was checked by
+printing every cut in four policies. A label alone on its line ends in a
+full stop too, so the cut fell right after HDFC's "Def. 6." and "Def. 9."
+and after Star's list marker "a.": the label stayed at the end of one piece
+and its text began the next. And a colon is where a list *opens*, so a cut
+there separates the lead-in ("Pre-Existing Disease means any condition ...
+disease:") from the items it governs. The pattern now needs a word of three
+letters or more before the full stop or semicolon, and no longer accepts a
+colon:
+
+```python
+_RE_SENTENCE_LINE_END = re.compile(r"(?<=[A-Za-z]{3}[.;])[ \t]*\n")
+```
+
+The three letters also keep out "e.g.", "Rs." and "No.". "Sec." and "etc."
+still pass, a known limit marked in the code. Every cut that moved, moved to a
+better place: in HDFC the labels now start their pieces with their text
+attached, and Star's Pre-Existing Disease definition is no longer cut. The
+other moves fall in the lists of ombudsman addresses, where HDFC gains one
+piece (125 → 126 clauses). The synthetic policy has no clause long enough
+to cut, so it is unchanged. The test
+`test_an_oversized_clause_is_not_cut_after_a_label_or_a_lead_in` fails
+on the old pattern.
+
 ## Failure 111: an optional cover's choices split off and were read as always applying
 
 **Setup.** HDFC clause 2.12 is an *optional* cover, one the buyer can
@@ -18196,6 +18220,34 @@ and the new assertions fail with the rule switched off.
 change reaches every question, and earlier milestones measured such changes
 moving unrelated answers. The check reaches only answers that already
 contradict the arithmetic.
+
+## What the review raised and was left alone
+
+A code review of the whole milestone raised eight points. One was fixed (the
+cut, above). The others were checked against the four policies before
+deciding:
+
+- **The list counter never ends a list on its own.** After "1." is absorbed
+  into clause "1.2", a later real clause "2. ..." would be absorbed too, as
+  item 2. In the four policies every absorption is an intended one (HDFC's
+  optional-cover choices, plus the known "1. Claims Procedure"). Latent:
+  revisit if a policy loses a top-level clause this way.
+- **`words_bold` reads every span after the first.** One bold word inside a
+  list item would make it a clause again, and a number sharing one bold span
+  with its heading would make a heading look plain. Neither occurs in the
+  four policies. Every line where `bold` and `words_bold` disagree is either
+  an intended case (HDFC's chronic-condition items) or an improvement: Niva's
+  "5.1.3. 30-day waiting period (Code- Excl03):" is now its own clause, the
+  reason Niva went 144 → 145.
+- **The new window rule re-asks a refusal that cites a real exclusion
+  instead.** True: "cited none of the clauses that decide it" is wrong when
+  another exclusion also refuses the claim. It reaches 1 of 92 stored answers,
+  and rewording the retry needs fresh samples to measure, so it waits for the
+  next model run.
+- Two cleanups (a helper defined inside a loop, a list built to take its last
+  item) and one claim that the joined-marker path reads the wrong flag. The
+  next line of a lone marker holds only words, so its `bold` is the right flag;
+  that point was rejected.
 
 ## Not yet measured
 

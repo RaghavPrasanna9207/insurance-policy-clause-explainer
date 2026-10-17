@@ -57,8 +57,12 @@ HEADING_MAX_CHARS = 90
 # comfortable single unit for the analyzer, while capping the damage done by a
 # document with no detectable structure at all.
 MAX_CLAUSE_CHARS = 3000
-# A line break after a full stop, colon or semicolon: where a sentence ends.
-_RE_SENTENCE_LINE_END = re.compile(r"(?<=[.:;])[ \t]*\n")
+# A line break after a word of three letters or more and a full stop or
+# semicolon: where a sentence ends. The word keeps out a label alone on its line
+# (HDFC "Def. 6.", Star "a.") and "e.g.", "Rs.", "No."; a colon is left out
+# because it opens a list, and a cut there strands the lead-in from its items.
+# ponytail: "Sec." and "etc." still count as ends; add a stop-list if one cuts badly.
+_RE_SENTENCE_LINE_END = re.compile(r"(?<=[A-Za-z]{3}[.;])[ \t]*\n")
 
 # "4.", "4.2", "4.2.1" followed by whitespace.
 _RE_DECIMAL = re.compile(r"^(\d+(?:\.\d+)*)\.?\s+(?=\S)")

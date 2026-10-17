@@ -530,6 +530,25 @@ def test_an_oversized_clause_is_cut_where_a_sentence_ends():
     assert all(p.text.rstrip().endswith(".") for p in pieces)
 
 
+def test_an_oversized_clause_is_not_cut_after_a_label_or_a_lead_in():
+    """HDFC "Def. 6." and Star "a." on lines of their own end in a full stop, and
+    the cut once fell after them, leaving the label in one piece and its text in
+    the next. A lead-in ending in a colon was cut away from its list the same way."""
+    from app.pipeline.segment import _split_oversized
+
+    sentence = "Def. 7. A term means a thing that is defined here in full.\n"
+    for strand in ("Def. 9.\n", "a.\n", "any of the following:\n"):
+        tail = "Break in policy means a gap" + " here" * 40 + ".\n"
+        text = sentence * 48 + strand + tail + sentence * 10
+        seg = Segment(order_idx=0, section_path="", number="1.2", heading="1.2. Definitions",
+                      text=text, page_start=0, page_end=0, char_start=0, char_end=len(text))
+
+        pieces = _split_oversized(seg, text)
+
+        assert len(pieces) > 1
+        assert not any(p.text.rstrip().endswith(strand.strip()) for p in pieces), strand
+
+
 def test_a_list_restarting_at_one_stays_inside_its_clause():
     """HDFC's "2.12 PED waiting period modification" lists its options as
     "1. Modification ... to 24 months", "2. ... to 12 months". Split off, each
