@@ -176,12 +176,13 @@ def test_prose_starting_with_a_number_is_not_a_clause():
     assert _numbering("Clause 4.2 shall apply")[1] is True
 
     # Weak: a dotted quantity, believed only with styling.
-    assert _numbering("1.5 lakhs and fifteen in-patient beds")[1] is False
+    assert _numbering("1.5 times the room rent applies")[1] is False
 
     # Not numbering at all. Bare integers were weak evidence until M16, when
     # bold quantities on real wordings ("24 Months waiting period", "75 Lakhs")
     # were found passing as clause numbers.
     assert _numbering("24 hours of hospitalisation is required") is None
+    assert _numbering("1.5 lakhs and fifteen in-patient beds") is None  # M48: money
     assert _numbering("15 days from the date of discharge") is None
     assert _numbering("24 Months waiting period") is None
     assert _numbering("The Company shall indemnify") is None

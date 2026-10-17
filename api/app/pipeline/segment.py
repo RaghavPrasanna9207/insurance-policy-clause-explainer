@@ -207,12 +207,14 @@ def _numbering(text: str) -> tuple[str, bool] | None:
       "4.2 Room Rent"    - dotted number followed by a capital
 
     Weak (needs styling to corroborate):
-      "1.5 lakhs and ..." - a dotted *quantity*, not a clause number
+      "1.5 times the ..." - a dotted *quantity*, not a clause number
+      "1. it needs ..."   - or a list item
 
     Not numbering at all:
       "24 hours of ..."  - a bare integer, however it is styled
+      "7.5 Lakhs"        - an amount of money, whatever its case
 
-    The capital-letter test is what separates "4.2 Room Rent" from "1.5 lakhs".
+    The capital-letter test is what separates "4.2 Room Rent" from "1.5 times".
     Clause numbers are followed by a heading or a new sentence, so the next
     character is upper case; a measurement is followed by its unit in lower case.
     """
