@@ -18241,9 +18241,12 @@ deciding:
   reason Niva went 144 → 145.
 - **The new window rule re-asks a refusal that cites a real exclusion
   instead.** True: "cited none of the clauses that decide it" is wrong when
-  another exclusion also refuses the claim. It reaches 1 of 92 stored answers,
-  and rewording the retry needs fresh samples to measure, so it waits for the
-  next model run.
+  another exclusion also refuses the claim. It reaches 1 of 92 stored answers.
+  The sentence now reads "cited none of the window clauses the calculation
+  says refuse it ... Cite 1.5 as denying this claim, and keep any other clause
+  that also refuses it." **The 5/5 result above was measured on the old
+  wording**; the new one is unit-tested only, and is re-measured with the
+  HDFC re-run.
 - Two cleanups (a helper defined inside a loop, a list built to take its last
   item) and one claim that the joined-marker path reads the wrong flag. The
   next line of a lone marker holds only words, so its `bold` is the right flag;

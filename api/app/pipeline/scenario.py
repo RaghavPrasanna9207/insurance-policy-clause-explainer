@@ -1473,9 +1473,10 @@ def find_contradictions(
             cited = {c.clause_id for c in citations}
             if not cited & {w.clause_id for w in raised}:
                 problems += [
-                    f"- You answered {verdict}, but cited none of the clauses that "
-                    f"decide it. It was calculated: {w.describe()} Cite "
-                    f"{w.clause_id} as denying this claim."
+                    f"- You answered {verdict}, but cited none of the window clauses "
+                    f"the calculation says refuse it. It was calculated: "
+                    f"{w.describe()} Cite {w.clause_id} as denying this claim, and "
+                    f"keep any other clause that also refuses it."
                     for w in raised
                 ]
         elif verdict in (Verdict.COVERED, Verdict.CONDITIONAL):
