@@ -19018,3 +19018,212 @@ more chances for a misleading one to reach the prompt. That is why the
 picking step exists, and why what the segmenter calls a clause matters as
 much as what the model does with it.
 </details>
+
+---
+
+# M50 — A heading is shown on the clause map, and never to the model answering a question
+
+Written 2026-10-24, on branch `m49-pick-first`. HDFC's 14 questions go from
+13/14 (M49) to 14/14. The first attempt at this fix made things worse (9/14),
+and that attempt is recorded below as Failure 117, because why it failed is
+the reason the final fix looks the way it does.
+
+## The problem
+
+Policies are written as outlines. HDFC's Section C reads, on the page:
+
+> The Company shall not make payment for any claim in respect of any Insured
+> Person caused by, arising from or attributable to any of the following
+> unless expressly stated to the contrary in the Policy:
+>
+> 1. Waiting Periods
+>
+> All the Waiting Periods and exclusions listed below shall be applicable
+> individually for each Insured Person and claims shall be assessed accordingly.
+>
+> a. Pre-Existing Diseases: Code – Excl01 ...
+> b. Specified Disease/Procedure waiting period: Code – Excl02 ...
+> c. 30-day waiting period: Code – Excl03 ...
+
+The segmenter (`api/app/pipeline/segment.py`, stage 2, no model) splits this
+into clauses. Each lettered item with an IRDAI code becomes its own clause
+(Excl01, Excl02, ...). That left "1. Waiting Periods" and its sentence as a
+clause of their own, and `_merge_leadins`, which joins an unnumbered lead-in
+ending in ":" to the clause below it, joined the opening sentence to that
+heading. The result was a clause with the citation id `1#3` (the third clause
+numbered "1" in the policy), saying: no payment for any claim caused by any of
+the following, and all the waiting periods apply. With nothing following it.
+
+Failure 116 (in the entry "M47–M49 measured") showed what that does. When the
+model was shown `1#3`, it refused typhoid 45 days into the policy under the
+36-month pre-existing-disease wait (Excl01), though nothing said the typhoid
+was pre-existing. Removing `1#3` from the prompt repaired the answer 5 of 5
+times; adding it to a prompt that had been right broke it 5 of 5 times.
+
+## Which clauses are headings
+
+HDFC is not the only policy with this shape. The rule has to find every clause
+that heads a group rather than states a rule, on every policy, without words
+like "following" or "below" (a word list only finds what someone remembered to
+list). The structural signal: **a clause numbered at the top level ("1", "2")
+whose next clause is its own first child**, either "1" then "1.1", or "1" then
+an item lettered "a." or "(a)".
+
+That alone was too loose. Run over all seven PDFs (three synthetic, four real),
+it also caught clauses with real content. Each catch added a guard:
+
+| Caught | Why it is not a heading | Guard |
+|---|---|---|
+| HDFC `1.1 Hospitalization Expenses` before `1.1.1` | the main cover; a sub-clause with sub-clauses | top level only: `^\d+$` |
+| HDFC `2.7 Aggregate Deductible` before `2.7.1` | same | same |
+| The last piece of HDFC's definitions, above `(a) Acute condition` | the middle of a long clause, cut by the size cap | not a `(cont.)` piece |
+| Star `1. Hospitalization` before `1.1 Other expenses` | caps room rent at 2% of the sum insured, Rs. 5,000 a day | states no quantity (%, Rs., days, months, ...) |
+
+The quantity guard is the least obvious. The idea: a heading introduces a
+group and names nothing of its own; a clause that sets a percentage, an amount
+or a period is a rule, whatever comes after it. Measured, not assumed: of the
+nine clauses the structural signal finds on the four real policies, Star's is
+the only one stating a quantity, and the only one with content.
+
+The code, in `segment.py`:
+
+```python
+_RE_TOP_NUMBER = re.compile(r"^\d+$")
+_RE_FIRST_LETTER_ITEM = re.compile(r"^\(?a[.)]\s")
+_RE_QUANTITY = re.compile(
+    r"\d\s*%|(?:rs\.?|inr|₹)\s*\d|\d\s*(?:lakhs?|lacs?|crores?|days?|months?|years?|hours?)\b",
+    re.I)
+
+def _mark_group_headings(segments: list[Segment]) -> None:
+    for seg, child in zip(segments, segments[1:]):
+        seg.is_heading = bool(
+            _RE_TOP_NUMBER.match(seg.number)
+            and not seg.heading.endswith("(cont.)")
+            and not _RE_QUANTITY.search(seg.text)
+            and (child.number == f"{seg.number}.1"
+                 or _RE_FIRST_LETTER_ITEM.match(child.text.lstrip()))
+        )
+```
+
+What it finds: 5 in HDFC (`1. Base Coverage`, `2. Optional Covers`,
+`1. Waiting Periods`, `2. Standard Exclusions`, `1. Standard General Terms &
+Clauses`), 3 in Niva (`2. Definitions`, `4. Benefits available under the
+policy.`, `5. Exclusions`), none in Star, ICICI or the synthetic policies.
+
+## Failure 117: the sentence moved into the first item, and refused five covered claims
+
+**What was tried first.** The lead-in's own docstring says what it was meant
+to do: join "the numbered items below it". So the first fix *merged* each
+group heading into its first child, before `_merge_leadins` ran. Excl01 then
+began: "The Company shall not make payment for any claim ... caused by any of
+the following ...: 1. Waiting Periods All the Waiting Periods and exclusions
+listed below shall be applicable ... a. Pre-Existing Diseases ...". No policy
+text was lost, and the stray clause was gone. It read well.
+
+**What happened.** HDFC, majority of 3 samples: **9/14**, down from 13/14.
+Typhoid stayed wrong, and four more questions whose answer is `covered` were
+refused, 3 samples of 3 each: dengue at four months, an accident at ten days,
+pneumonia at 40 days, medicines after a covered discharge. Replayed from the
+cache, all five cited Excl01:
+
+> The claim is refused because it falls under the exclusion clause Excl01
+> (a. Pre-Existing Diseases: Code – Excl01). (accident at ten days)
+
+**Why.** Excl01's stored analysis was compared before and after: same type,
+same 36-month wait, no exceptions. What changed was only the text the model
+reads. And Excl01 is in almost every HDFC prompt: the code's own waiting-period
+arithmetic names it on every question about time since purchase, and
+`named_by_code` guarantees a clause the arithmetic names is shown. So the
+blanket sentence went from reaching the prompt now and then (when the picking
+step happened to choose `1#3`) to reaching it nearly always, attached to the
+very clause the model then misapplied.
+
+**The lesson.** Moving a misleading sentence does not neutralise it; the model
+reads whatever it is shown. The words had to leave the model's input. Where
+they sit on the page is a different question, for a different reader.
+
+## The fix: mark it, keep it, and leave it out of the answering step
+
+Two readers see clauses. The clause map shows a person the policy, and a person
+reading "1. Waiting Periods" in place understands it as a heading. The
+scenario step shows the model a list of clauses out of context, and the model
+reads each as a rule. So the heading stays in the document, for the first
+reader, and is withheld from the second:
+
+1. `Segment.is_heading` and `Clause.is_heading` (a new column; `data/app.db`
+   must be deleted and recreated, which `check_schema()` says on startup).
+2. `_persist_clauses` stores it.
+3. `load_clauses` (`api/app/pipeline/run.py`), the one place both the
+   scenario endpoint and the eval build their clause list, skips it:
+
+```python
+        for (clause, analysis), citation_id in zip(rows, ids)
+        # After the ids are counted, so the clause after a heading keeps its id.
+        if not clause.is_heading
+```
+
+The skip comes after `citation_ids` has numbered the clauses. Skipping before
+would renumber every later clause with the same number: `1#4` would become
+`1#3`, and an answer key or a stored answer naming `1#4` would point at a
+different clause.
+
+**Nothing is re-analysed.** No clause's text changes (checked: all seven
+PDFs' clauses byte-identical before and after), so every analysis replays from
+the cache. Only the prompts that used to include a heading change.
+
+## Measured
+
+HDFC, 14 questions, majority of 3 samples, Ollama 0.35.1:
+
+| Code | Right |
+|---|---|
+| `main` | 14/14 |
+| M49 | 13/14 (typhoid-45-days wrong, 3 of 3) |
+| Failure 117's merge | 9/14 |
+| **M50** | **14/14** (13 unanimous; hernia-14-months 2 of 3) |
+
+1,122 seconds for the 42 answers, about the same as M49 (1,142).
+
+**Not measured, and why that is safe:** Star, ICICI and the three synthetic
+policies have no clause marked, so `load_clauses` returns exactly what it
+returned before, and their prompts are byte-identical. Niva has three headings
+marked and no eval questions; its prompts change.
+
+**Not checked:** HDFC's `2. Optional Covers` says optional covers apply only
+when the Policy Schedule lists them. The model no longer sees that sentence.
+No HDFC question is about an optional cover, so this run cannot show whether
+that matters.
+
+**Tests:** `test_a_group_heading_is_marked_not_merged` (`tests/test_segment.py`)
+has one case per guard, and each guard was removed in turn to confirm a test
+fails without it; `test_a_group_heading_is_never_given_to_the_scenario_step`
+(`tests/test_load_clauses.py`) fails if the skip is removed, or if it moves
+before the ids are counted. 348 tests pass.
+
+## Check it yourself
+
+```bash
+cd api
+.venv/Scripts/python -m pytest -q tests/test_segment.py tests/test_load_clauses.py -k heading
+```
+
+List the headings found in HDFC:
+
+```bash
+.venv/Scripts/python -c "from app.pipeline.ingest import ingest; from app.pipeline.segment import segment; print([s.heading for s in segment(ingest('../samples/real/hdfc-optima-secure.pdf')) if s.is_heading])"
+```
+
+**Predict before you look:** the skip in `load_clauses` sits after
+`citation_ids`. HDFC has several clauses numbered "1". If the skip ran first,
+which answers stored in the cache would stop replaying, and why?
+
+<details>
+<summary>Answer</summary>
+
+Every answer whose prompt names a clause numbered "1" that comes after a
+skipped heading. Its id would drop by one (`1#4` → `1#3`), the prompt text
+would change, and the cache key, a hash of the exact prompt (Concept 29),
+would change with it, so the model would be asked afresh. Worse, a stored
+answer citing `1#4` would now name a different clause. Counting first keeps
+every id fixed to the clause it always named.
+</details>

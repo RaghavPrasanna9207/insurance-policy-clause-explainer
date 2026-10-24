@@ -449,6 +449,11 @@ The first model runs of M47, M48 and M49. HDFC: main 14/14, M47 13/14, M48 12/14
 - **Failure 116: a section's opening sentence, typed as a waiting period, made the model refuse typhoid** - HDFC's "the Company shall not make payment ... all the Waiting Periods listed below shall be applicable", picked by M49, turned a covered claim into a refusal. Not fixed yet; three candidate fixes listed.
 - **Concept 64: change one input, in both directions** - ablation: remove the suspect from the failing setup and add it to the passing one; both must agree.
 
+### M50 - A heading is shown on the clause map, and never to the model answering a question
+Group headings like HDFC's "1. Waiting Periods" (with its "shall not make payment for any claim" lead-in) are found by structure, marked, kept on the clause map, and left out of the answering step. HDFC 13/14 → 14/14. Read it for how a rule is tightened against every policy at once, and for a fix that failed because it moved the problem instead of removing it.
+- **Failure 117: the sentence moved into the first item, and refused five covered claims** - merged into Excl01, the blanket sentence reached nearly every prompt; HDFC fell to 9/14.
+- Why the skip comes after the citation ids are counted.
+
 ---
 
 ## Related documents
