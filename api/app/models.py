@@ -67,6 +67,9 @@ class Clause(SQLModel, table=True):
     # PyMuPDF span rectangles, stored as JSON. Unused by v1's side-by-side UI,
     # captured now so the PDF highlighter is a later drop-in with no migration.
     bboxes_json: str = "[]"
+    # Heads a group of clauses ("1. Waiting Periods") rather than stating a
+    # rule. Shown in the clause map; never given to the scenario step.
+    is_heading: bool = False
 
 
 class ClauseAnalysis(SQLModel, table=True):

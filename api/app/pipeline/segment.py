@@ -198,6 +198,8 @@ class Segment:
     char_start: int
     char_end: int
     bboxes: list[tuple[float, float, float, float]] = field(default_factory=list)
+    # Heads a group of clauses rather than stating a rule; see _mark_group_headings.
+    is_heading: bool = False
 
 
 def _numbering(text: str) -> tuple[str, bool] | None:
@@ -377,6 +379,48 @@ def _split_oversized(seg: Segment, raw_text: str) -> list[Segment]:
     return pieces
 
 
+# A top-level number directly followed by its own first child heads a group:
+# "1" then "1.1", or "1" then an item lettered "a.". Top level only: HDFC's
+# "1.1 Hospitalization Expenses" before "1.1.1" is a clause with sub-clauses.
+_RE_TOP_NUMBER = re.compile(r"^\d+$")
+_RE_FIRST_LETTER_ITEM = re.compile(r"^\(?a[.)]\s")
+# A heading states no quantity of its own. Star's "1. Hospitalization" before
+# "1.1 Other expenses" caps room rent at 2% of the sum insured, Rs.5000 a day:
+# a rule. On four real policies the eight group headings (HDFC, Niva) state none.
+_RE_QUANTITY = re.compile(
+    r"\d\s*%|(?:rs\.?|inr|₹)\s*\d|\d\s*(?:lakhs?|lacs?|crores?|days?|months?|years?|hours?)\b",
+    re.I)
+
+
+def _mark_group_headings(segments: list[Segment]) -> None:
+    """Mark the clauses that head a group of clauses instead of stating a rule.
+
+    HDFC opens its exclusions with a lead-in, a group heading and a sentence:
+    "The Company shall not make payment for any claim ... caused by ... any of
+    the following ...: 1. Waiting Periods / All the Waiting Periods and
+    exclusions listed below shall be applicable ...", and then the items, "a.
+    Pre-Existing Diseases: Code - Excl01" onwards. The lead-in joins the
+    heading (`_merge_leadins`), and the pair is a refusal with nothing to
+    refuse. Shown to the model, it refused typhoid at 45 days under the
+    36-month pre-existing-disease wait (Failure 116). Joined to the first item
+    instead, it rode along with Excl01 into nearly every question, and five
+    covered claims were refused (Failure 117).
+
+    So it is marked, not moved: it stays in the clause map, where a reader sees
+    it in place, and the scenario step leaves it out (`load_clauses`).
+    Recognised by structure, not words: the next clause is this one's first child.
+    """
+    for seg, child in zip(segments, segments[1:]):
+        seg.is_heading = bool(
+            _RE_TOP_NUMBER.match(seg.number)
+            # A continuation piece is the middle of a clause, never a heading.
+            and not seg.heading.endswith("(cont.)")
+            and not _RE_QUANTITY.search(seg.text)
+            and (child.number == f"{seg.number}.1"
+                 or _RE_FIRST_LETTER_ITEM.match(child.text.lstrip()))
+        )
+
+
 def _merge_leadins(segments: list[Segment], raw_text: str) -> list[Segment]:
     """Attach a list's lead-in sentence to the clause it introduces.
 
@@ -536,6 +580,7 @@ def segment(result: IngestResult) -> list[Segment]:
     flush()
 
     segments = _merge_leadins(segments, result.raw_text)
+    _mark_group_headings(segments)
     for idx, seg in enumerate(segments):
         seg.order_idx = idx
     return segments

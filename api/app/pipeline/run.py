@@ -156,6 +156,7 @@ def _persist_clauses(engine: Engine, doc_id: str, segments) -> None:
                     char_start=seg.char_start,
                     char_end=seg.char_end,
                     bboxes_json=json.dumps(seg.bboxes),
+                    is_heading=seg.is_heading,
                 )
             )
         session.commit()
@@ -236,6 +237,7 @@ def load_clauses(session: Session, doc_id: str) -> list[ShortlistClause]:
     eval measuring a different input from the one the endpoint ships.
 
     Clauses the model failed on are left out: there is nothing to reason with.
+    So are group headings (`Clause.is_heading`): they state no rule.
     """
     # Sorted here: the query has no ORDER BY, and document order decides which
     # repeat of a number becomes "10#2" and the order the shortlist keeps.
@@ -267,4 +269,8 @@ def load_clauses(session: Session, doc_id: str) -> list[ShortlistClause]:
             section_path=clause.section_path,
         )
         for (clause, analysis), citation_id in zip(rows, ids)
+        # After the ids are counted, so the clause after a heading keeps its id.
+        # A group heading states no rule, and read as one it refused claims
+        # (Failures 116 and 117); the clause map still shows it.
+        if not clause.is_heading
     ]

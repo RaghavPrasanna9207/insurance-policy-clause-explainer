@@ -624,3 +624,37 @@ def test_an_unnumbered_definition_starts_a_clause():
     headings = [s.heading for s in segment(_document(rows))]
 
     assert headings == ["Accident", "Condition Precedent", "Hospital"]
+
+
+def test_a_group_heading_is_marked_not_merged():
+    """A top-level number directly followed by its own first child ("1" then
+    "1.1", or "1" then an item "a.") heads a group: it is marked, and kept.
+    Marked, not joined to the item: joined, HDFC's lead-in rode into Excl01 and
+    refused five covered claims (Failure 117)."""
+    from app.pipeline.segment import _mark_group_headings
+
+    def marked(*pairs, cont=False):
+        segs, at = [], 0
+        for number, text in pairs:
+            segs.append(_seg(number, text, at))
+            at += len(text) + 1
+        if cont:
+            segs[0].heading = "1. Standard Definitions (cont.)"
+        _mark_group_headings(segs)
+        return [s.number for s in segs if s.is_heading]
+
+    # HDFC: lead-in and group heading, then the lettered first item.
+    assert marked(("1", "Shall not pay any claim caused by:\n1. Waiting Periods\nAll apply."),
+                  ("Excl01", "a. Pre-Existing Diseases: Code - Excl01 ...")) == ["1"]
+    assert marked(("1", "1. Standard General Terms"), ("1.1", "1.1 Disclosure ...")) == ["1"]
+    # Siblings, a later child, and a lettered pair: no heading.
+    assert marked(("4", "4. Room rent ..."), ("5", "5. Co-payment ...")) == []
+    assert marked(("4", "4. Room rent ..."), ("4.2", "4.2 ICU ...")) == []
+    assert marked(("(a)", "(a) Acute ..."), ("(b)", "(b) Chronic ...")) == []
+    # A sub-clause with sub-clauses is content (HDFC "1.1 Hospitalization Expenses").
+    assert marked(("1.1", "1.1 Hospitalization Expenses ..."), ("1.1.1", "1.1.1 Other ...")) == []
+    # A quantity makes it a rule (Star "1. Hospitalization" caps room rent).
+    assert marked(("1", "1. Hospitalization: room rent up to 2% of the Sum Insured"),
+                  ("1.1", "1.1 Other expenses ...")) == []
+    # The last piece of a long clause is its middle, never a heading.
+    assert marked(("1", "Def. 15. Domiciliary ..."), ("(a)", "(a) Acute ..."), cont=True) == []

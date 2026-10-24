@@ -59,3 +59,28 @@ def test_load_clauses_gives_the_scenario_step_what_the_database_holds():
     assert first.exceptions == ["accident"]
     assert first.copay_percent == 20
     assert first.section_path == "SECTION 3"
+
+
+def test_a_group_heading_is_never_given_to_the_scenario_step():
+    """HDFC's "1. Waiting Periods", with the section's lead-in ("shall not make
+    payment for any claim ... caused by any of the following:"), is a heading
+    for the items below it, not a rule. Shown to the model, it refused typhoid
+    at 45 days under the pre-existing-disease wait (Failure 116); joined to the
+    first item instead, it refused five covered claims (Failure 117). It stays
+    in the clause map, and is left out here. Citation ids are counted with it,
+    so the clause after it keeps the id it always had."""
+    engine = create_engine("sqlite://", poolclass=StaticPool)
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add(Document(id="doc", filename="p.pdf", stored_path="p.pdf", status=DocStatus.READY))
+        heading = _clause(0, "10", page_start=1)
+        heading.is_heading = True
+        session.add(heading)
+        session.add(_clause(1, "10", page_start=1))
+        session.add(_analysis(0))
+        session.add(_analysis(1))
+        session.commit()
+
+        clauses = load_clauses(session, "doc")
+
+    assert [c.clause_id for c in clauses] == ["10#2"]
