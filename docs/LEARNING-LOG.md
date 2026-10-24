@@ -19368,15 +19368,32 @@ synthetic policy, 3 fresh samples each:
 > "I have had diabetes for years. I took out this policy last month and was
 > admitted for a broken arm after a fall."
 
-| | Facts: pre-existing | Answer |
+| Code | Facts: pre-existing | Answer |
 |---|---|---|
-| Without the "yes" reading | unknown | **covered, 3 of 3**, citing 2.1 (right) |
-| With it | yes | **not_covered, 3 of 3**, citing 3.2 (wrong) |
+| Neither attempt (the committed code) | unknown | **not_covered, 6 of 6**, citing 3.2 (wrong) |
+| Attempt 1 only (the re-ask) | unknown | **covered, 3 of 3**, citing 2.1 (right) |
+| Attempts 1 + 2 | yes | **not_covered, 3 of 3**, citing 3.2 (wrong) |
 
-The pattern found "had diabetes for years", settled the question as
-pre-existing, and the PED line then told the model the wait "still applies
-and blocks this claim". A broken arm after a fall was refused under a
-diabetes rule.
+With both attempts, the pattern found "had diabetes for years", settled the
+question as pre-existing, and the PED line then told the model the wait
+"still applies and blocks this claim". A broken arm after a fall was refused
+under a diabetes rule.
+
+**A correction, kept visible.** As first written, this table had two rows,
+and the "covered, 3 of 3" row was labelled "without the 'yes' reading" and
+described as what the current code does. It was not. That run switched off
+only attempt 2 (by replacing `stated_pre_existing` with a function returning
+False) while attempt 1, the re-ask, was still in the code. The re-ask is what
+turned the refusal into covered. The committed code, with both attempts
+reverted, was measured afterwards when the question was added to the eval set:
+not_covered, 1 stored answer and 5 fresh samples, all citing only 3.2. Its
+facts, the same as without attempt 2: `condition: "diabetes"`,
+`pre_existing_condition: "unknown"`, the broken arm only in the free-text
+notes. Its reasoning: "The claim for treatment related to diabetes is not
+covered because the policy has a pre-existing disease waiting period of 36
+months". The lesson is the same one this entry teaches about checks, turned
+on the measurement itself: a baseline is the committed code, run as
+committed, not the experimental code with one piece switched off.
 
 **Why it cannot be narrowed.** The obvious narrowing was to settle "yes" only
 when the old illness is the one being claimed, using the facts step's own
@@ -19391,12 +19408,23 @@ own re-measurement.
 ## The decision: revert both
 
 - What attempt 1 was for, the five HDFC refusals, M50 already fixed.
-- Attempt 1 alone broke two right answers; attempts 1 + 2 break a question
-  shape the evals do not cover, and one a real user could easily ask.
-- Neither attempt's benefit was ever measured: no stored answer refuses a new
-  illness under the PED wait alone.
+- No version gets all three questions right:
+
+  | Code | diabetes | asthma | broken arm |
+  |---|---|---|---|
+  | Neither attempt | right | right | wrong |
+  | Attempt 1 only | wrong | right verdict, no reason | right |
+  | Attempts 1 + 2 | right | right | wrong |
+
+- Attempt 1's one measured benefit, the broken arm, comes at the price of two
+  eval answers that were right; attempt 2 buys those back and loses the broken
+  arm again.
 
 So both were removed. The code quoted above is the record of what was tried.
+The broken arm is wrong on the committed code: a known failure, and the case
+for the "per-illness facts" redesign below. (As first written, this section
+said neither attempt's benefit was ever measured; the corrected table above
+shows attempt 1 had one.)
 
 ## What this taught
 
@@ -19415,8 +19443,13 @@ So both were removed. The code quoted above is the record of what was tried.
 
 ## Left open
 
-- **The broken-arm question** should join the eval set (for the synthetic
-  policy, expected covered), so that any future "pre-existing" rule meets it.
+- **The broken-arm question** has joined the eval set, after this entry was
+  first written: case 41 of `evals/golden/scenarios.json`,
+  `ped-mentioned-accident-claimed`, expected covered, `must_cite: ["2.1"]`,
+  `must_not_cite: ["3.2"]`. It is in the main (tuning) set, not a held-out
+  one, because it has already decided a change. On the committed code it is a
+  known failure (not_covered, 6 of 6), so the main set scores 40/41 at best
+  until the facts can tell the claimed condition from the person's history.
 - **Per-illness facts**: the facts schema carrying the claimed condition
   separately from the person's medical history. That is the design change
   that would make both attempts safe, and it touches the facts prompt, whose
@@ -19427,7 +19460,8 @@ So both were removed. The code quoted above is the record of what was tried.
 Nothing from this entry is in the code. To see the weakness it found, ask the
 running app, against the synthetic policy, "I have had diabetes for years. I
 took out this policy last month and was admitted for a broken arm after a
-fall." It should answer covered.
+fall." The right answer is covered; the committed code answers not_covered,
+citing the pre-existing-disease wait.
 
 **Predict before you look:** the PED wait's prompt line for an unknown says
 "Unless the description says this one had begun by then, it is not the reason
