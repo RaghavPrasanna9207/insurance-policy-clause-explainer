@@ -443,6 +443,12 @@ ICICI Lombard's wording, split into clauses with no model involved: from 92 clau
 ### M49 - The model reads every clause before anything is cut to fit
 For a policy too long for the context window, clauses used to be cut by type and impact before the model's picking step read them: HDFC lost 33 on every question. Now the pick reads everything in small groups and only its result is fitted, never dropping a clause the code's calculations name. Read it for the four options weighed and for a change whose reach was worked out from the code because it could not yet be measured.
 
+### M47–M49 measured - three branches on the real model
+The first model runs of M47, M48 and M49. HDFC: main 14/14, M47 13/14, M48 12/14, M49 13/14 with every answer unanimous; M49 costs about 50% more time per question. Star: M47 17/22 against main's 18/22, the one difference being chance. Read it for how a regression was traced to a single clause.
+- **Failure 115: M47 broke the hernia question, and M49 mended it** - the deciding clause and the arithmetic were both right; the cause was narrowed to which clauses were shown, but not traced.
+- **Failure 116: a section's opening sentence, typed as a waiting period, made the model refuse typhoid** - HDFC's "the Company shall not make payment ... all the Waiting Periods listed below shall be applicable", picked by M49, turned a covered claim into a refusal. Not fixed yet; three candidate fixes listed.
+- **Concept 64: change one input, in both directions** - ablation: remove the suspect from the failing setup and add it to the passing one; both must agree.
+
 ---
 
 ## Related documents

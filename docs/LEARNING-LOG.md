@@ -18741,3 +18741,280 @@ from all of it. Now `narrow` picks from all of it directly, and the final
 `shortlist` keeps everything picked, because a subset of something that fits
 also fits. Same input to every step, so the same prompt.
 </details>
+
+---
+
+# M47–M49 measured: three branches on the real model, and the clause that taught the model to refuse
+
+Written 2026-10-24, on branch `m49-pick-first`. No code changed in this
+entry. It records the first model runs of three branches written while the
+machine had no memory to spare for them:
+
+- **M47** (`m47-kept-space`): the PDF reader keeps the space after a list
+  number, so "1. Pre-Existing" is no longer glued into the clause above;
+  long clauses are cut at a sentence end; the consistency check also
+  questions a refusal that cites no time-window clause.
+- **M48** (`m48-icici-segmenter`): segmenter rules for ICICI's layout.
+  On HDFC it changes only one clause, the plan chart in Annexure C.
+- **M49** (`m49-pick-first`): for a policy too long for the context window,
+  the model's picking step now reads every clause, and only what it keeps
+  is cut to fit. Before, definitions and procedural clauses were cut first,
+  unread.
+
+The three branches are stacked: M48 is cut from M47, M49 from M48. So each
+run below includes the changes of the branches before it.
+
+All runs: Ollama 0.35.1, `qwen2.5:7b-instruct-q4_K_M`, the pinned server.
+
+## The numbers
+
+**HDFC Optima Secure, 14 questions, majority of 3 samples**
+(`evals/real/scenarios-hdfc-optima-secure.json`):
+
+| Code | Right | Wrong answers |
+|---|---|---|
+| `main` (recorded before M47) | 14/14 | – |
+| M47 | 13/14 | `hdfc-hernia-14-months` (covered, 2 of 3) |
+| M48 | 12/14 | `hdfc-hernia-14-months` (3 of 3); `hdfc-tests-75-days-before` (conditional, 2 of 3) |
+| M49 | 13/14, every case unanimous | `hdfc-typhoid-45-days` (not_covered, 3 of 3) |
+
+M47's window-check change did what it was written for:
+`hdfc-tests-75-days-before` (tests 75 days before admission; the policy pays
+for 60) was wrong in 4 of 5 samples before it and right in 3 of 3 after.
+
+M48's `tests-75-days-before` miss is most likely chance: M48 changes nothing
+that question reads, and M47 and M49 both got it right 3 of 3. It was not
+re-asked to confirm.
+
+**Time.** M48 took 768 seconds for the 42 answers; M49 took 1,142. M49's
+picking step reads all 126 clauses instead of 88, in more groups, so each
+question costs about 27 seconds instead of 18 (+50%).
+
+**Star Arogya Sanjeevani, 22 questions, M47 against `main`, one sample each**
+(three question files: the main 10, held-out "abroad" 7, held-out
+"maternity" 5):
+
+| | Right |
+|---|---|
+| `main` | 18/22 |
+| M47 | 17/22 |
+
+Only one answer differed: `star-gallstones-no-timing` (the question gives no
+dates, so the right answer is `insufficient_information`). Asked 5 more times
+afresh, M47 was right 4 of 5 and `main` 5 of 5, so the one wrong sample was
+chance. The four other wrong answers are wrong on both sides, so they are
+older faults, not M47's. M47 did produce more invented quotations on Star
+(7 against 2); every one was caught by the verbatim span check and shown as
+unverified, so detection stayed at 100%.
+
+**How to run these.** HDFC, majority of 3:
+
+```bash
+api/.venv/Scripts/python evals/run_scenario_eval.py \
+  --policy samples/real/hdfc-optima-secure.pdf \
+  --cases evals/real/scenarios-hdfc-optima-secure.json --repeats 3 --no-report
+```
+
+One question asked afresh five times (`--resample` skips the stored answer
+for the reasoning step only):
+
+```bash
+api/.venv/Scripts/python evals/run_scenario_eval.py \
+  --policy samples/real/hdfc-optima-secure.pdf \
+  --cases evals/real/scenarios-hdfc-optima-secure.json \
+  --only hdfc-hernia-14-months --resample --repeats 5 --no-report
+```
+
+`main`'s side was run from a second checkout of `main` (`../ipce-main`),
+which has its own cache.
+
+## Failure 115: M47 broke the hernia question, and M49 mended it without anyone knowing why
+
+**The question.** "I need surgery for a hernia that was found last month. I
+bought this policy 14 months ago and it is my first health insurance."
+Expected: `not_covered`. Hernia is on HDFC's specified disease/procedure
+list, which carries a 24-month wait (clause Excl02), and 14 months have not
+served it.
+
+**What was measured.** Five fresh samples each:
+
+| Code | not_covered (right) |
+|---|---|
+| `main` | 5/5 |
+| M47 (`27d8c36`) | 1/5 |
+| M47 before its last three commits (`525a49c`) | 0/5 |
+| M49 (in the eval run) | 3/3 |
+
+An earlier M47 run, before those last three commits, had scored HDFC 13/14
+with hernia right. The table shows that was luck. At `525a49c` hernia is
+wrong 5 times in 5, so the fault came in with M47's first three commits,
+not the last three.
+
+**What was ruled out.** The deciding clause itself. Excl02's text from `main`
+and from M47 differs only in the restored spaces:
+
+```
+< ii.In case of enhancement of sum insured the exclusion shall apply afresh ...
+> ii. In case of enhancement of sum insured the exclusion shall apply afresh ...
+```
+
+Hernia is in the list in both. The code's own waiting-period arithmetic also
+marks Excl02 "not served" (720 days required). So the model was shown the
+right clause and the right arithmetic, and still said `covered`.
+
+**What is left.** M47 changes HDFC's clause boundaries (115 → 126 clauses),
+and HDFC is over the context budget, so which clauses the model is shown
+changes with them. M49, which changes exactly that selection, gives the right
+answer 3 of 3. That points at the selection, but it is not a diagnosis: it was
+not traced which shown clause pulled the answer to `covered`. The method for
+tracing it is the one in Failure 116, and it was not run here. If M49 is
+merged, the question is right; if M49 were ever reverted, this fault would
+come back.
+
+## Failure 116: a section's opening sentence, typed as a waiting period, made the model refuse typhoid
+
+**The question.** "I was admitted to hospital with typhoid 45 days after
+buying this policy. It is my first health insurance." Expected: `covered`.
+HDFC's only wait that could apply is the 30-day initial wait (Excl03), served
+at 45 days. Typhoid is not on the specified disease list, and nothing says it
+was there before the policy.
+
+M47 and M48 answer `covered`. M49 answers `not_covered`, 3 samples of 3.
+
+**Step 1: what M49 said.** Replaying the stored answer from the cache (no
+model call) gives:
+
+> The claim is not covered due to the 36-month pre-existing disease waiting
+> period. The policyholder has held the policy for only 45 days ...
+
+It cites Excl01, the pre-existing disease (PED) exclusion. But typhoid caught
+after buying the policy is not a pre-existing disease. The facts step had
+recorded exactly that uncertainty: `pre_existing_condition: "unknown"`.
+
+**Step 2: what changed between M48 and M49.** A replay script recorded what
+the reasoning step received on each branch. It wraps `scenario.reason` (the
+function that sends the final prompt) so the arguments can be printed:
+
+```python
+real_reason = sc.reason
+async def spy(scenario, facts, considered, computed, **kw):
+    seen.setdefault("considered", considered); seen.setdefault("computed", computed)
+    return await real_reason(scenario, facts, considered, computed, **kw)
+sc.reason = spy
+```
+
+Two findings:
+
+- `computed`, the code's own arithmetic, is **identical** on both branches.
+  On both, Excl01 shows as "not served" (1,080 days required, 45 held),
+  marked as applying only if the condition is pre-existing, which is unknown.
+- The clauses shown differ. M48 shows 25 and M49 shows 38. The 13 extra are
+  mostly definitions and claim-procedure clauses, plus one typed
+  `waiting_period`: `1#3`.
+
+`1#3` is not a waiting period. It is the opening of HDFC's exclusions
+section, cut off as its own clause:
+
+> The Company shall not make payment for any claim in respect of any Insured
+> Person caused by, arising from or attributable to any of the following
+> unless expressly stated to the contrary in the Policy: 1. Waiting Periods
+> All the Waiting Periods and exclusions listed below shall be applicable
+> individually for each Insured Person and claims shall be assessed
+> accordingly.
+
+It names no condition and no period. It is a general "we will not pay", and
+read on its own it says every waiting period applies.
+
+**Step 3: proving it, rather than suspecting it.** Thirteen clauses were
+added at once, and any of them could be the cause. Removing all 13 would
+only show that "something in the 13" matters. So the experiment changed one
+clause, in both directions, with fresh samples (a scratch script replaced the
+clause list just before `reason` and passed `use_cache=False`):
+
+| Clauses shown | typhoid-45-days, 5 fresh samples |
+|---|---|
+| M49's 38, minus `1#3` | covered 5/5 (right) |
+| M48's 25, plus `1#3` | not_covered 5/5 (wrong) |
+
+Removing it from M49 repairs the answer; adding it to M48 breaks it. Five of
+five both ways, against a baseline that was three of three each way, so this
+is not sampling noise.
+
+**Step 4: why M49 shows it and M48 did not.** The code's calculations do not
+name `1#3` (`named_by_code` keeps Excl01, Excl02, Excl03, 1.1.1, 1.4, 2.12,
+2.2, 2.11#3, 6). The model's picking step chose it. M48's picking step had
+`1#3` in front of it too (it survived M48's cut, 88 clauses), and passed it
+over. The picker reads clauses in document order, in groups of about
+`PICK_GROUP_TOKENS = 3_000` tokens, keeping up to three per group. M49 puts
+the 33 definitions and procedural clauses back into that order, so every
+group boundary moves and `1#3` sits among different neighbours. In its new
+group it made the cut.
+
+**So the fault is not M49's idea.** M49 exposed an older one: a clause with
+no content of its own, typed `waiting_period`, which the model reads as a
+blanket refusal. Any change to which clauses are shown could pick it up. It
+belongs with the segmenter's faults: a section's opening sentence should not
+stand alone as a clause.
+
+**Not fixed in this entry.** Candidate fixes, none tried yet:
+
+1. Keep a section's opening sentence out of the clauses (or attach it to the
+   section heading, as `_merge_leadins` already does for some lead-ins).
+2. Make the analysis step type such a clause `procedural`, not
+   `waiting_period`.
+3. Keep it, but never let the picking step choose a clause that names no
+   condition, period or amount.
+
+Option 1 matches the project's principle that clause boundaries are decided
+by rules, not by the model. It also changes HDFC's clauses, which means
+re-analysis and another HDFC run.
+
+## Concept 64: change one input, in both directions
+
+When a change makes an answer go wrong, the change usually alters many
+inputs at once. Here, M49 changed 13 clauses in the prompt. Looking at the
+13 and picking the most suspicious one gives a *guess*. A guess about a
+language model is cheap to make and easy to believe, because the model's
+reasoning sounds as if it explains itself.
+
+**Ablation** is the method that turns the guess into a measurement. Change
+exactly one input and hold everything else fixed. Do it **both ways**:
+
+- **Remove it from the failing setup.** If the failure goes, the input is
+  *necessary* for it there.
+- **Add it to the passing setup.** If the failure appears, the input is
+  *sufficient* to cause it there.
+
+Each direction on its own can mislead. Removing a clause could repair an
+answer only because the prompt got shorter. Adding one could break an answer
+only in combination with something else in that particular set. When both
+directions agree, five times in five against a stable baseline, the one
+input is the cause in both contexts.
+
+What makes this cheap here is the cache (Concept 29). The facts, the pick
+and the code's arithmetic replay unchanged from the cache, so the only thing
+that varies between the two arms is the clause list given to the reasoning
+step, plus the model's own sampling, which is why each arm is asked five
+times.
+
+## Check it yourself
+
+Replay M49's stored typhoid answer without the model, using a small script
+that calls `build_clauses` and then `run_scenario` the way
+`evals/run_scenario_eval.py` does, and look at which clause it cites. A
+replay should report zero model calls (`client.model_calls` unchanged).
+
+**Predict before you look:** M49 shows the model *more* of the policy than
+M48 did, and the deciding clause, Excl03, is in both. How can showing more
+of the same policy make an answer worse?
+
+<details>
+<summary>Answer</summary>
+
+The model does not weigh every clause on its merits. A sentence that sounds
+like a rule ("all the waiting periods listed below shall be applicable"),
+standing alone with nothing to limit it, is read as one. More clauses means
+more chances for a misleading one to reach the prompt. That is why the
+picking step exists, and why what the segmenter calls a clause matters as
+much as what the model does with it.
+</details>
