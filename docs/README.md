@@ -454,6 +454,11 @@ Group headings like HDFC's "1. Waiting Periods" (with its "shall not make paymen
 - **Failure 117: the sentence moved into the first item, and refused five covered claims** - merged into Excl01, the blanket sentence reached nearly every prompt; HDFC fell to 9/14.
 - Why the skip comes after the citation ids are counted.
 
+### M51 - Asking the model again about the pre-existing-disease wait: two attempts, both reverted
+No code from this entry is in the repository. A check that re-asked a refusal resting only on the pre-existing wait, and then a rule reading "for years" / "since childhood" as pre-existing so the check would only reach real unknowns. Read it for how to find which cases a new check reaches before using the model, and for a rule that passed every eval question and failed on the first one written against it.
+- **Failure 118: the check reached two right answers, and broke both** - "diabetes for years" paid 5 of 5; asthma refused without its reason.
+- **Failure 119: a question nobody had written** - an old illness mentioned, a broken arm claimed: refused 3 of 3 under the diabetes rule. The facts hold one condition per question, so the rule cannot be narrowed without a schema change.
+
 ---
 
 ## Related documents

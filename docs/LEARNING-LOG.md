@@ -19227,3 +19227,223 @@ would change with it, so the model would be asked afresh. Worse, a stored
 answer citing `1#4` would now name a different clause. Counting first keeps
 every id fixed to the clause it always named.
 </details>
+
+---
+
+# M51 — Asking the model again about the pre-existing-disease wait: two attempts, both reverted
+
+Written 2026-10-24, on branch `m49-pick-first`, after M50. **No code from this
+entry is in the repository.** Both attempts were built, tested and measured,
+and both were removed. The entry exists because why they failed says something
+about where this system can and cannot hand a judgement to the model.
+
+## The problem
+
+Most health policies refuse an illness the person already had when the policy
+began until a waiting period has passed: 36 months at HDFC (clause Excl01), 36
+in the synthetic policy (clause 3.2). This is the pre-existing-disease (PED)
+wait. It concerns only such illnesses. Typhoid caught 45 days after buying the
+policy is not one.
+
+The code already knows this. The waiting-period check (`waiting.py`) marks a
+PED clause `pre_existing`, and records whether the person's condition predates
+the policy: "yes", "no" or "unknown". For an unknown, the line it writes into
+the prompt opens with the scope:
+
+> clause Excl01: concerns ONLY an illness the person already had when the
+> policy began. Unless the description says this one had begun by then, it
+> is not the reason for this claim.
+
+The model still refused under it. In Failures 116 and 117 it refused typhoid
+at 45 days, dengue at four months, an accident at ten days, pneumonia at 40
+days and medicines after a covered stay, 3 samples of 3 each, every one citing
+only Excl01. M50 removed the sentence that set those refusals off, and HDFC
+went back to 14/14. But the weakness stayed: an instruction can be ignored.
+
+Elsewhere in this project the answer to an ignored instruction is a check in
+code: `find_contradictions` (`api/app/pipeline/scenario.py`) compares the
+answer with what was calculated, and when they disagree it asks the model once
+more, with the disagreement in front of it. M51 tried to add one more such check.
+
+## Attempt 1: the check
+
+```python
+    if verdict == Verdict.NOT_COVERED:
+        unconfirmed = {
+            c.clause_id: c for c in computed.waiting
+            if c.pre_existing and c.condition_predates_policy != "yes"
+            and c.status is not waiting.WaitingStatus.SERVED
+        }
+        against = [c.clause_id for c in citations if c.effect in _ADVERSE_EFFECTS]
+        if against and all(clause_id in unconfirmed for clause_id in against):
+            ...  # one problem line per clause; the model answers again
+```
+
+It fires only when every clause the answer cites against the claim is an
+unserved PED wait, and the code has not settled the condition as pre-existing.
+The problem line put both outcomes to the model: (a) if the description says
+the illness had begun before the policy, the refusal stands; (b) otherwise,
+answer again without that clause. (Both outcomes, because a one-sided
+correction elsewhere in the same function, "the answer is then not_covered",
+turned "hit by a car" into a refusal 4 samples of 4.)
+
+## Failure 118: the check reached two right answers, and broke both
+
+**Measured without the model first.** A replay script ran all 114 eval
+questions (the synthetic 40, four held-out sets, HDFC 14, Star 22) through
+`run_scenario` with stored answers from the cache, and stopped any question
+the new rule would re-ask. It re-asked 2:
+
+- `ped-waiting-not-served`: "I have had diabetes for years and was
+  hospitalised for it 8 months after buying this policy." Expected
+  not_covered, citing 3.2.
+- `ho4-asthma-since-childhood`: "My asthma started when I was a child, well
+  before this policy, and I was admitted with a severe attack. I have held the
+  policy for two years." Expected not_covered, citing 3.2.
+
+Both stored answers were right, and both illnesses plainly predate the policy.
+The rule asked them anyway, because the facts said "unknown".
+
+**Then with the model**, 5 fresh samples each:
+
+| Question | Stored answer | With the check |
+|---|---|---|
+| diabetes | not_covered, cites 3.2 | **covered, 5 of 5** |
+| asthma | not_covered, cites 3.2 | not_covered, **3.2 cited in none of 5** |
+
+Offered (b), the model took it for diabetes "for years". For asthma it kept
+the refusal and dropped the reason: a right verdict for a wrong reason, which
+this project counts as wrong (Concept 62).
+
+**Why the facts said "unknown".** Whether a condition predates the policy is
+settled in code wherever it can be, before the model sees the question:
+
+- `derive_pre_existing` compares two stated durations ("found last month",
+  "bought 14 months ago");
+- `stated_not_pre_existing` reads the plain statement of the "no" direction
+  ("which I never had before taking the policy").
+
+"For years" and "when I was a child" have no number to compare, and nothing
+read the "yes" direction. So the check handed the model a question it could
+not answer reliably.
+
+## Attempt 2: settle "yes" in code first
+
+The obvious repair: read the "yes" direction from the person's words, as the
+"no" direction already is, so that only real unknowns reach the check.
+
+```python
+_ILLNESS_GAP = r"(?:(?!\b(?:polic|cover|insur|premium))[^.;]){0,40}?"
+_CHILDHOOD = r"(?:a\s+)?(?:child|kid|baby|boy|girl|teenager)"
+_STATED_PRE_EXISTING = re.compile(
+    r"\b(?:had|have\s+had|has\s+had|suffered\s+from|suffering\s+from|lived\s+with|living\s+with)\b"
+    + _ILLNESS_GAP + r"\bfor\s+(?:many\s+|several\s+|some\s+)?(?:years|decades)\b"
+    r"|\b(?:since|from)\s+(?:childhood|birth|I\s+was\s+" + _CHILDHOOD + r")\b"
+    r"|\bwhen\s+I\s+was\s+" + _CHILDHOOD + r"\b"
+    r"|\b(?:started|began|begun|developed|diagnosed|had)\b" + _ILLNESS_GAP
+    + r"\b(?:well\s+|long\s+)?before\s+" + _START,
+    re.IGNORECASE,
+)
+```
+
+It was guarded: the gap refuses to cross a policy word ("I have had this
+policy for years"); the "no" reading runs first, so "never had it before
+taking the policy" stays "no"; and it fills only an "unknown". Run over all
+114 eval questions, it matched four, all correctly. Each guard had a test that
+failed without it.
+
+It worked on what it was written for:
+
+| | Re-asked (stored answers) | diabetes, 5 fresh | asthma, 5 fresh |
+|---|---|---|---|
+| Attempt 1 alone | 2 of 114 | covered, 0/5 right | 3.2 cited 0/5 |
+| Attempt 1 + 2 | 0 of 114 | not_covered 5/5, cites 3.2 | not_covered 5/5, cites 3.2 |
+
+## Failure 119: a question nobody had written
+
+Writing the "predict" question for this entry raised a case no eval question
+covers: an old illness *mentioned*, a new injury *claimed*. Asked of the
+synthetic policy, 3 fresh samples each:
+
+> "I have had diabetes for years. I took out this policy last month and was
+> admitted for a broken arm after a fall."
+
+| | Facts: pre-existing | Answer |
+|---|---|---|
+| Without the "yes" reading | unknown | **covered, 3 of 3**, citing 2.1 (right) |
+| With it | yes | **not_covered, 3 of 3**, citing 3.2 (wrong) |
+
+The pattern found "had diabetes for years", settled the question as
+pre-existing, and the PED line then told the model the wait "still applies
+and blocks this claim". A broken arm after a fall was refused under a
+diabetes rule.
+
+**Why it cannot be narrowed.** The obvious narrowing was to settle "yes" only
+when the old illness is the one being claimed, using the facts step's own
+`condition` field. But for this question the facts step records
+`condition: "diabetes"`, not the broken arm. The facts hold one condition per
+question, and here the facts step picked the old one. Code cannot tell "the old
+illness is the claim" from "an old illness is mentioned" with facts that make
+no such distinction. Fixing that means changing the facts schema to carry the
+claimed condition separately from the person's history, a redesign with its
+own re-measurement.
+
+## The decision: revert both
+
+- What attempt 1 was for, the five HDFC refusals, M50 already fixed.
+- Attempt 1 alone broke two right answers; attempts 1 + 2 break a question
+  shape the evals do not cover, and one a real user could easily ask.
+- Neither attempt's benefit was ever measured: no stored answer refuses a new
+  illness under the PED wait alone.
+
+So both were removed. The code quoted above is the record of what was tried.
+
+## What this taught
+
+1. **A check that hands a judgement back to the model is only as good as the
+   model's judgement on the cases it reaches.** Measure which cases those are
+   before measuring anything else; the replay against stored answers did that
+   in a minute, with no model.
+2. **Settle in code what can be settled, but only what the facts can carry.**
+   "Pre-existing" is a property of an illness, and the facts hold it per
+   question. A rule that writes per-question facts from per-illness evidence
+   will be right only while a question names one illness.
+3. **The eval set is not the world.** Every eval question passed. The question
+   that failed was written in one line, by asking what a person might say that
+   the pattern would misread. When a rule can refuse a claim, write its
+   adversarial questions before trusting it.
+
+## Left open
+
+- **The broken-arm question** should join the eval set (for the synthetic
+  policy, expected covered), so that any future "pre-existing" rule meets it.
+- **Per-illness facts**: the facts schema carrying the claimed condition
+  separately from the person's medical history. That is the design change
+  that would make both attempts safe, and it touches the facts prompt, whose
+  every change rewords the facts of every question (M21).
+
+## Check it yourself
+
+Nothing from this entry is in the code. To see the weakness it found, ask the
+running app, against the synthetic policy, "I have had diabetes for years. I
+took out this policy last month and was admitted for a broken arm after a
+fall." It should answer covered.
+
+**Predict before you look:** the PED wait's prompt line for an unknown says
+"Unless the description says this one had begun by then, it is not the reason
+for this claim." Attempt 1 asked the model to apply that exact sentence to
+"diabetes for years", and it answered covered. Is the model's reading of the
+sentence actually wrong?
+
+<details>
+<summary>Answer</summary>
+
+Not by the letter. "For years" does not say the diabetes began before the
+policy: the person could have held the policy for longer than they have had
+diabetes. Only the question's other half, "hospitalised 8 months after buying
+this policy", makes it certain, and that takes combining two statements. The
+model read one sentence literally and missed the inference. That is the kind of
+judgement this project keeps out of the model, which is why settling it in code
+looked right, and why it failed once the code's evidence was coarser than the
+question.
+</details>
