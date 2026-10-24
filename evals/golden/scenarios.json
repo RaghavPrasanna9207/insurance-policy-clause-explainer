@@ -65,7 +65,13 @@
     "but the four verdicts are claim-shaped and neither `covered` nor",
     "`conditional` is clearly right for them. A case whose expected verdict is",
     "arguable measures the vocabulary rather than the reasoning, so those are",
-    "excluded rather than guessed at."
+    "excluded rather than guessed at.",
+    "",
+    "CASE 41, ADDED AFTER M51, IS THE ONE EXCEPTION TO 'WRITTEN BEFORE MEASURING'.",
+    "`ped-mentioned-accident-claimed` was written in M51 and decided a revert:",
+    "a rule reading 'for years' as pre-existing refused it 3 of 3. A case that",
+    "has decided a change is a tuning case, so it lives here and not in a",
+    "held-out file. It is here so any future pre-existing rule must pass it."
   ],
   "cases": [
     {
@@ -352,6 +358,14 @@
       "expected_verdict": "insufficient_information",
       "must_cite": [],
       "why": "Who counts as an Insured Person is set by the Policy Schedule, and no clause here defines eligible family members. The document is silent rather than negative."
+    },
+    {
+      "id": "ped-mentioned-accident-claimed",
+      "scenario": "I have had diabetes for years. I took out this policy last month and was admitted for a broken arm after a fall.",
+      "expected_verdict": "covered",
+      "must_cite": ["2.1"],
+      "must_not_cite": ["3.2"],
+      "why": "The claim is a broken arm from a fall, an Injury that 2.1 covers. The diabetes is history, not the claim, so the pre-existing-disease wait (3.2) cannot refuse it. The 30-day initial wait (3.1) may still be running, but it excepts claims arising out of an Accident, so citing it is fine and not required. Nothing reduces the claim."
     }
   ]
 }
