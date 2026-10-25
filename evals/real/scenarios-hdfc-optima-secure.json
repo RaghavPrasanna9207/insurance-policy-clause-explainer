@@ -8,7 +8,7 @@
     "",
     "What prompted them: the plan-comparison table near the end of the PDF has rows like",
     "'1.6 Post-Hospitalization 180 days 180 days ...'. The pipeline types those rows (ids",
-    "1.5#2 and 1.6#2) as 60- and 180-day WAITING PERIODS. They are cover windows: how long",
+    "1.5#4 and 1.6#4; they were 1.5#2 and 1.6#2 before M47/M48) as 60- and 180-day WAITING PERIODS. They are cover windows: how long",
     "before admission and after discharge expenses are paid. Read as waiting periods they",
     "would block every claim in the first six months. These cases check that they don't,",
     "and that the real windows (1.5 and 1.6) still decide the questions they should.",
@@ -45,8 +45,8 @@
         "Excl03"
       ],
       "must_not_cite": [
-        "1.5#2",
-        "1.6#2"
+        "1.5#4",
+        "1.6#4"
       ],
       "why": "The 30-day initial waiting period (Section C 1.c, in Excl03) is served at 45 days, and typhoid is not on the specified disease list. Nothing else applies."
     },
@@ -56,8 +56,8 @@
       "expected_verdict": "covered",
       "must_cite": [],
       "must_not_cite": [
-        "1.5#2",
-        "1.6#2"
+        "1.5#4",
+        "1.6#4"
       ],
       "why": "Four months serves the 30-day initial waiting period; dengue is neither pre-existing nor on the specified disease list."
     },
@@ -76,8 +76,8 @@
       "expected_verdict": "covered",
       "must_cite": [],
       "must_not_cite": [
-        "1.5#2",
-        "1.6#2"
+        "1.5#4",
+        "1.6#4"
       ],
       "why": "The 30-day initial waiting period exempts accidents, and nothing else applies to an accidental fracture."
     },
