@@ -426,6 +426,39 @@ Three small faults M45 listed and left, each fixed in isolation and then tested 
 - **An abbreviation ended a sentence in the exception check** - "Rs. 10,000" cut a sentence and could drop a true exception. 0 of 102 stored exceptions change. Introduces **Concept 61: negative lookbehind**.
 - **Failure 108: a timing test that failed only after other tests had run** - a remembered Ollama version expiring between two calls; fixed in the test, confirmed 11 of 11 on the real model.
 
+### M47 - The space after a list number, and what losing it broke
+A fourth insurer's PDF exposed a fault in reading the text: the space after "1." was dropped, so numbered clauses merged into the one above (355 places in HDFC). Fixing it broke HDFC answers three different ways, each traced and fixed. Read it for a correct fix that uncovers further faults one after another, and for an answer that was "right" only because the score ignored its reason. The question sets are not yet re-run on the final code; the entry lists what is missing.
+- **Failure 109: the space after "1." was thrown away** - blank PDF spans dropped with the styling; plus a bold number is not a bold clause (HDFC's definition lists), and why the same rule could not be used for Star.
+- **Failure 110: the size cap cut a clause in mid-sentence** - the tail of a definition read as a 36-month wait on every claim; cuts now prefer a sentence end.
+- **Failure 111: an optional cover's choices read as always applying** - a list restarting at 1 inside "2.12" now stays in it.
+- **Failure 112: the right refusal for the wrong reason** - diagnosed from stored answers without the model; the consistency check now also questions a refusal that cites no window clause. Introduces **Concept 62: a right verdict for a wrong reason is a wrong answer**.
+
+### M48 - A fourth insurer's clause structure, checked against the other four after every change
+ICICI Lombard's wording, split into clauses with no model involved: from 92 clauses (median 2,934 characters) to 250 (median 466). Every edit was checked against a saved copy of all five policies' clauses, which reshaped three fixes. Read it for the snapshot technique and for how a loose rule is tightened one counter-example at a time.
+- **Concept 63: a snapshot of the whole output, compared after every change** - characterization testing for code whose risk is the cases nobody thought of.
+- **Failure 113: Niva's standard waiting periods were filed under "Optional Benefit"** - found by checking the code's marked shortcuts against real PDFs; fixed for ICICI, still blocked on Niva by a page stored bottom-first.
+- **Failure 114: "7.5 Lakhs" was a clause number** - plus two slips of mine: a shell that turned `\b` into a backspace, and a commit made over a failing test.
+- Page numbers under a tall letterhead; unnumbered definitions; and why ICICI's size is a design decision.
+
+### M49 - The model reads every clause before anything is cut to fit
+For a policy too long for the context window, clauses used to be cut by type and impact before the model's picking step read them: HDFC lost 33 on every question. Now the pick reads everything in small groups and only its result is fitted, never dropping a clause the code's calculations name. Read it for the four options weighed and for a change whose reach was worked out from the code because it could not yet be measured.
+
+### M47–M49 measured - three branches on the real model
+The first model runs of M47, M48 and M49. HDFC: main 14/14, M47 13/14, M48 12/14, M49 13/14 with every answer unanimous; M49 costs about 50% more time per question. Star: M47 17/22 against main's 18/22, the one difference being chance. Read it for how a regression was traced to a single clause.
+- **Failure 115: M47 broke the hernia question, and M49 mended it** - the deciding clause and the arithmetic were both right; the cause was narrowed to which clauses were shown, but not traced.
+- **Failure 116: a section's opening sentence, typed as a waiting period, made the model refuse typhoid** - HDFC's "the Company shall not make payment ... all the Waiting Periods listed below shall be applicable", picked by M49, turned a covered claim into a refusal. Not fixed yet; three candidate fixes listed.
+- **Concept 64: change one input, in both directions** - ablation: remove the suspect from the failing setup and add it to the passing one; both must agree.
+
+### M50 - A heading is shown on the clause map, and never to the model answering a question
+Group headings like HDFC's "1. Waiting Periods" (with its "shall not make payment for any claim" lead-in) are found by structure, marked, kept on the clause map, and left out of the answering step. HDFC 13/14 → 14/14. Read it for how a rule is tightened against every policy at once, and for a fix that failed because it moved the problem instead of removing it.
+- **Failure 117: the sentence moved into the first item, and refused five covered claims** - merged into Excl01, the blanket sentence reached nearly every prompt; HDFC fell to 9/14.
+- Why the skip comes after the citation ids are counted.
+
+### M51 - Asking the model again about the pre-existing-disease wait: two attempts, both reverted
+No code from this entry is in the repository. A check that re-asked a refusal resting only on the pre-existing wait, and then a rule reading "for years" / "since childhood" as pre-existing so the check would only reach real unknowns. Read it for how to find which cases a new check reaches before using the model, and for a rule that passed every eval question and failed on the first one written against it.
+- **Failure 118: the check reached two right answers, and broke both** - "diabetes for years" paid 5 of 5; asthma refused without its reason.
+- **Failure 119: a question nobody had written** - an old illness mentioned, a broken arm claimed: refused 3 of 3 under the diabetes rule. The facts hold one condition per question, so the rule cannot be narrowed without a schema change.
+
 ---
 
 ## Related documents

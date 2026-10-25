@@ -34,6 +34,7 @@ Each line is classified as SECTION heading, CLAUSE heading, or BODY, using:
 """
 
 import re
+import unicodedata
 from dataclasses import dataclass, field
 
 from app.pipeline.ingest import IngestResult, Line
@@ -57,9 +58,20 @@ HEADING_MAX_CHARS = 90
 # comfortable single unit for the analyzer, while capping the damage done by a
 # document with no detectable structure at all.
 MAX_CLAUSE_CHARS = 3000
+# A line break after a word of three letters or more and a full stop or
+# semicolon: where a sentence ends. The word keeps out a label alone on its line
+# (HDFC "Def. 6.", Star "a.") and "e.g.", "Rs.", "No."; a colon is left out
+# because it opens a list, and a cut there strands the lead-in from its items.
+# ponytail: "Sec." and "etc." still count as ends; add a stop-list if one cuts badly.
+_RE_SENTENCE_LINE_END = re.compile(r"(?<=[A-Za-z]{3}[.;])[ \t]*\n")
 
 # "4.", "4.2", "4.2.1" followed by whitespace.
 _RE_DECIMAL = re.compile(r"^(\d+(?:\.\d+)*)\.?\s+(?=\S)")
+# An amount of money after the number makes it a quantity: sum-insured tables
+# have cells like "7.5 Lakhs" on lines of their own (ICICI twice, HDFC's plan
+# chart once), read as clause 7.5 because the next letter is a capital. Money
+# only: "1.4 Day Care Treatment" is a clause, so time units cannot be listed.
+_RE_UNIT = re.compile(r"(?:lakhs?|lacs?|crores?)\b", re.I)
 # A bare integer with no dot and no trailing period ("24 hours ...") is NOT
 # clause numbering - it is prose that happens to start with a number, which
 # occurs constantly in insurance text ("24 hours", "10 in-patient beds",
@@ -128,6 +140,30 @@ _RE_SECTION_HEAD = re.compile(
 # incurred ...") was not.
 _RE_ANNEXURE_HEAD = re.compile(r"^annexure[\s-]+(?:[a-z]|[ivxl]+|\d+)\b", re.I)
 
+# A top-level heading in body-size type, numbered like an outline: ICICI's
+# "a. PREAMBLE:", "c. Benefits", "d. EXCLUSIONS:"; Niva's "5." beside "Exclusions".
+# Size and capitals miss both, so the clauses under them kept the section above:
+# Niva's 30-day and pre-existing-disease waits were filed under "Optional
+# Benefit:", and the waiting-period rule read them as add-on-only.
+# Three guards, each from a line on five PDFs that the loose version took:
+#   - letters a-h only: "i. Standard Definitions" and "v. In case of ..." are items;
+#   - the words, less filler, must be one name for a part of a policy: "Other
+#     Terms and Conditions" is, "Secure Benefit" and "Renewal Premium:" are not;
+#   - a number must carry on the top-level count: Niva's "5." comes after
+#     clauses 4.x, while HDFC's "1. Standard General Terms & Clauses" restarts
+#     inside its Section D and stays a clause.
+_RE_OUTLINE_HEAD = re.compile(r"^([a-h]|\d{1,2})\.\s+([A-Za-z][A-Za-z &]{2,45}?)\s*[.:]?$")
+# An unnumbered definition: a bold term in quotes, then "means". ICICI numbers
+# none of its 60-odd definitions, so they ran together and were cut every 3,000
+# characters, mid-definition. The opening quote is optional: ICICI drops it in
+# two places ("Condition Precedent" shall mean ...).
+_RE_DEFINED_TERM = re.compile(
+    r"^[\"“]?([A-Z][\w&/() \"“”-]{1,60}?)[\"”]\s*"
+    r"(?:[-–:]\s|(?:means|refers\s+to|shall\s+mean|includes)\b)")
+_OUTLINE_FILLER = frozenset({"standard", "general", "other", "specific", "terms", "and", "&", "the"})
+_RE_OUTLINE_NAME = re.compile(
+    r"^(?:preamble|definition|benefit|coverage|exclusion|condition|clause)s?$")
+
 # Section names that recur across IRDAI health policies. A secondary signal for
 # policies whose headings carry neither styling nor a "SECTION n" prefix.
 _SECTION_WORDS = (
@@ -162,6 +198,8 @@ class Segment:
     char_start: int
     char_end: int
     bboxes: list[tuple[float, float, float, float]] = field(default_factory=list)
+    # Heads a group of clauses rather than stating a rule; see _mark_group_headings.
+    is_heading: bool = False
 
 
 def _numbering(text: str) -> tuple[str, bool] | None:
@@ -178,12 +216,14 @@ def _numbering(text: str) -> tuple[str, bool] | None:
       "4.2 Room Rent"    - dotted number followed by a capital
 
     Weak (needs styling to corroborate):
-      "1.5 lakhs and ..." - a dotted *quantity*, not a clause number
+      "1.5 times the ..." - a dotted *quantity*, not a clause number
+      "1. it needs ..."   - or a list item
 
     Not numbering at all:
       "24 hours of ..."  - a bare integer, however it is styled
+      "7.5 Lakhs"        - an amount of money, whatever its case
 
-    The capital-letter test is what separates "4.2 Room Rent" from "1.5 lakhs".
+    The capital-letter test is what separates "4.2 Room Rent" from "1.5 times".
     Clause numbers are followed by a heading or a new sentence, so the next
     character is upper case; a measurement is followed by its unit in lower case.
     """
@@ -199,6 +239,8 @@ def _numbering(text: str) -> tuple[str, bool] | None:
         return None
     if m := _RE_DECIMAL.match(text):
         rest = text[m.end() :]
+        if _RE_UNIT.match(rest):
+            return None
         looks_numbered = bool(rest) and rest[0].isupper()
         return m.group(0).strip(), looks_numbered
     return None
@@ -240,6 +282,27 @@ def _looks_like_section(line: Line, body_size: float) -> bool:
         if _RE_SECTION_WORD.search(stripped.lower()):
             return True
     return False
+
+
+def _outline_section(lines: list[Line], i: int, text: str, current: str) -> str | None:
+    """The heading, if `text` is an outline-numbered section heading.
+
+    `current` is the number of the clause being built, for the top-level count.
+    """
+    m = _RE_OUTLINE_HEAD.match(unicodedata.normalize("NFKC", text.strip()))
+    if not m:
+        return None
+    name = " ".join(w for w in m.group(2).lower().split() if w not in _OUTLINE_FILLER)
+    if not _RE_OUTLINE_NAME.match(name):
+        return None
+    label = m.group(1)
+    if label.isdigit():
+        if not current.startswith(f"{int(label) - 1}."):
+            return None
+        after = [_as_read(lines, j) for j in range(i + 1, min(i + 4, len(lines)))]
+        if not any(t.startswith(f"{label}.1") for t in after):
+            return None
+    return m.group(0)
 
 
 def _as_read(lines: list[Line], i: int) -> str:
@@ -287,8 +350,15 @@ def _split_oversized(seg: Segment, raw_text: str) -> list[Segment]:
     while start < seg.char_end:
         end = min(start + MAX_CLAUSE_CHARS, seg.char_end)
         if end < seg.char_end:
-            # Prefer the last newline inside the window so we cut between lines.
-            nl = raw_text.rfind("\n", start, end)
+            # Prefer a line that ends a sentence, so a piece never starts
+            # mid-sentence: HDFC's "Def. 30. Waiting Period means a period ...
+            # during which specified | diseases/treatments are not covered" was
+            # cut there, and the tail alone read as a 36-month wait on every
+            # claim. Only in the window's second half, so pieces stay large;
+            # failing that, the last newline, as before.
+            ends = [m.end() - 1 for m in _RE_SENTENCE_LINE_END.finditer(
+                raw_text, start + MAX_CLAUSE_CHARS // 2, end)]
+            nl = ends[-1] if ends else raw_text.rfind("\n", start, end)
             if nl > start:
                 end = nl
         pieces.append(
@@ -307,6 +377,48 @@ def _split_oversized(seg: Segment, raw_text: str) -> list[Segment]:
         )
         start = end + 1  # skip the newline we cut on
     return pieces
+
+
+# A top-level number directly followed by its own first child heads a group:
+# "1" then "1.1", or "1" then an item lettered "a.". Top level only: HDFC's
+# "1.1 Hospitalization Expenses" before "1.1.1" is a clause with sub-clauses.
+_RE_TOP_NUMBER = re.compile(r"^\d+$")
+_RE_FIRST_LETTER_ITEM = re.compile(r"^\(?a[.)]\s")
+# A heading states no quantity of its own. Star's "1. Hospitalization" before
+# "1.1 Other expenses" caps room rent at 2% of the sum insured, Rs.5000 a day:
+# a rule. On four real policies the eight group headings (HDFC, Niva) state none.
+_RE_QUANTITY = re.compile(
+    r"\d\s*%|(?:rs\.?|inr|₹)\s*\d|\d\s*(?:lakhs?|lacs?|crores?|days?|months?|years?|hours?)\b",
+    re.I)
+
+
+def _mark_group_headings(segments: list[Segment]) -> None:
+    """Mark the clauses that head a group of clauses instead of stating a rule.
+
+    HDFC opens its exclusions with a lead-in, a group heading and a sentence:
+    "The Company shall not make payment for any claim ... caused by ... any of
+    the following ...: 1. Waiting Periods / All the Waiting Periods and
+    exclusions listed below shall be applicable ...", and then the items, "a.
+    Pre-Existing Diseases: Code - Excl01" onwards. The lead-in joins the
+    heading (`_merge_leadins`), and the pair is a refusal with nothing to
+    refuse. Shown to the model, it refused typhoid at 45 days under the
+    36-month pre-existing-disease wait (Failure 116). Joined to the first item
+    instead, it rode along with Excl01 into nearly every question, and five
+    covered claims were refused (Failure 117).
+
+    So it is marked, not moved: it stays in the clause map, where a reader sees
+    it in place, and the scenario step leaves it out (`load_clauses`).
+    Recognised by structure, not words: the next clause is this one's first child.
+    """
+    for seg, child in zip(segments, segments[1:]):
+        seg.is_heading = bool(
+            _RE_TOP_NUMBER.match(seg.number)
+            # A continuation piece is the middle of a clause, never a heading.
+            and not seg.heading.endswith("(cont.)")
+            and not _RE_QUANTITY.search(seg.text)
+            and (child.number == f"{seg.number}.1"
+                 or _RE_FIRST_LETTER_ITEM.match(child.text.lstrip()))
+        )
 
 
 def _merge_leadins(segments: list[Segment], raw_text: str) -> list[Segment]:
@@ -364,9 +476,11 @@ def segment(result: IngestResult) -> list[Segment]:
     buffer: list[Line] = []
     heading = ""
     number = ""
+    # The next number of a list running inside the current clause; 0 for none.
+    list_next = 0
 
     def flush() -> None:
-        nonlocal buffer, heading, number
+        nonlocal buffer, heading, number, list_next
         if not buffer:
             return
         start = buffer[0].char_start
@@ -389,11 +503,15 @@ def segment(result: IngestResult) -> list[Segment]:
         buffer = []
         heading = ""
         number = ""
+        list_next = 0
 
     lines = result.lines
     bold_numbers = _numbers_are_bold(lines, body_size)
 
+    skip = -1  # the words line of an outline heading, already read with its marker
     for i, line in enumerate(lines):
+        if i == skip:
+            continue
         # Order matters: section headings are checked first, because a section
         # heading like "4. EXCLUSIONS" also matches the clause numbering
         # pattern. Size is what tells them apart.
@@ -403,14 +521,29 @@ def segment(result: IngestResult) -> list[Segment]:
             continue
 
         text = _as_read(lines, i)
+        if outline := _outline_section(lines, i, text, number):
+            flush()
+            section = outline
+            if text != line.text:
+                skip = i + 1
+            continue
+        if line.bold and (term := _RE_DEFINED_TERM.match(text)):
+            flush()
+            heading = term.group(1)
+            buffer = [line]
+            continue
         numbering = _numbering(text)
+        # The words' styling, not the number's: a lone marker joined to its
+        # words reads them off the next line.
+        words_bold = lines[i + 1].bold if text != line.text else line.words_bold
         # Strong numbering stands on its own. Weak numbering is only believed
         # when the styling backs it up. Getting this the wrong way round - as
         # this code originally did, requiring styling in every case - silently
-        # loses every clause in an unstyled PDF.
+        # loses every clause in an unstyled PDF. A bold number before plain
+        # words is not backing: that is how HDFC sets a list inside a definition.
         is_clause_start = numbering is not None and (
             numbering[1]
-            or line.bold
+            or words_bold
             or line.size >= body_size * CLAUSE_SIZE_RATIO
         )
         # The opposite mistake, in a document that does use styling: its list
@@ -420,6 +553,17 @@ def segment(result: IngestResult) -> list[Segment]:
         if (is_clause_start and bold_numbers and not line.bold
                 and _RE_SINGLE_LEVEL.match(numbering[0])):
             is_clause_start = False
+
+        # A list that restarts at 1 inside a clause numbered "2.12" belongs to
+        # it: HDFC's optional covers ("2.12 PED waiting period modification. On
+        # availing this option ...") list their choices as "1.", "2.", and split
+        # off, each read as a rule that always applies. It has to start at 1 and
+        # count up: Star's "2. AYUSH Treatment" after a "1.x" is a clause.
+        item = numbering[0].rstrip(".") if numbering else ""
+        if (is_clause_start and "." in number and item.isdigit()
+                and int(item) in (1, list_next)):
+            is_clause_start = False
+            list_next = int(item) + 1
 
         if is_clause_start:
             flush()
@@ -436,6 +580,7 @@ def segment(result: IngestResult) -> list[Segment]:
     flush()
 
     segments = _merge_leadins(segments, result.raw_text)
+    _mark_group_headings(segments)
     for idx, seg in enumerate(segments):
         seg.order_idx = idx
     return segments

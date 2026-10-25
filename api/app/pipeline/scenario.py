@@ -23,9 +23,11 @@ k, and any k below "all of them" can drop the one clause that decides the case -
 which in this domain means confidently telling someone they are covered because
 the exclusion did not make the cut.
 
-So `shortlist()` takes everything that fits. For a document too large even for
-the wider window, it gives up definitions and administrative clauses first,
-then the lowest impact, and says so in a warning.
+So `shortlist()` takes everything that fits. A long policy is first narrowed by
+the model reading every clause in small groups (`narrow`), and only what that
+keeps is fitted to the window; anything that still does not fit gives up
+definitions and administrative clauses first, then the lowest impact, and says
+so in a warning. Clauses the computed blocks name are never given up.
 
 TWO CALLS, NOT ONE
 ------------------
@@ -508,7 +510,8 @@ def clause_token_budget() -> int:
 
 
 def shortlist(
-    clauses: list[ShortlistClause], token_budget: int | None = None
+    clauses: list[ShortlistClause], token_budget: int | None = None,
+    keep: set[str] = frozenset(),
 ) -> list[ShortlistClause]:
     """Choose which clauses the reasoning step sees.
 
@@ -528,11 +531,15 @@ def shortlist(
     wordings restart their numbering in every section, so sorting by clause
     number - as this once did - interleaves coverage 1, exclusion 1 and
     condition 1.
+
+    `keep` names clauses given room before any other: the ones the computed
+    blocks talk about, which a prompt must never mention without showing.
     """
     budget = token_budget or clause_token_budget()
     ranked = sorted(
         range(len(clauses)),
-        key=lambda i: (clauses[i].clause_type in DROPPED_FIRST, -clauses[i].impact_score),
+        key=lambda i: (clauses[i].clause_id not in keep,
+                       clauses[i].clause_type in DROPPED_FIRST, -clauses[i].impact_score),
     )
 
     keep: set[int] = set()
@@ -1441,13 +1448,45 @@ def find_contradictions(
     # it. Measured on HDFC, physiotherapy seven months after discharge against
     # 1.6's 180 days: told "clause 1.6 does NOT pay", the answer was
     # conditional - once behind a 20% co-payment no clause states, once calling
-    # the window a waiting period that "has not yet elapsed". Only a paying
-    # verdict is asked about, and not when some window does cover the expense.
-    # Nothing is dropped: the citations may well be right.
-    if verdict in (Verdict.COVERED, Verdict.CONDITIONAL):
-        raised = [w for w in computed.windows
-                  if w.status is not window.WindowStatus.NOT_RAISED]
-        if raised and all(w.status is window.WindowStatus.OUTSIDE for w in raised):
+    # the window a waiting period that "has not yet elapsed". Nothing is asked
+    # when some window does cover the expense. Nothing is dropped: the citations
+    # may well be right.
+    #
+    # M47 added the other two verdicts, both from `hdfc-tests-75-days-before`
+    # (tests 75 days before admission, 1.5 pays 60; the arithmetic said OUTSIDE):
+    #   - insufficient_information, 4 of 5 fresh samples in the eval's order. The
+    #     question was answerable, so "cannot tell" is not the safe answer here;
+    #     it hides the refusal the person needs to know about.
+    #   - not_covered citing no window clause, 5 of 5 asked alone, and the stored
+    #     answers on main and branch: refused because of the pre-existing-disease
+    #     wait (served) or the AYUSH clause. The right verdict for a reason that is
+    #     false, which the person would repeat to the insurer.
+    # The verdict is still the model's: this only asks again, with the
+    # calculation in front of it.
+    raised = [w for w in computed.windows
+              if w.status is not window.WindowStatus.NOT_RAISED]
+    if raised and all(w.status is window.WindowStatus.OUTSIDE for w in raised):
+        if verdict == Verdict.INSUFFICIENT_INFORMATION:
+            problems += [
+                f"- You answered {verdict}, but this question can be answered: "
+                f"it was calculated: {w.describe()} That is not a waiting "
+                f"period that will pass and not a reduction: an expense outside "
+                f"the window is not paid under that clause at all. Unless a "
+                f"different clause in the list pays for these expenses, the "
+                f"verdict is not_covered, citing {w.clause_id}."
+                for w in raised
+            ]
+        elif verdict == Verdict.NOT_COVERED:
+            cited = {c.clause_id for c in citations}
+            if not cited & {w.clause_id for w in raised}:
+                problems += [
+                    f"- You answered {verdict}, but cited none of the window clauses "
+                    f"the calculation says refuse it. It was calculated: "
+                    f"{w.describe()} Cite {w.clause_id} as denying this claim, and "
+                    f"keep any other clause that also refuses it."
+                    for w in raised
+                ]
+        elif verdict in (Verdict.COVERED, Verdict.CONDITIONAL):
             problems += [
                 f"- You answered {verdict}, which means these expenses are paid, "
                 f"but it was calculated: {w.describe()} That is not a waiting "
@@ -1698,8 +1737,7 @@ async def run_scenario(
     facts = await extract_facts(scenario)
     missing = missing_facts(facts)
 
-    considered = shortlist(clauses)
-    if not considered:
+    if not clauses:
         return ScenarioResult(
             verdict=Verdict.INSUFFICIENT_INFORMATION,
             reasoning="This policy has no analysed clauses to check against.",
@@ -1707,16 +1745,26 @@ async def run_scenario(
             missing_facts=missing,
         )
 
-    computed = compute(facts, considered, scenario)
+    computed = compute(facts, clauses, scenario)
     # Computed on every clause, before any picking: a waiting period or a cap
     # must be checked whether or not the model picks its clause. The picking
     # below only decides what the reasoning step READS, and it can never drop a
     # clause these results name.
-    if clause_tokens(considered) > PICK_ABOVE_TOKENS:
+    #
+    # Picked from every clause, then fitted to the context (M49). Until then
+    # the order was the other way: a policy over the budget lost its
+    # definitions, procedural and lowest-impact clauses BEFORE the model read
+    # anything, so HDFC lost 33 clauses on every question, and ICICI, at more
+    # than twice the budget, would lose benefit clauses unread. The pick reads
+    # in groups of PICK_GROUP_TOKENS, so its size has no ceiling; only what it
+    # keeps has to fit.
+    considered = clauses
+    if clause_tokens(clauses) > PICK_ABOVE_TOKENS:
         # The pick is cached even when the answer is resampled, for the reason
         # the facts are: what a repeat sample measures is whether the ANSWER is
         # stable, and re-picking would change the question it answers.
-        considered = await narrow(scenario, facts, considered, computed)
+        considered = await narrow(scenario, facts, clauses, computed)
+    considered = shortlist(considered, keep=named_by_code(computed, scenario, clauses, facts))
 
     payload = await reason(
         scenario, facts, considered, computed, use_cache=not resample

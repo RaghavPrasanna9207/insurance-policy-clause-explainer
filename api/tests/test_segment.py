@@ -176,12 +176,13 @@ def test_prose_starting_with_a_number_is_not_a_clause():
     assert _numbering("Clause 4.2 shall apply")[1] is True
 
     # Weak: a dotted quantity, believed only with styling.
-    assert _numbering("1.5 lakhs and fifteen in-patient beds")[1] is False
+    assert _numbering("1.5 times the room rent applies")[1] is False
 
     # Not numbering at all. Bare integers were weak evidence until M16, when
     # bold quantities on real wordings ("24 Months waiting period", "75 Lakhs")
     # were found passing as clause numbers.
     assert _numbering("24 hours of hospitalisation is required") is None
+    assert _numbering("1.5 lakhs and fifteen in-patient beds") is None  # M48: money
     assert _numbering("15 days from the date of discharge") is None
     assert _numbering("24 Months waiting period") is None
     assert _numbering("The Company shall indemnify") is None
@@ -205,7 +206,7 @@ def _document(rows: list[tuple[str, float, float, bool]]) -> "IngestResult":
 
     lines, cursor = [], 0
     for text, x, y, bold in rows:
-        lines.append(Line(text=text, page=0, size=11.0, bold=bold,
+        lines.append(Line(text=text, page=0, size=11.0, bold=bold, words_bold=bold,
                           bbox=(x, y, x + 200, y + 18),
                           char_start=cursor, char_end=cursor + len(text)))
         cursor += len(text) + 1
@@ -480,3 +481,180 @@ def test_a_bold_annexure_heading_starts_a_section_and_a_mention_does_not():
     assert len(annexure) == 1 and annexure[0].section_path.startswith("Annexure B")
     # The plain-type mention stays in the text it belongs to.
     assert "Annexure B to this Policy" in annexure[0].text
+
+
+def test_a_bold_number_before_plain_words_is_a_list_item():
+    """HDFC bolds every list number. "1. it needs ongoing monitoring" is an item
+    in the definition of a chronic condition, and with only its number bold it
+    must stay inside the definition; a heading has its words bold too."""
+    from app.pipeline.ingest import IngestResult, Line
+
+    rows = [
+        ("1.1. Chronic Condition", True, True),
+        ("A disease which has one or more of these characteristics:", False, False),
+        ("1. it needs ongoing or long-term monitoring", True, False),
+        ("2. it recurs or is likely to recur", True, False),
+        ("1.2. Day Care Centre", True, True),
+        ("4.13. e-Consultation", True, True),
+    ]
+    lines, cursor = [], 0
+    for y, (text, bold, words_bold) in enumerate(rows):
+        lines.append(Line(text=text, page=0, size=11.0, bold=bold, words_bold=words_bold,
+                          bbox=(40, 20 * y, 240, 20 * y + 18),
+                          char_start=cursor, char_end=cursor + len(text)))
+        cursor += len(text) + 1
+    result = IngestResult(raw_text="\n".join(r[0] for r in rows), lines=lines,
+                          page_count=1, page_starts=[0])
+
+    assert [s.number for s in segment(result)] == ["1.1", "1.2", "4.13"]
+
+
+def test_an_oversized_clause_is_cut_where_a_sentence_ends():
+    """The cap once cut at the last line break, mid-sentence: HDFC's waiting
+    period definition was split before "diseases/treatments are not covered",
+    and that tail alone read as a 36-month wait on every claim."""
+    from app.pipeline.segment import _split_oversized
+
+    sentence = "Def. 7. A term means a thing that is defined here in full.\n"
+    wrapped = "Def. 8. Waiting Period means a period during which specified\n"
+    # Sized so the last line break inside the 3,000-character window is the
+    # one after "specified": the old rule cut exactly there.
+    tail = "diseases are not covered" + " here" * 40 + ".\n"
+    text = sentence * 48 + wrapped + tail + sentence * 10
+    assert text.rfind("\n", 0, MAX_CLAUSE_CHARS) == len(sentence * 48 + wrapped) - 1
+    seg = Segment(order_idx=0, section_path="", number="1.2", heading="1.2. Definitions",
+                  text=text, page_start=0, page_end=0, char_start=0, char_end=len(text))
+
+    pieces = _split_oversized(seg, text)
+
+    assert len(pieces) > 1
+    assert all(p.text.rstrip().endswith(".") for p in pieces)
+
+
+def test_an_oversized_clause_is_not_cut_after_a_label_or_a_lead_in():
+    """HDFC "Def. 6." and Star "a." on lines of their own end in a full stop, and
+    the cut once fell after them, leaving the label in one piece and its text in
+    the next. A lead-in ending in a colon was cut away from its list the same way."""
+    from app.pipeline.segment import _split_oversized
+
+    sentence = "Def. 7. A term means a thing that is defined here in full.\n"
+    for strand in ("Def. 9.\n", "a.\n", "any of the following:\n"):
+        tail = "Break in policy means a gap" + " here" * 40 + ".\n"
+        text = sentence * 48 + strand + tail + sentence * 10
+        seg = Segment(order_idx=0, section_path="", number="1.2", heading="1.2. Definitions",
+                      text=text, page_start=0, page_end=0, char_start=0, char_end=len(text))
+
+        pieces = _split_oversized(seg, text)
+
+        assert len(pieces) > 1
+        assert not any(p.text.rstrip().endswith(strand.strip()) for p in pieces), strand
+
+
+def test_a_list_restarting_at_one_stays_inside_its_clause():
+    """HDFC's "2.12 PED waiting period modification" lists its options as
+    "1. Modification ... to 24 months", "2. ... to 12 months". Split off, each
+    read as a waiting period that always applies. A number that does not
+    restart a list, like Star's "2. AYUSH Treatment" after "1.1", is a clause."""
+    rows = [
+        ("2.12", 43, 100, True),
+        ("PED waiting period modification", 66, 100, True),
+        ("On availing this option, the waiting period shall stand modified.", 43, 120, False),
+        ("1. Modification of PED waiting period from 36 months to 24 months", 43, 140, True),
+        ("2. Modification of PED waiting period from 36 months to 12 months", 43, 160, True),
+        ("1.1", 43, 200, True),
+        ("Hospitalization Expenses", 66, 200, True),
+        ("2. AYUSH Treatment: The Company shall indemnify", 43, 220, True),
+    ]
+
+    assert [s.number for s in segment(_document(rows))] == ["2.12", "1.1", "2"]
+
+
+def test_an_outline_numbered_heading_at_body_size_starts_a_section():
+    """ICICI's "b. DEFINITIONS:" and Niva's "5." beside "Exclusions" are set at
+    body size, so the clauses under them kept the section above; Niva's waits
+    were filed under "Optional Benefit:". A lettered item that is not the name
+    of a part of a policy, and a "1." restarting inside a section, are not."""
+    rows = [
+        ("a. PREAMBLE:", 43, 0, True),
+        ("This Policy is a contract of insurance.", 43, 20, False),
+        ("b. DEFINITIONS:", 43, 40, True),
+        ("2.1. Accident means a sudden event.", 43, 60, True),
+        ("d. Secure Benefit", 43, 80, True),
+        ("4.21. Room Type Modification", 43, 100, True),
+        ("5.", 23, 120, True),
+        ("Exclusions", 43, 120, True),
+        ("5.1. Standard Exclusions", 43, 140, True),
+        ("SECTION D. GENERAL TERMS AND CLAUSES", 43, 160, True),
+        ("1. Standard General Terms & Clauses", 43, 180, True),
+        ("1.1. Disclosure of Information", 43, 200, True),
+    ]
+    by_number = {s.number: s for s in segment(_document(rows))}
+
+    assert by_number["2.1"].section_path == "b. DEFINITIONS:"
+    assert "d. Secure Benefit" in by_number["2.1"].text
+    assert by_number["5.1"].section_path == "5. Exclusions"
+    assert "5" not in by_number and "Exclusions" not in by_number["4.21"].text
+    # HDFC: a "1." restarting inside a section is a clause, not a new section.
+    assert by_number["1"].section_path == by_number["1.1"].section_path         == "SECTION D. GENERAL TERMS AND CLAUSES"
+
+
+def test_an_amount_of_money_is_not_a_clause_number():
+    """A sum-insured cell "7.5 Lakhs" alone on a line read as clause 7.5 (ICICI,
+    HDFC's plan chart). A time word cannot be on the list: "1.4 Day Care
+    Treatment" is a clause."""
+    from app.pipeline.segment import _numbering
+
+    assert _numbering("7.5 Lakhs") is None
+    assert _numbering("1.10 Crore Sum Insured (that is 10 Lakh base)") is None
+    assert _numbering("1.4 Day Care Treatment") == ("1.4", True)
+
+
+def test_an_unnumbered_definition_starts_a_clause():
+    """ICICI numbers none of its definitions: they ran together and were cut
+    every 3,000 characters, mid-definition. A bold quoted term followed by
+    "means", "shall mean" or a dash starts one, even with its opening quote
+    missing. A quoted phrase in plain running text does not."""
+    rows = [
+        ("b. DEFINITIONS:", 43, 0, True),
+        ('"Accident" means a sudden, unforeseen and involuntary event.', 43, 20, True),
+        ('Condition Precedent" shall mean a Policy term or condition.', 43, 40, True),
+        ('"Hospital" - A hospital means any institution established for care.', 43, 60, True),
+        ('Note that "Hospital" means a registered one here.', 43, 80, False),
+    ]
+    headings = [s.heading for s in segment(_document(rows))]
+
+    assert headings == ["Accident", "Condition Precedent", "Hospital"]
+
+
+def test_a_group_heading_is_marked_not_merged():
+    """A top-level number directly followed by its own first child ("1" then
+    "1.1", or "1" then an item "a.") heads a group: it is marked, and kept.
+    Marked, not joined to the item: joined, HDFC's lead-in rode into Excl01 and
+    refused five covered claims (Failure 117)."""
+    from app.pipeline.segment import _mark_group_headings
+
+    def marked(*pairs, cont=False):
+        segs, at = [], 0
+        for number, text in pairs:
+            segs.append(_seg(number, text, at))
+            at += len(text) + 1
+        if cont:
+            segs[0].heading = "1. Standard Definitions (cont.)"
+        _mark_group_headings(segs)
+        return [s.number for s in segs if s.is_heading]
+
+    # HDFC: lead-in and group heading, then the lettered first item.
+    assert marked(("1", "Shall not pay any claim caused by:\n1. Waiting Periods\nAll apply."),
+                  ("Excl01", "a. Pre-Existing Diseases: Code - Excl01 ...")) == ["1"]
+    assert marked(("1", "1. Standard General Terms"), ("1.1", "1.1 Disclosure ...")) == ["1"]
+    # Siblings, a later child, and a lettered pair: no heading.
+    assert marked(("4", "4. Room rent ..."), ("5", "5. Co-payment ...")) == []
+    assert marked(("4", "4. Room rent ..."), ("4.2", "4.2 ICU ...")) == []
+    assert marked(("(a)", "(a) Acute ..."), ("(b)", "(b) Chronic ...")) == []
+    # A sub-clause with sub-clauses is content (HDFC "1.1 Hospitalization Expenses").
+    assert marked(("1.1", "1.1 Hospitalization Expenses ..."), ("1.1.1", "1.1.1 Other ...")) == []
+    # A quantity makes it a rule (Star "1. Hospitalization" caps room rent).
+    assert marked(("1", "1. Hospitalization: room rent up to 2% of the Sum Insured"),
+                  ("1.1", "1.1 Other expenses ...")) == []
+    # The last piece of a long clause is its middle, never a heading.
+    assert marked(("1", "Def. 15. Domiciliary ..."), ("(a)", "(a) Acute ..."), cont=True) == []

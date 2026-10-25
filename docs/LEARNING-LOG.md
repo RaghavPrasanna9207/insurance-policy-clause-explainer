@@ -17902,3 +17902,1582 @@ Yes. The test now forces the version request into the cold call, and a warm
 call takes milliseconds, far less than five seconds, so the memory cannot
 expire between the two calls.
 </details>
+
+---
+
+# M47 — The space after a list number, and what losing it broke
+
+Written 2026-10-17, on branch `m47-kept-space`. The HDFC and Star question
+sets have **not** yet been re-run on the final code; the section "Not yet
+measured" at the end says exactly what is missing.
+
+M46 left a list of things the format audit had not checked. One was the
+segmenter, the stage that cuts a policy's text into clauses, run on a
+policy it had never seen. ICICI Lombard's Elevate wording was fetched for
+that. On it the segmenter found 92 clauses where the document plainly has
+far more. The cause turned out to be in the stage *before* the segmenter,
+and to be damaging HDFC as well.
+
+## Failure 109: the space after "1." was thrown away, so "1. Pre-Existing" was not a clause
+
+**How text reaches the segmenter.** PyMuPDF does not hand back plain text.
+It returns each line as a list of *spans*: runs of characters that share
+one font, size and style. A line "**1.** Pre-Existing Diseases" with a bold
+number is at least two spans, "1." in bold and "Pre-Existing Diseases" in
+regular. The ingest stage (`api/app/pipeline/ingest.py`) joins a line's
+spans into its text and reads the line's styling (bold, size) from them.
+
+It skipped blank spans first, with good reason: a stray space set in some
+other font should not make a line count as bold or large. But it also built
+the text from that filtered list. Microsoft Word, which produced HDFC's and
+ICICI's PDFs, often sets the space after a list number as **a span of its
+own**. Dropping blank spans dropped that space, and "1. Pre-Existing"
+became "1.Pre-Existing".
+
+**Why that loses a clause.** The segmenter recognises a clause number with
+patterns like this one (`api/app/pipeline/segment.py`):
+
+```python
+# "4.", "4.2", "4.2.1" followed by whitespace.
+_RE_DECIMAL = re.compile(r"^(\d+(?:\.\d+)*)\.?\s+(?=\S)")
+```
+
+`\s+` needs at least one whitespace character after the number. With the
+space gone there is no match, the line is ordinary text, and the whole
+clause is glued onto the end of the clause before it, under that clause's
+number. HDFC had 355 lines joined this way; ICICI 564.
+
+**The fix** keeps two lists apart: the text comes from every span, the
+styling from the visible ones only.
+
+```python
+# Text from every span, blank ones included: Word sets the space
+# after a list number as a span of its own, and without it "1. Pre-
+# Existing" reads "1.Pre-Existing", which is no longer a clause
+# number. Styling below comes from the visible spans only, so a
+# stray space in another font cannot make a line bold or large.
+text = _RE_CONTROL.sub(" ", "".join(s["text"] for s in raw_line["spans"])).strip()
+```
+
+**Why fix it here and not in the pattern.** Letting `_RE_DECIMAL` accept
+"1.Pre-Existing" would find the clause, but the stored text would still
+read "1.Pre-Existing". That stored text is what the user sees, and it is
+what every quotation is checked against (the verbatim span check, described
+in an earlier entry). Repairing the text where it is first read fixes every
+stage after it at once.
+
+### The fix uncovered a second fault: a bold number is not a bold clause
+
+With the spaces back, HDFC grew clauses it should not have. Its definition
+of a chronic condition contains a list:
+
+> 1. it needs ongoing or long-term monitoring ...
+> 2. it needs ongoing or long-term control or relief of symptoms
+
+`_numbering` sorts clause numbers into two kinds. **Strong** numbering
+stands on its own: "(a)", "Clause 4.2", or a number followed by a capital
+letter ("4.2 Room Rent"). **Weak** numbering is a number followed by a
+lower-case word, which is often not a clause at all ("1.5 lakhs and ..."),
+so it counts as a clause start only if the styling backs it up: the line is
+bold, or set larger than the body. "1. it needs" is weak. HDFC prints
+**every** list number in bold, so the line counted as bold, and each item
+of the definition became a separate clause.
+
+What shows whether a line is a heading is its words, not its number. So
+ingest now also records `words_bold`: whether any span *after the first*
+(where a set-apart number sits) is bold.
+
+```python
+bold = any(is_bold(s) for s in spans)
+# Past the first span, which is where a list number sits when it is
+# set apart; a line of one span is all words.
+words_bold = any(is_bold(s) for s in spans[1:]) if len(spans) > 1 else bold
+```
+
+and the segmenter backs weak numbering with `words_bold` instead of `bold`:
+
+```python
+is_clause_start = numbering is not None and (
+    numbering[1]          # strong numbering stands on its own
+    or words_bold
+    or line.size >= body_size * CLAUSE_SIZE_RATIO
+)
+```
+
+**Rejected: using `words_bold` in the next rule too.** Right after this,
+another rule handles documents that mark clauses with bold numbers: there,
+a single-level number ("12.") on a line that is *not* bold is a list item
+("12. Hernia of all types" under a waiting-period heading), not a clause.
+
+```python
+if (is_clause_start and bold_numbers and not line.bold
+        and _RE_SINGLE_LEVEL.match(numbering[0])):
+    is_clause_start = False
+```
+
+Switching `line.bold` to `words_bold` there looked consistent. It took Star
+from 79 clauses to 56, because Star sets its exclusions as "**10.** Breach
+of law", a bold number before plain words, and those *are* clauses. The
+same styling means a clause in one insurer's document and a list item in
+another's, so `words_bold` was used only where weak numbering needs backing.
+
+**Effect of this fix alone** on HDFC's 14 questions (majority verdict of 3
+samples): main 14/14, this fix 9/14. Five answers got worse. The next two
+failures are why.
+
+## Failure 110: the size cap cut a clause in mid-sentence, and its tail read as a 36-month wait
+
+**Setup.** Any clause over `MAX_CLAUSE_CHARS` (3,000 characters) is cut
+into pieces by `_split_oversized`, so one runaway clause cannot swamp a
+model prompt. It cut at the last line break inside each 3,000-character
+window.
+
+With HDFC's clauses now split at different places, the cut fell inside
+Definition 30:
+
+> Def. 30. Waiting Period means a period ... during which specified
+> **|** diseases/treatments are not covered ...
+
+The piece after the **|** begins mid-sentence. Analysed alone, without
+"Waiting Period means", it reads as a rule that diseases and treatments are
+not covered for 36 months, and it was applied as a 36-month wait to every
+claim.
+
+**The fix** prefers a line that ends a sentence:
+
+```python
+# A line break after a full stop, colon or semicolon: where a sentence ends.
+_RE_SENTENCE_LINE_END = re.compile(r"(?<=[.:;])[ \t]*\n")
+...
+ends = [m.end() - 1 for m in _RE_SENTENCE_LINE_END.finditer(
+    raw_text, start + MAX_CLAUSE_CHARS // 2, end)]
+nl = ends[-1] if ends else raw_text.rfind("\n", start, end)
+```
+
+`(?<=...)` is a lookbehind, the positive twin of Concept 61's negative
+lookbehind: the line break must come right after a `.`, `:` or `;`.
+
+It searches only the **second half** of the window, so a sentence end near
+the start cannot produce a 200-character piece. If there is none, it falls
+back to the last line break, as before. Pieces starting mid-sentence: HDFC
+13 → 5, Star 5 → 2, ICICI 26 → 3. HDFC: 9/14 → 11/14.
+
+**A review then found the rule too loose** (2026-10-17). It was checked by
+printing every cut in four policies. A label alone on its line ends in a
+full stop too, so the cut fell right after HDFC's "Def. 6." and "Def. 9."
+and after Star's list marker "a.": the label stayed at the end of one piece
+and its text began the next. And a colon is where a list *opens*, so a cut
+there separates the lead-in ("Pre-Existing Disease means any condition ...
+disease:") from the items it governs. The pattern now needs a word of three
+letters or more before the full stop or semicolon, and no longer accepts a
+colon:
+
+```python
+_RE_SENTENCE_LINE_END = re.compile(r"(?<=[A-Za-z]{3}[.;])[ \t]*\n")
+```
+
+The three letters also keep out "e.g.", "Rs." and "No.". "Sec." and "etc."
+still pass, a known limit marked in the code. Every cut that moved, moved to a
+better place: in HDFC the labels now start their pieces with their text
+attached, and Star's Pre-Existing Disease definition is no longer cut. The
+other moves fall in the lists of ombudsman addresses, where HDFC gains one
+piece (125 → 126 clauses). The synthetic policy has no clause long enough
+to cut, so it is unchanged. The test
+`test_an_oversized_clause_is_not_cut_after_a_label_or_a_lead_in` fails
+on the old pattern.
+
+## Failure 111: an optional cover's choices split off and were read as always applying
+
+**Setup.** HDFC clause 2.12 is an *optional* cover, one the buyer can
+choose at purchase:
+
+> 2.12 PED waiting period modification. On availing this option ...
+> 1. Modification of PED waiting period from 36 months ... to 24 months
+> 2. Modification of PED waiting period from 36 months ... to 12 months
+
+Once the space after "1." was kept, "1. Modification ..." became a clause
+of its own. Cut away from "On availing this option", it read as a flat
+statement that the pre-existing-disease wait is 12 or 24 months, applied to
+everyone.
+
+**The fix**: inside a clause numbered with a dot ("2.12"), a list that
+starts at 1 and counts up belongs to that clause.
+
+```python
+# A list that restarts at 1 inside a clause numbered "2.12" belongs to
+# it ... It has to start at 1 and count up: Star's "2. AYUSH Treatment"
+# after a "1.x" is a clause.
+item = numbering[0].rstrip(".") if numbering else ""
+if (is_clause_start and "." in number and item.isdigit()
+        and int(item) in (1, list_next)):
+    is_clause_start = False
+    list_next = int(item) + 1
+```
+
+`list_next` holds the number the list expects next, and is reset to 0
+whenever a clause is closed, so only "1" can open a list. The counting is
+what keeps Star correct: there, "2. AYUSH Treatment" follows clauses
+numbered "1.1", "1.2" ..., and no list that started at 1 is running, so "2"
+remains a clause.
+
+**Known cost, accepted:** HDFC's short sub-heading "1. Claims Procedure"
+now attaches to the clause before it. It is 19 characters and no question
+turns on it. HDFC: 11/14 → 13/14.
+
+**Clause counts after all three fixes**, against main: synthetic 40 → 40
+(identical text), Star 79 → 79 (six spaces restored), HDFC 115 → 125,
+Niva 144 → 145, ICICI 92 → 186.
+
+## Failure 112: the right refusal for the wrong reason
+
+**The remaining miss.** `hdfc-tests-75-days-before`: "I had scans and blood
+tests 75 days before I was admitted for a planned surgery. I have held this
+policy for three years. Are those tests covered?" Clause 1.5 pays for
+expenses before an admission only within 60 days of it, so the expected
+answer is `not_covered`, citing 1.5. On the branch, 4 of 5 fresh samples
+answered `insufficient_information`.
+
+**Diagnosed without the model.** The first suspicion was that the
+segmentation changes had altered what the model reads. A script ran the
+question through main's code and the branch's, reading every model answer
+from the cache, and printed what the code computed and what the model was
+shown. The cache key includes the Ollama version, so even a cache read
+needs the Ollama server running, though not the model loaded. The script
+stopped on any cache miss rather than call the model. Results:
+
+- Clause 1.5's text is identical on both.
+- The code's window check (built in M29–M31) gives the same result on both:
+  window 60 days, expense 75 days before admission, **OUTSIDE**.
+- The model ignores that on both. Main's stored answer is `not_covered`
+  citing 1.4, the AYUSH treatment clause. The branch's is `not_covered`
+  citing Excl01, the 36-month pre-existing-disease wait, which three years
+  of cover has already served.
+
+Main's 14/14 counted this case as right because the majority score counts
+only the verdict. Citations are scored separately (`citation_ok` in
+`evals/run_scenario_eval.py`), and main failed them on this case. M47 did
+not cause the miss; it changed which wrong answer came out.
+
+## Concept 62: a right verdict for a wrong reason is a wrong answer
+
+A person told "not covered, because of the pre-existing-disease wait"
+argues the wrong point with the insurer. They may give up a claim they
+could have won some other way, or chase one they cannot. The verdict is one
+word; the reason is what the person acts on. That is why the eval checks
+`must_cite` beside the verdict, and why a verdict score should never be
+quoted without the citation score next to it.
+
+### The fix, and the first version that did nothing
+
+The consistency check (`find_contradictions` in
+`api/app/pipeline/scenario.py`, introduced in M31) compares the model's
+answer with what the code computed. When they disagree, it asks the model
+**once** more, with the disagreement written out. For expense windows it
+asked only when the verdict paid something (`covered` or `conditional`) for
+an expense outside every window.
+
+**First attempt:** also ask when the verdict is `insufficient_information`,
+since the arithmetic settles the question. Unit-tested, then tried live on
+five fresh samples of the question asked alone. **The rule never fired.**
+All five answered `not_covered` citing Excl01; none said "insufficient".
+Fresh answers on this Ollama depend on what the server was asked just before
+(Concept 43). Asked alone, five times in a row, the question met the same
+history each time, a different history from the eval's run. Five identical
+samples were evidence about one context, not about the rule.
+
+**What the samples did show** is that the real fault was the citation. So
+a second rule asks again when the verdict is `not_covered` but cites
+**none** of the window clauses the arithmetic says decide it:
+
+```python
+raised = [w for w in computed.windows
+          if w.status is not window.WindowStatus.NOT_RAISED]
+if raised and all(w.status is window.WindowStatus.OUTSIDE for w in raised):
+    if verdict == Verdict.INSUFFICIENT_INFORMATION:
+        problems += [... f"verdict is not_covered, citing {w.clause_id}." ...]
+    elif verdict == Verdict.NOT_COVERED:
+        cited = {c.clause_id for c in citations}
+        if not cited & {w.clause_id for w in raised}:
+            problems += [
+                f"- You answered {verdict}, but cited none of the clauses that "
+                f"decide it. It was calculated: {w.describe()} Cite "
+                f"{w.clause_id} as denying this claim."
+                for w in raised
+            ]
+    elif verdict in (Verdict.COVERED, Verdict.CONDITIONAL):
+        ...  # the M31 rule, unchanged
+```
+
+The code still never sets a verdict or a citation itself. It adds a
+sentence to the one retry. Here that retry was already being triggered by
+the Excl01 contradiction, so the new sentence cost no extra model call.
+
+**Result**, the same five fresh samples asked alone: **5/5 `not_covered`
+citing 1.5 as denying**, against 5/5 citing Excl01 before. 339 tests pass,
+and the new assertions fail with the rule switched off.
+
+**Rejected:** changing the prompt so the window result stands out. A prompt
+change reaches every question, and earlier milestones measured such changes
+moving unrelated answers. The check reaches only answers that already
+contradict the arithmetic.
+
+## What the review raised and was left alone
+
+A code review of the whole milestone raised eight points. One was fixed (the
+cut, above). The others were checked against the four policies before
+deciding:
+
+- **The list counter never ends a list on its own.** After "1." is absorbed
+  into clause "1.2", a later real clause "2. ..." would be absorbed too, as
+  item 2. In the four policies every absorption is an intended one (HDFC's
+  optional-cover choices, plus the known "1. Claims Procedure"). Latent:
+  revisit if a policy loses a top-level clause this way.
+- **`words_bold` reads every span after the first.** One bold word inside a
+  list item would make it a clause again, and a number sharing one bold span
+  with its heading would make a heading look plain. Neither occurs in the
+  four policies. Every line where `bold` and `words_bold` disagree is either
+  an intended case (HDFC's chronic-condition items) or an improvement: Niva's
+  "5.1.3. 30-day waiting period (Code- Excl03):" is now its own clause, the
+  reason Niva went 144 → 145.
+- **The new window rule re-asks a refusal that cites a real exclusion
+  instead.** True: "cited none of the clauses that decide it" is wrong when
+  another exclusion also refuses the claim. It reaches 1 of 92 stored answers.
+  The sentence now reads "cited none of the window clauses the calculation
+  says refuse it ... Cite 1.5 as denying this claim, and keep any other clause
+  that also refuses it." **The 5/5 result above was measured on the old
+  wording**; the new one is unit-tested only, and is re-measured with the
+  HDFC re-run.
+- Two cleanups (a helper defined inside a loop, a list built to take its last
+  item) and one claim that the joined-marker path reads the wrong flag. The
+  next line of a lone marker holds only words, so its `bold` is the right flag;
+  that point was rejected.
+
+## Not yet measured
+
+- **HDFC's 14 questions on the final code.** 13/14 was measured before
+  Failure 112's fix. The `insufficient_information` branch of the new rule
+  is covered only by a unit test; whether it fires in the eval's real order
+  is unknown.
+- **Which stored answers the new rule re-asks.** Measured from the cache,
+  no model calls: every question's stored *first* answer was replayed and
+  tested against the new conditions. Of 92 questions (78 synthetic, 14
+  HDFC), five have every window OUTSIDE, and the rule re-asks exactly one:
+  `hdfc-tests-75-days-before`, the case it was written for. The other four
+  already refuse citing their window clause. Star could not be checked: its
+  six restored spaces changed eight clauses, whose analyses are not cached
+  yet, so none of its 22 questions has a stored answer on this branch.
+- **Star's 22 questions.** Only six spaces changed in Star, but every
+  question's prompt changed with them, so no stored answer can be reused.
+- **ICICI** is a separate milestone: no section headings, "7.5 Lakhs" read
+  as a clause number, page numbers inside clause text, unnumbered
+  definitions, tables, and a policy about twice the model's context window.
+
+## Check it yourself
+
+```bash
+cd api
+# 1. the kept space and the bold-words rule
+.venv/Scripts/python -m pytest -q tests/test_ingest.py tests/test_segment.py
+# 2. the window check, all three verdicts
+.venv/Scripts/python -m pytest -q tests/test_scenario.py -k outside_its_window
+```
+
+**Predict before you look:** Star sets its exclusions as "**10.** Breach of
+law", a bold number before plain words. Is "10. Breach of law" still a
+clause start on this branch?
+
+<details>
+<summary>Answer</summary>
+
+Yes. "10. Breach" is a number followed by a capital letter, which is
+*strong* numbering, so `words_bold` is never consulted. The rule that could
+drop it is the plain-list-item rule, and that rule still reads `line.bold`,
+which is true because the number is bold. Had it been switched to
+`words_bold` (the rejected change above), the plain words would have made
+it a list item, which is exactly how Star lost 23 clauses.
+</details>
+
+---
+
+# M48 — A fourth insurer's clause structure, checked against the other four after every change
+
+Written 2026-10-17, on branch `m48-icici-segmenter`, cut from M47's branch
+(M48 needs M47's kept space after list numbers). No model was run for any of
+it: the segmenter, the stage that cuts a policy's text into clauses, uses no
+model (Concept 5), so every change here could be checked by running it.
+
+**The policy.** ICICI Lombard Elevate (111 pages, made in Microsoft Word),
+fetched by `evals/real/fetch_policies.py` like the other real wordings and
+never committed. Before M47 the segmenter found 92 clauses in it with a
+median length of 2,934 characters, and the 3,000-character size cap cut 58
+of them, because almost nothing marked where a clause began.
+
+**The constraint.** The HDFC and Star question sets have not yet been re-run
+on M47's code. If this milestone changed their clause text as well, the next
+re-run could not say which milestone moved an answer. So every change here
+had to leave the synthetic, Star and HDFC clauses byte-identical, and that
+was checked after every edit, with one exception, stated where it happens.
+
+## Concept 63: a snapshot of the whole output, compared after every change
+
+A unit test checks the cases someone thought of. The segmenter's real risk
+is the cases nobody thought of: a new rule that also fires on some line in
+another insurer's document. So before the first change, a script saved the
+segmenter's full output for all five PDFs (every clause's number, section,
+heading and text) as JSON, and after every edit it re-ran and compared:
+
+```
+synthetic-health-policy: 40 -> 40 clauses, IDENTICAL
+hdfc-optima-secure: 126 -> 126 clauses, IDENTICAL
+icici-elevate: 190 -> 250 clauses, TEXT CHANGED
+niva-reassure-2: 143 -> 143 clauses, IDENTICAL
+star-arogya-sanjeevani: 79 -> 79 clauses, IDENTICAL
+```
+
+This is sometimes called a *characterization* or *golden-master* test: it
+does not say what the output should be, only whether it changed. That is
+exactly the question here. Any "TEXT CHANGED" outside ICICI was a lead to
+follow line by line, and three of the fixes below were reshaped because of
+one. After each accepted fix the snapshot was saved again, so the next
+comparison showed only the next fix's effect. The script lives in a
+scratch folder and is not committed; it takes about ten seconds.
+
+## Before the fixes: the shortcuts marked "later", checked against the PDFs
+
+The code marks deliberate simplifications with a `ponytail:` comment naming
+their limit. Ten exist. Four depend on the person's words (lists of places
+abroad, Indian cities, words for drink, first-person offences), so no
+document can test them. The six that depend on the policy text were checked
+against all five PDFs by script:
+
+| Shortcut | What it gives up | Found |
+|---|---|---|
+| `grounding.py`: no exceptions read from a clause of more than 4 items | per-item exceptions | Known ones only (HDFC's general exclusions, Star's 29-item list), plus ICICI's maternity "ectopic pregnancy", the same one Star had |
+| `waiting.py`: a waiting period outside a section named for waits or exclusions gets the narrow "only what this clause lists" line | general periods in oddly named sections | **A real bug on Niva** (below) |
+| `waiting.py`: a list over 2,500 characters is not quoted | long lists | Only definitions and tables, which the rule already ignores |
+| `waiting.py`: a period that never says "wait" loses its computed line | other wordings | Nothing found |
+| `segment.py`: an exclusion code after its text stays with the item above | trailing codes | Matters only for ICICI, whose exclusions are numbered anyway |
+| `segment.py`: "Sec." and "etc." still count as sentence ends | rare cuts | Two ICICI cuts after "etc.", both real sentence ends |
+
+## Failure 113: Niva's standard waiting periods were filed under "Optional Benefit"
+
+**What the check found.** `waiting.py` decides how widely a waiting period
+applies partly from the clause's section:
+
+```python
+listed = (bool(_LISTED.search(f"{heading} {text[:_OPENING_CHARS]}"))
+          or bool(section) and not _GENERAL_SECTION.search(section))
+```
+
+`_GENERAL_SECTION` is `wait|exclu`. A period in any other section is treated
+as *listed*: it bars only the conditions its own clause names. Niva's
+pre-existing-disease, specified-disease and 30-day waits (5.1.1–5.1.3) had
+the section "Optional Beneﬁt:". So the 30-day wait, which bars every
+illness in the first month, would have been read as barring only what it
+lists, and an illness on day 10 would not have been refused by it. Niva has
+no eval questions, which is why nothing caught it. Main has the same
+labels; this was not caused by M47.
+
+**Why.** Niva sets its top-level headings at body size: a bold "5." and,
+on the same row, a bold "Exclusions". The section rule needs a heading to
+be large, or in capitals, or shaped like "SECTION 7". None applied, so "5.
+Exclusions" was read as an empty clause, and the last heading that *was*
+large, "Optional Beneﬁt:" (12 pt), stayed the section for everything after
+it. ICICI has the same problem in another form: its top level is "a.
+PREAMBLE:", "b. DEFINITIONS:", "c. Benefits" (not even bold), "d.
+EXCLUSIONS:", all at body size.
+
+**The fix**, in `api/app/pipeline/segment.py`: an outline-numbered heading
+at body size starts a section.
+
+```python
+_RE_OUTLINE_HEAD = re.compile(r"^([a-h]|\d{1,2})\.\s+([A-Za-z][A-Za-z &]{2,45}?)\s*[.:]?$")
+_OUTLINE_FILLER = frozenset({"standard", "general", "other", "specific", "terms", "and", "&", "the"})
+_RE_OUTLINE_NAME = re.compile(
+    r"^(?:preamble|definition|benefit|coverage|exclusion|condition|clause)s?$")
+```
+
+The first version was looser: a letter or number, a short line, and any
+word from the existing list of section words. The snapshot showed HDFC and
+Star changing, and the list of lines it had taken explained why: Star's "a.
+refund proportionate premium", HDFC's "d. Secure Benefit", roman numerals
+("i. Standard Definitions"), Niva's "a. Renewal Premium:". Each guard in
+the final version answers one of them:
+
+- **letters a–h only**, so "i." and "v." (roman numerals) are items;
+- **the words, less filler, must be exactly one name for a part of a
+  policy**: "Other Terms and Conditions" reduces to "conditions" and passes;
+  "Secure Benefit" reduces to "secure benefit" and does not;
+- **a number must carry on the document's top-level count**: "5." is a
+  section only if the clause just before it is numbered "4.x", and only if
+  "5.1" follows within three lines. HDFC's "1. Standard General Terms &
+  Clauses" restarts the count inside its Section D, so it stays a clause.
+
+```python
+    if label.isdigit():
+        if not current.startswith(f"{int(label) - 1}."):
+            return None
+        after = [_as_read(lines, j) for j in range(i + 1, min(i + 4, len(lines)))]
+        if not any(t.startswith(f"{label}.1") for t in after):
+            return None
+```
+
+When "5." and "Exclusions" are two lines on one row, the words line is
+skipped after the heading is taken, or it would become a one-word clause.
+
+**Result:** ICICI's six top-level sections are found, and Niva's "6.
+General Terms and Clauses". Synthetic, Star and HDFC are byte-identical.
+
+**But Niva's "5. Exclusions" still is not found, and the waits are still
+misfiled.** The count guard failed on it, and the reason is a second fault:
+Niva's PDF stores page 9 bottom-first. The 30-day wait, at 663 points down
+the page, comes out of PyMuPDF *before* "5. Exclusions" at 250. So when "5."
+arrives, the clause being built is already "5.1.3", not "4.x". Even with the
+heading found, the 30-day wait would sit in the section before it, because
+it is read earlier.
+
+The fix would be to put each page into reading order. That was tried before
+and reverted: sorting lines by position read Star's two-column pages
+straight across. A quick measure of "the next block starts higher up in the
+same column" flagged 20 to 106 pages in every real policy, mostly page
+headers and footers written first, so it cannot tell a scrambled page from
+a normal one. **Left as a decision**, because any reading-order change
+touches the text of every policy.
+
+## Failure 114: "7.5 Lakhs" was a clause number, and my fix broke a test I did not look at
+
+**The fault.** ICICI's health-check table has a cell "7.5 Lakhs" (₹7.5 lakh
+of sum insured) on a line of its own. A dotted number followed by a capital
+is *strong* clause numbering, so it became clause 7.5, twice.
+
+**First fix, too wide.** A guard rejecting a number followed by a unit:
+lakhs, crores, days, months, years, hours. The snapshot showed the
+synthetic policy changing: "1.4 Day Care Treatment" is a real clause, and
+"Day" matched "days?". Time units cannot be on the list. The final guard
+is money only:
+
+```python
+_RE_UNIT = re.compile(r"(?:lakhs?|lacs?|crores?)\b", re.I)
+...
+        rest = text[m.end() :]
+        if _RE_UNIT.match(rest):
+            return None
+```
+
+This one change was accepted outside ICICI. HDFC's plan-comparison chart
+has the same "7.5 Lakhs" cell, read as clause 7.5, and Niva has an example
+line "1.10 Crore Sum Insured (that is 10 Lakh base ...)" read as clause
+1.10. Both are false clauses. Keeping a known false clause in HDFC only to
+keep its text identical would be fixing the rule for one insurer's layout
+and documenting the rest away. The change in HDFC is confined to the plan
+chart, which no eval question touches.
+
+**Two slips along the way, both mine:**
+
+1. The pattern was first written through a shell command, and the shell
+   turned `\b` (word boundary) into a backspace character. The rule
+   silently matched nothing, and the snapshot reported "IDENTICAL" for
+   ICICI too. That "no change" where a change was expected is what gave it
+   away.
+2. The commit (`a5999bb`) went in with a failing test. The command ran the
+   tests and then committed, separated by `;`, which runs the next command
+   whatever the last one returned. The failing test was the old
+   `test_prose_starting_with_a_number_is_not_a_clause`, which said "1.5
+   lakhs and fifteen in-patient beds" is *weak* numbering. Under the new
+   rule it is no numbering at all, which is the stronger and correct answer.
+   Fixed in the next commit (`d9db92c`), not by rewriting history. After
+   that, commits were chained with `&&`, so a failure stops them.
+
+## Page numbers below a tall letterhead
+
+Running headers, footers and page numbers are removed by repetition: a line
+in the top or bottom 12% of the page (`MARGIN_BAND`) that recurs on at least
+half the pages is furniture. ICICI prints its page number 16.7% down the
+page, under a tall letterhead, so all 111 of them sat inside clause text,
+often mid-sentence, where a quotation spanning the page break could never
+be found.
+
+Widening the band risks catching real text on other policies. The page
+number has a sharper signature: a line that is only digits, at the same
+height on at least half the pages.
+
+```python
+        if line.bbox[1] < height * MARGIN_BAND:
+            band = "top"
+        elif line.bbox[3] > height * (1 - MARGIN_BAND):
+            band = "bottom"
+        elif line.text.strip().isdigit():
+            # ... furniture if it holds that place on half the pages.
+            return "number", f"{line.bbox[1] / height:.2f}"
+```
+
+The first version checked digits *before* the bands. HDFC changed: its page
+numbers, already removed by the bottom band, sit at slightly different
+heights on different pages, so keyed by exact height they no longer
+repeated, and four came back. Checked after the bands, they are untouched.
+Lone numbers inside ICICI's clause text went from 440 to 329: exactly 111
+removed, one per page. The rest are table cells.
+
+**Known limit**, written into the comment: a number standing at the same
+height on half the pages would be removed too. The test's first version did
+exactly that (a body number placed identically on every page) and failed;
+real table cells reach that height on 6 of 111 pages.
+
+## Unnumbered definitions
+
+ICICI numbers none of its definitions, so section b ran as one block cut
+every 3,000 characters, mid-definition. Each definition does begin the same
+way: a bold term in quotes, then "means", "refers to", "shall mean",
+"includes", or a dash.
+
+```python
+_RE_DEFINED_TERM = re.compile(
+    r"^[\"“]?([A-Z][\w&/() \"“”-]{1,60}?)[\"”]\s*"
+    r"(?:[-–:]\s|(?:means|refers\s+to|shall\s+mean|includes)\b)")
+```
+
+The opening quote is optional because ICICI drops it twice ('Condition
+Precedent" shall mean'). Quotes are allowed inside the term for '"Surgery"
+or Surgical Procedure" means'. The line must be bold, so a quoted phrase in
+running text does not start a clause. Result: 68 definition clauses, none
+cut by the size cap, and no clause outside the definitions section started
+by this rule. Three definitions are still missed: two whose term wraps onto
+a second line, and one that starts mid-line after another definition.
+Catching them would need guessing where a term began.
+
+## ICICI, before and after
+
+| | Before M47 | After M48 |
+|---|---|---|
+| Clauses | 92 | 250 |
+| Median length (characters) | 2,934 | 466 |
+| Pieces cut by the size cap | 58 | 23 |
+| Sections found | 3 | 9 |
+
+(M47 alone, which kept the space after list numbers, took the clause count
+from 92 to 186.)
+
+The 23 remaining cuts are in clauses that really are long: the wellness
+program and Elevate HER add-on tables, the claims procedure.
+
+## Not done
+
+- **Tables** are still read one cell per line.
+- **Exclusion ids.** ICICI's exclusions are numbered 1–25, each printing its
+  IRDAI code ("Code- Excl01"). HDFC's lettered items take the code as their
+  id; extending that to numbered items would change Star's and Niva's ids.
+- **Reading order** (Failure 113): a decision, not a fix.
+- Lines that are only a Symbol-font bullet (U+F0B7), and "1‑year" written
+  with a non-breaking hyphen, which the waiting-period duration pattern does
+  not read.
+
+**ICICI is too large for the model's context, and that is a design
+decision.** The reasoning prompt has room for about 23,800 tokens of clause
+text (`clause_token_budget()`). ICICI's clauses are 57,400 tokens; its
+benefits section alone is 37,500. HDFC is over too, at 36,800, which is why
+33 of its clauses (definitions and procedural ones) are already left out of
+every prompt. When a policy does not fit, `shortlist()` drops definitions
+and procedural clauses first, then the lowest-impact clauses, *before* the
+model's picking step sees them. For ICICI that means some benefit clauses
+are dropped unread on every question.
+
+## Check it yourself
+
+```bash
+cd api
+.venv/Scripts/python -m pytest -q tests/test_segment.py -k "outline or money or unnumbered_definition"
+.venv/Scripts/python -m pytest -q tests/test_ingest.py -k letterhead
+```
+
+**Predict before you look:** the outline rule takes "c. Benefits" as a
+section. Would it take "c. Benefit Payable"?
+
+<details>
+<summary>Answer</summary>
+
+No. Less filler, "benefit payable" is two words, and the name must be
+exactly one of the listed parts of a policy (with an optional plural "s").
+That is the guard that keeps HDFC's "d. Secure Benefit" a clause.
+</details>
+
+---
+
+# M49 — The model reads every clause before anything is cut to fit
+
+Written 2026-10-17, on branch `m49-pick-first`, cut from M48. Chosen by
+Raghav from four options (below). Unit-tested; **not yet measured with the
+model**, because the machine had no memory to spare for a run.
+
+## The problem
+
+The reasoning step sends the model the person's question plus the policy's
+clauses, and the model's context window (28,672 tokens on this machine)
+leaves room for about 23,800 tokens of clause text
+(`clause_token_budget()`). Two of the real policies do not fit:
+
+| Policy | Clause text (tokens) |
+|---|---|
+| Synthetic | ~3,300 |
+| Star | ~19,500 |
+| Niva | ~22,000 |
+| HDFC | ~36,800 |
+| ICICI | ~57,400 (benefits section alone ~37,500) |
+
+Two mechanisms already existed for long policies. `shortlist()` cuts a list
+of clauses down to the budget, giving up definitions and procedural clauses
+first, then the lowest-impact ones. `narrow()` has the model read the
+clauses in groups of about 3,000 tokens (`PICK_GROUP_TOKENS`) and pick up to
+three per group that bear on the question, plus every clause the code's own
+calculations name (`named_by_code`). The model reads a short list well and
+a long one badly, which is why the picking is done in small groups.
+
+The fault was their order in `run_scenario` (`api/app/pipeline/scenario.py`):
+
+```python
+    considered = shortlist(clauses)          # cut to the budget first
+    ...
+    computed = compute(facts, considered, scenario)
+    if clause_tokens(considered) > PICK_ABOVE_TOKENS:
+        considered = await narrow(scenario, facts, considered, computed)
+```
+
+The cut ran first, so the model's picking only ever saw what survived it.
+On HDFC that meant 33 clauses (20 procedural, 13 definitions) were dropped
+on every question before the model read a word. On ICICI it would have
+dropped benefit clauses too, chosen by an impact score rather than by
+relevance to the question. And the code's own arithmetic (`compute`: waiting
+periods, caps, time windows) ran only on the survivors, although the
+comment beside it said it ran "on every clause".
+
+## The options that were weighed
+
+- **A. Keep the order.** No work; ICICI loses benefit clauses unread.
+- **B. Pick first, then fit** (chosen). The picking already reads in small
+  groups, so its input has no size limit; only what it keeps has to fit.
+  Costs more picking calls per question.
+- **C. Show summaries of low-priority clauses instead of their text.**
+  Rejected: a quotation from a summary cannot be checked against the policy's
+  words (the verbatim span check), so those clauses could never be cited.
+- **D. A larger context window.** Not possible: 28,672 tokens is the largest
+  that runs entirely on this machine's 8 GB graphics card (measured in M16).
+
+## The change
+
+```python
+    computed = compute(facts, clauses, scenario)
+    ...
+    considered = clauses
+    if clause_tokens(clauses) > PICK_ABOVE_TOKENS:
+        considered = await narrow(scenario, facts, clauses, computed)
+    considered = shortlist(considered, keep=named_by_code(computed, scenario, clauses, facts))
+```
+
+Three things moved:
+
+1. **`compute` runs on every clause**, as its comment always claimed. A
+   waiting period is now checked even in a clause that would not have fitted.
+2. **`narrow` reads every clause.**
+3. **`shortlist` runs last, with a `keep` set**: the clauses the computed
+   blocks talk about are given room before any other.
+
+```python
+    ranked = sorted(
+        range(len(clauses)),
+        key=lambda i: (clauses[i].clause_id not in keep,
+                       clauses[i].clause_type in DROPPED_FIRST, -clauses[i].impact_score),
+    )
+```
+
+Without `keep`, the new order could do something the old one could not:
+compute a result for a clause ("clause 2#2: requires 24 months ... still
+applies"), then trim that clause away. The prompt would then refer to a
+clause it does not show, which the model can neither read nor cite.
+
+## What it reaches, worked out rather than measured
+
+For a policy that fits the budget, the old `shortlist(clauses)` kept every
+clause, so `compute` and `narrow` saw everything, exactly as they do now; and
+the final `shortlist` has nothing to drop, because what `narrow` keeps is a
+subset of something that fit. So **synthetic, Star and Niva send identical
+requests**, and only HDFC and ICICI change.
+
+This is an argument from the code, not a measurement. The usual instrument,
+`evals/compare_requests.py`, could not be run: it makes real picking calls
+wherever a pick request changed, which needs the model loaded.
+
+**Cost:** picking calls per question go from about 8 to about 14 on HDFC,
+and ICICI needs about 21. Not timed yet.
+
+**Tests** (`api/tests/test_scenario.py`):
+`test_a_clause_the_code_names_is_kept_whatever_its_rank` and
+`test_the_pick_reads_every_clause_and_only_its_result_is_fitted`. The second
+replaces the three model calls with stand-ins and records what each one
+received: the pick must receive all six clauses, and the reasoning step the
+two picked ones that fit. Both fail on the old order.
+
+## Not yet measured
+
+- **HDFC's 14 questions.** Every HDFC request changes. This must be measured
+  after M47's and M48's HDFC runs, or the three changes cannot be told apart.
+- **Time per question** with the extra picking calls.
+- **ICICI** has no eval questions yet.
+
+## Check it yourself
+
+```bash
+cd api
+.venv/Scripts/python -m pytest -q tests/test_scenario.py -k "code_names or pick_reads"
+```
+
+**Predict before you look:** Star is 19,500 tokens, over `PICK_ABOVE_TOKENS`
+(6,000) but under the budget. Does M49 change what Star's reasoning prompt
+contains?
+
+<details>
+<summary>Answer</summary>
+
+No. Before, `shortlist` kept all of Star (it fits), and `narrow` then picked
+from all of it. Now `narrow` picks from all of it directly, and the final
+`shortlist` keeps everything picked, because a subset of something that fits
+also fits. Same input to every step, so the same prompt.
+</details>
+
+---
+
+# M47–M49 measured: three branches on the real model, and the clause that taught the model to refuse
+
+Written 2026-10-24, on branch `m49-pick-first`. No code changed in this
+entry. It records the first model runs of three branches written while the
+machine had no memory to spare for them:
+
+- **M47** (`m47-kept-space`): the PDF reader keeps the space after a list
+  number, so "1. Pre-Existing" is no longer glued into the clause above;
+  long clauses are cut at a sentence end; the consistency check also
+  questions a refusal that cites no time-window clause.
+- **M48** (`m48-icici-segmenter`): segmenter rules for ICICI's layout.
+  On HDFC it changes only one clause, the plan chart in Annexure C.
+- **M49** (`m49-pick-first`): for a policy too long for the context window,
+  the model's picking step now reads every clause, and only what it keeps
+  is cut to fit. Before, definitions and procedural clauses were cut first,
+  unread.
+
+The three branches are stacked: M48 is cut from M47, M49 from M48. So each
+run below includes the changes of the branches before it.
+
+All runs: Ollama 0.35.1, `qwen2.5:7b-instruct-q4_K_M`, the pinned server.
+
+## The numbers
+
+**HDFC Optima Secure, 14 questions, majority of 3 samples**
+(`evals/real/scenarios-hdfc-optima-secure.json`):
+
+| Code | Right | Wrong answers |
+|---|---|---|
+| `main` (recorded before M47) | 14/14 | – |
+| M47 | 13/14 | `hdfc-hernia-14-months` (covered, 2 of 3) |
+| M48 | 12/14 | `hdfc-hernia-14-months` (3 of 3); `hdfc-tests-75-days-before` (conditional, 2 of 3) |
+| M49 | 13/14, every case unanimous | `hdfc-typhoid-45-days` (not_covered, 3 of 3) |
+
+M47's window-check change did what it was written for:
+`hdfc-tests-75-days-before` (tests 75 days before admission; the policy pays
+for 60) was wrong in 4 of 5 samples before it and right in 3 of 3 after.
+
+M48's `tests-75-days-before` miss is most likely chance: M48 changes nothing
+that question reads, and M47 and M49 both got it right 3 of 3. It was not
+re-asked to confirm.
+
+**Time.** M48 took 768 seconds for the 42 answers; M49 took 1,142. M49's
+picking step reads all 126 clauses instead of 88, in more groups, so each
+question costs about 27 seconds instead of 18 (+50%).
+
+**Star Arogya Sanjeevani, 22 questions, M47 against `main`, one sample each**
+(three question files: the main 10, held-out "abroad" 7, held-out
+"maternity" 5):
+
+| | Right |
+|---|---|
+| `main` | 18/22 |
+| M47 | 17/22 |
+
+Only one answer differed: `star-gallstones-no-timing` (the question gives no
+dates, so the right answer is `insufficient_information`). Asked 5 more times
+afresh, M47 was right 4 of 5 and `main` 5 of 5, so the one wrong sample was
+chance. The four other wrong answers are wrong on both sides, so they are
+older faults, not M47's. M47 did produce more invented quotations on Star
+(7 against 2); every one was caught by the verbatim span check and shown as
+unverified, so detection stayed at 100%.
+
+**How to run these.** HDFC, majority of 3:
+
+```bash
+api/.venv/Scripts/python evals/run_scenario_eval.py \
+  --policy samples/real/hdfc-optima-secure.pdf \
+  --cases evals/real/scenarios-hdfc-optima-secure.json --repeats 3 --no-report
+```
+
+One question asked afresh five times (`--resample` skips the stored answer
+for the reasoning step only):
+
+```bash
+api/.venv/Scripts/python evals/run_scenario_eval.py \
+  --policy samples/real/hdfc-optima-secure.pdf \
+  --cases evals/real/scenarios-hdfc-optima-secure.json \
+  --only hdfc-hernia-14-months --resample --repeats 5 --no-report
+```
+
+`main`'s side was run from a second checkout of `main` (`../ipce-main`),
+which has its own cache.
+
+## Failure 115: M47 broke the hernia question, and M49 mended it without anyone knowing why
+
+**The question.** "I need surgery for a hernia that was found last month. I
+bought this policy 14 months ago and it is my first health insurance."
+Expected: `not_covered`. Hernia is on HDFC's specified disease/procedure
+list, which carries a 24-month wait (clause Excl02), and 14 months have not
+served it.
+
+**What was measured.** Five fresh samples each:
+
+| Code | not_covered (right) |
+|---|---|
+| `main` | 5/5 |
+| M47 (`27d8c36`) | 1/5 |
+| M47 before its last three commits (`525a49c`) | 0/5 |
+| M49 (in the eval run) | 3/3 |
+
+An earlier M47 run, before those last three commits, had scored HDFC 13/14
+with hernia right. The table shows that was luck. At `525a49c` hernia is
+wrong 5 times in 5, so the fault came in with M47's first three commits,
+not the last three.
+
+**What was ruled out.** The deciding clause itself. Excl02's text from `main`
+and from M47 differs only in the restored spaces:
+
+```
+< ii.In case of enhancement of sum insured the exclusion shall apply afresh ...
+> ii. In case of enhancement of sum insured the exclusion shall apply afresh ...
+```
+
+Hernia is in the list in both. The code's own waiting-period arithmetic also
+marks Excl02 "not served" (720 days required). So the model was shown the
+right clause and the right arithmetic, and still said `covered`.
+
+**What is left.** M47 changes HDFC's clause boundaries (115 → 126 clauses),
+and HDFC is over the context budget, so which clauses the model is shown
+changes with them. M49, which changes exactly that selection, gives the right
+answer 3 of 3. That points at the selection, but it is not a diagnosis: it was
+not traced which shown clause pulled the answer to `covered`. The method for
+tracing it is the one in Failure 116, and it was not run here. If M49 is
+merged, the question is right; if M49 were ever reverted, this fault would
+come back.
+
+## Failure 116: a section's opening sentence, typed as a waiting period, made the model refuse typhoid
+
+**The question.** "I was admitted to hospital with typhoid 45 days after
+buying this policy. It is my first health insurance." Expected: `covered`.
+HDFC's only wait that could apply is the 30-day initial wait (Excl03), served
+at 45 days. Typhoid is not on the specified disease list, and nothing says it
+was there before the policy.
+
+M47 and M48 answer `covered`. M49 answers `not_covered`, 3 samples of 3.
+
+**Step 1: what M49 said.** Replaying the stored answer from the cache (no
+model call) gives:
+
+> The claim is not covered due to the 36-month pre-existing disease waiting
+> period. The policyholder has held the policy for only 45 days ...
+
+It cites Excl01, the pre-existing disease (PED) exclusion. But typhoid caught
+after buying the policy is not a pre-existing disease. The facts step had
+recorded exactly that uncertainty: `pre_existing_condition: "unknown"`.
+
+**Step 2: what changed between M48 and M49.** A replay script recorded what
+the reasoning step received on each branch. It wraps `scenario.reason` (the
+function that sends the final prompt) so the arguments can be printed:
+
+```python
+real_reason = sc.reason
+async def spy(scenario, facts, considered, computed, **kw):
+    seen.setdefault("considered", considered); seen.setdefault("computed", computed)
+    return await real_reason(scenario, facts, considered, computed, **kw)
+sc.reason = spy
+```
+
+Two findings:
+
+- `computed`, the code's own arithmetic, is **identical** on both branches.
+  On both, Excl01 shows as "not served" (1,080 days required, 45 held),
+  marked as applying only if the condition is pre-existing, which is unknown.
+- The clauses shown differ. M48 shows 25 and M49 shows 38. The 13 extra are
+  mostly definitions and claim-procedure clauses, plus one typed
+  `waiting_period`: `1#3`.
+
+`1#3` is not a waiting period. It is the opening of HDFC's exclusions
+section, cut off as its own clause:
+
+> The Company shall not make payment for any claim in respect of any Insured
+> Person caused by, arising from or attributable to any of the following
+> unless expressly stated to the contrary in the Policy: 1. Waiting Periods
+> All the Waiting Periods and exclusions listed below shall be applicable
+> individually for each Insured Person and claims shall be assessed
+> accordingly.
+
+It names no condition and no period. It is a general "we will not pay", and
+read on its own it says every waiting period applies.
+
+**Step 3: proving it, rather than suspecting it.** Thirteen clauses were
+added at once, and any of them could be the cause. Removing all 13 would
+only show that "something in the 13" matters. So the experiment changed one
+clause, in both directions, with fresh samples (a scratch script replaced the
+clause list just before `reason` and passed `use_cache=False`):
+
+| Clauses shown | typhoid-45-days, 5 fresh samples |
+|---|---|
+| M49's 38, minus `1#3` | covered 5/5 (right) |
+| M48's 25, plus `1#3` | not_covered 5/5 (wrong) |
+
+Removing it from M49 repairs the answer; adding it to M48 breaks it. Five of
+five both ways, against a baseline that was three of three each way, so this
+is not sampling noise.
+
+**Step 4: why M49 shows it and M48 did not.** The code's calculations do not
+name `1#3` (`named_by_code` keeps Excl01, Excl02, Excl03, 1.1.1, 1.4, 2.12,
+2.2, 2.11#3, 6). The model's picking step chose it. M48's picking step had
+`1#3` in front of it too (it survived M48's cut, 88 clauses), and passed it
+over. The picker reads clauses in document order, in groups of about
+`PICK_GROUP_TOKENS = 3_000` tokens, keeping up to three per group. M49 puts
+the 33 definitions and procedural clauses back into that order, so every
+group boundary moves and `1#3` sits among different neighbours. In its new
+group it made the cut.
+
+**So the fault is not M49's idea.** M49 exposed an older one: a clause with
+no content of its own, typed `waiting_period`, which the model reads as a
+blanket refusal. Any change to which clauses are shown could pick it up. It
+belongs with the segmenter's faults: a section's opening sentence should not
+stand alone as a clause.
+
+**Not fixed in this entry.** Candidate fixes, none tried yet:
+
+1. Keep a section's opening sentence out of the clauses (or attach it to the
+   section heading, as `_merge_leadins` already does for some lead-ins).
+2. Make the analysis step type such a clause `procedural`, not
+   `waiting_period`.
+3. Keep it, but never let the picking step choose a clause that names no
+   condition, period or amount.
+
+Option 1 matches the project's principle that clause boundaries are decided
+by rules, not by the model. It also changes HDFC's clauses, which means
+re-analysis and another HDFC run.
+
+## Concept 64: change one input, in both directions
+
+When a change makes an answer go wrong, the change usually alters many
+inputs at once. Here, M49 changed 13 clauses in the prompt. Looking at the
+13 and picking the most suspicious one gives a *guess*. A guess about a
+language model is cheap to make and easy to believe, because the model's
+reasoning sounds as if it explains itself.
+
+**Ablation** is the method that turns the guess into a measurement. Change
+exactly one input and hold everything else fixed. Do it **both ways**:
+
+- **Remove it from the failing setup.** If the failure goes, the input is
+  *necessary* for it there.
+- **Add it to the passing setup.** If the failure appears, the input is
+  *sufficient* to cause it there.
+
+Each direction on its own can mislead. Removing a clause could repair an
+answer only because the prompt got shorter. Adding one could break an answer
+only in combination with something else in that particular set. When both
+directions agree, five times in five against a stable baseline, the one
+input is the cause in both contexts.
+
+What makes this cheap here is the cache (Concept 29). The facts, the pick
+and the code's arithmetic replay unchanged from the cache, so the only thing
+that varies between the two arms is the clause list given to the reasoning
+step, plus the model's own sampling, which is why each arm is asked five
+times.
+
+## Check it yourself
+
+Replay M49's stored typhoid answer without the model, using a small script
+that calls `build_clauses` and then `run_scenario` the way
+`evals/run_scenario_eval.py` does, and look at which clause it cites. A
+replay should report zero model calls (`client.model_calls` unchanged).
+
+**Predict before you look:** M49 shows the model *more* of the policy than
+M48 did, and the deciding clause, Excl03, is in both. How can showing more
+of the same policy make an answer worse?
+
+<details>
+<summary>Answer</summary>
+
+The model does not weigh every clause on its merits. A sentence that sounds
+like a rule ("all the waiting periods listed below shall be applicable"),
+standing alone with nothing to limit it, is read as one. More clauses means
+more chances for a misleading one to reach the prompt. That is why the
+picking step exists, and why what the segmenter calls a clause matters as
+much as what the model does with it.
+</details>
+
+---
+
+# M50 — A heading is shown on the clause map, and never to the model answering a question
+
+Written 2026-10-24, on branch `m49-pick-first`. HDFC's 14 questions go from
+13/14 (M49) to 14/14. The first attempt at this fix made things worse (9/14),
+and that attempt is recorded below as Failure 117, because why it failed is
+the reason the final fix looks the way it does.
+
+## The problem
+
+Policies are written as outlines. HDFC's Section C reads, on the page:
+
+> The Company shall not make payment for any claim in respect of any Insured
+> Person caused by, arising from or attributable to any of the following
+> unless expressly stated to the contrary in the Policy:
+>
+> 1. Waiting Periods
+>
+> All the Waiting Periods and exclusions listed below shall be applicable
+> individually for each Insured Person and claims shall be assessed accordingly.
+>
+> a. Pre-Existing Diseases: Code – Excl01 ...
+> b. Specified Disease/Procedure waiting period: Code – Excl02 ...
+> c. 30-day waiting period: Code – Excl03 ...
+
+The segmenter (`api/app/pipeline/segment.py`, stage 2, no model) splits this
+into clauses. Each lettered item with an IRDAI code becomes its own clause
+(Excl01, Excl02, ...). That left "1. Waiting Periods" and its sentence as a
+clause of their own, and `_merge_leadins`, which joins an unnumbered lead-in
+ending in ":" to the clause below it, joined the opening sentence to that
+heading. The result was a clause with the citation id `1#3` (the third clause
+numbered "1" in the policy), saying: no payment for any claim caused by any of
+the following, and all the waiting periods apply. With nothing following it.
+
+Failure 116 (in the entry "M47–M49 measured") showed what that does. When the
+model was shown `1#3`, it refused typhoid 45 days into the policy under the
+36-month pre-existing-disease wait (Excl01), though nothing said the typhoid
+was pre-existing. Removing `1#3` from the prompt repaired the answer 5 of 5
+times; adding it to a prompt that had been right broke it 5 of 5 times.
+
+## Which clauses are headings
+
+HDFC is not the only policy with this shape. The rule has to find every clause
+that heads a group rather than states a rule, on every policy, without words
+like "following" or "below" (a word list only finds what someone remembered to
+list). The structural signal: **a clause numbered at the top level ("1", "2")
+whose next clause is its own first child**, either "1" then "1.1", or "1" then
+an item lettered "a." or "(a)".
+
+That alone was too loose. Run over all seven PDFs (three synthetic, four real),
+it also caught clauses with real content. Each catch added a guard:
+
+| Caught | Why it is not a heading | Guard |
+|---|---|---|
+| HDFC `1.1 Hospitalization Expenses` before `1.1.1` | the main cover; a sub-clause with sub-clauses | top level only: `^\d+$` |
+| HDFC `2.7 Aggregate Deductible` before `2.7.1` | same | same |
+| The last piece of HDFC's definitions, above `(a) Acute condition` | the middle of a long clause, cut by the size cap | not a `(cont.)` piece |
+| Star `1. Hospitalization` before `1.1 Other expenses` | caps room rent at 2% of the sum insured, Rs. 5,000 a day | states no quantity (%, Rs., days, months, ...) |
+
+The quantity guard is the least obvious. The idea: a heading introduces a
+group and names nothing of its own; a clause that sets a percentage, an amount
+or a period is a rule, whatever comes after it. Measured, not assumed: of the
+nine clauses the structural signal finds on the four real policies, Star's is
+the only one stating a quantity, and the only one with content.
+
+The code, in `segment.py`:
+
+```python
+_RE_TOP_NUMBER = re.compile(r"^\d+$")
+_RE_FIRST_LETTER_ITEM = re.compile(r"^\(?a[.)]\s")
+_RE_QUANTITY = re.compile(
+    r"\d\s*%|(?:rs\.?|inr|₹)\s*\d|\d\s*(?:lakhs?|lacs?|crores?|days?|months?|years?|hours?)\b",
+    re.I)
+
+def _mark_group_headings(segments: list[Segment]) -> None:
+    for seg, child in zip(segments, segments[1:]):
+        seg.is_heading = bool(
+            _RE_TOP_NUMBER.match(seg.number)
+            and not seg.heading.endswith("(cont.)")
+            and not _RE_QUANTITY.search(seg.text)
+            and (child.number == f"{seg.number}.1"
+                 or _RE_FIRST_LETTER_ITEM.match(child.text.lstrip()))
+        )
+```
+
+What it finds: 5 in HDFC (`1. Base Coverage`, `2. Optional Covers`,
+`1. Waiting Periods`, `2. Standard Exclusions`, `1. Standard General Terms &
+Clauses`), 3 in Niva (`2. Definitions`, `4. Benefits available under the
+policy.`, `5. Exclusions`), none in Star, ICICI or the synthetic policies.
+
+## Failure 117: the sentence moved into the first item, and refused five covered claims
+
+**What was tried first.** The lead-in's own docstring says what it was meant
+to do: join "the numbered items below it". So the first fix *merged* each
+group heading into its first child, before `_merge_leadins` ran. Excl01 then
+began: "The Company shall not make payment for any claim ... caused by any of
+the following ...: 1. Waiting Periods All the Waiting Periods and exclusions
+listed below shall be applicable ... a. Pre-Existing Diseases ...". No policy
+text was lost, and the stray clause was gone. It read well.
+
+**What happened.** HDFC, majority of 3 samples: **9/14**, down from 13/14.
+Typhoid stayed wrong, and four more questions whose answer is `covered` were
+refused, 3 samples of 3 each: dengue at four months, an accident at ten days,
+pneumonia at 40 days, medicines after a covered discharge. Replayed from the
+cache, all five cited Excl01:
+
+> The claim is refused because it falls under the exclusion clause Excl01
+> (a. Pre-Existing Diseases: Code – Excl01). (accident at ten days)
+
+**Why.** Excl01's stored analysis was compared before and after: same type,
+same 36-month wait, no exceptions. What changed was only the text the model
+reads. And Excl01 is in almost every HDFC prompt: the code's own waiting-period
+arithmetic names it on every question about time since purchase, and
+`named_by_code` guarantees a clause the arithmetic names is shown. So the
+blanket sentence went from reaching the prompt now and then (when the picking
+step happened to choose `1#3`) to reaching it nearly always, attached to the
+very clause the model then misapplied.
+
+**The lesson.** Moving a misleading sentence does not neutralise it; the model
+reads whatever it is shown. The words had to leave the model's input. Where
+they sit on the page is a different question, for a different reader.
+
+## The fix: mark it, keep it, and leave it out of the answering step
+
+Two readers see clauses. The clause map shows a person the policy, and a person
+reading "1. Waiting Periods" in place understands it as a heading. The
+scenario step shows the model a list of clauses out of context, and the model
+reads each as a rule. So the heading stays in the document, for the first
+reader, and is withheld from the second:
+
+1. `Segment.is_heading` and `Clause.is_heading` (a new column; `data/app.db`
+   must be deleted and recreated, which `check_schema()` says on startup).
+2. `_persist_clauses` stores it.
+3. `load_clauses` (`api/app/pipeline/run.py`), the one place both the
+   scenario endpoint and the eval build their clause list, skips it:
+
+```python
+        for (clause, analysis), citation_id in zip(rows, ids)
+        # After the ids are counted, so the clause after a heading keeps its id.
+        if not clause.is_heading
+```
+
+The skip comes after `citation_ids` has numbered the clauses. Skipping before
+would renumber every later clause with the same number: `1#4` would become
+`1#3`, and an answer key or a stored answer naming `1#4` would point at a
+different clause.
+
+**Nothing is re-analysed.** No clause's text changes (checked: all seven
+PDFs' clauses byte-identical before and after), so every analysis replays from
+the cache. Only the prompts that used to include a heading change.
+
+## Measured
+
+HDFC, 14 questions, majority of 3 samples, Ollama 0.35.1:
+
+| Code | Right |
+|---|---|
+| `main` | 14/14 |
+| M49 | 13/14 (typhoid-45-days wrong, 3 of 3) |
+| Failure 117's merge | 9/14 |
+| **M50** | **14/14** (13 unanimous; hernia-14-months 2 of 3) |
+
+1,122 seconds for the 42 answers, about the same as M49 (1,142).
+
+**Not measured, and why that is safe:** Star, ICICI and the three synthetic
+policies have no clause marked, so `load_clauses` returns exactly what it
+returned before, and their prompts are byte-identical. Niva has three headings
+marked and no eval questions; its prompts change.
+
+**Not checked:** HDFC's `2. Optional Covers` says optional covers apply only
+when the Policy Schedule lists them. The model no longer sees that sentence.
+No HDFC question is about an optional cover, so this run cannot show whether
+that matters.
+
+**Tests:** `test_a_group_heading_is_marked_not_merged` (`tests/test_segment.py`)
+has one case per guard, and each guard was removed in turn to confirm a test
+fails without it; `test_a_group_heading_is_never_given_to_the_scenario_step`
+(`tests/test_load_clauses.py`) fails if the skip is removed, or if it moves
+before the ids are counted. 348 tests pass.
+
+## Check it yourself
+
+```bash
+cd api
+.venv/Scripts/python -m pytest -q tests/test_segment.py tests/test_load_clauses.py -k heading
+```
+
+List the headings found in HDFC:
+
+```bash
+.venv/Scripts/python -c "from app.pipeline.ingest import ingest; from app.pipeline.segment import segment; print([s.heading for s in segment(ingest('../samples/real/hdfc-optima-secure.pdf')) if s.is_heading])"
+```
+
+**Predict before you look:** the skip in `load_clauses` sits after
+`citation_ids`. HDFC has several clauses numbered "1". If the skip ran first,
+which answers stored in the cache would stop replaying, and why?
+
+<details>
+<summary>Answer</summary>
+
+Every answer whose prompt names a clause numbered "1" that comes after a
+skipped heading. Its id would drop by one (`1#4` → `1#3`), the prompt text
+would change, and the cache key, a hash of the exact prompt (Concept 29),
+would change with it, so the model would be asked afresh. Worse, a stored
+answer citing `1#4` would now name a different clause. Counting first keeps
+every id fixed to the clause it always named.
+</details>
+
+---
+
+# M51 — Asking the model again about the pre-existing-disease wait: two attempts, both reverted
+
+Written 2026-10-24, on branch `m49-pick-first`, after M50. **No code from this
+entry is in the repository.** Both attempts were built, tested and measured,
+and both were removed. The entry exists because why they failed says something
+about where this system can and cannot hand a judgement to the model.
+
+## The problem
+
+Most health policies refuse an illness the person already had when the policy
+began until a waiting period has passed: 36 months at HDFC (clause Excl01), 36
+in the synthetic policy (clause 3.2). This is the pre-existing-disease (PED)
+wait. It concerns only such illnesses. Typhoid caught 45 days after buying the
+policy is not one.
+
+The code already knows this. The waiting-period check (`waiting.py`) marks a
+PED clause `pre_existing`, and records whether the person's condition predates
+the policy: "yes", "no" or "unknown". For an unknown, the line it writes into
+the prompt opens with the scope:
+
+> clause Excl01: concerns ONLY an illness the person already had when the
+> policy began. Unless the description says this one had begun by then, it
+> is not the reason for this claim.
+
+The model still refused under it. In Failures 116 and 117 it refused typhoid
+at 45 days, dengue at four months, an accident at ten days, pneumonia at 40
+days and medicines after a covered stay, 3 samples of 3 each, every one citing
+only Excl01. M50 removed the sentence that set those refusals off, and HDFC
+went back to 14/14. But the weakness stayed: an instruction can be ignored.
+
+Elsewhere in this project the answer to an ignored instruction is a check in
+code: `find_contradictions` (`api/app/pipeline/scenario.py`) compares the
+answer with what was calculated, and when they disagree it asks the model once
+more, with the disagreement in front of it. M51 tried to add one more such check.
+
+## Attempt 1: the check
+
+```python
+    if verdict == Verdict.NOT_COVERED:
+        unconfirmed = {
+            c.clause_id: c for c in computed.waiting
+            if c.pre_existing and c.condition_predates_policy != "yes"
+            and c.status is not waiting.WaitingStatus.SERVED
+        }
+        against = [c.clause_id for c in citations if c.effect in _ADVERSE_EFFECTS]
+        if against and all(clause_id in unconfirmed for clause_id in against):
+            ...  # one problem line per clause; the model answers again
+```
+
+It fires only when every clause the answer cites against the claim is an
+unserved PED wait, and the code has not settled the condition as pre-existing.
+The problem line put both outcomes to the model: (a) if the description says
+the illness had begun before the policy, the refusal stands; (b) otherwise,
+answer again without that clause. (Both outcomes, because a one-sided
+correction elsewhere in the same function, "the answer is then not_covered",
+turned "hit by a car" into a refusal 4 samples of 4.)
+
+## Failure 118: the check reached two right answers, and broke both
+
+**Measured without the model first.** A replay script ran all 114 eval
+questions (the synthetic 40, four held-out sets, HDFC 14, Star 22) through
+`run_scenario` with stored answers from the cache, and stopped any question
+the new rule would re-ask. It re-asked 2:
+
+- `ped-waiting-not-served`: "I have had diabetes for years and was
+  hospitalised for it 8 months after buying this policy." Expected
+  not_covered, citing 3.2.
+- `ho4-asthma-since-childhood`: "My asthma started when I was a child, well
+  before this policy, and I was admitted with a severe attack. I have held the
+  policy for two years." Expected not_covered, citing 3.2.
+
+Both stored answers were right, and both illnesses plainly predate the policy.
+The rule asked them anyway, because the facts said "unknown".
+
+**Then with the model**, 5 fresh samples each:
+
+| Question | Stored answer | With the check |
+|---|---|---|
+| diabetes | not_covered, cites 3.2 | **covered, 5 of 5** |
+| asthma | not_covered, cites 3.2 | not_covered, **3.2 cited in none of 5** |
+
+Offered (b), the model took it for diabetes "for years". For asthma it kept
+the refusal and dropped the reason: a right verdict for a wrong reason, which
+this project counts as wrong (Concept 62).
+
+**Why the facts said "unknown".** Whether a condition predates the policy is
+settled in code wherever it can be, before the model sees the question:
+
+- `derive_pre_existing` compares two stated durations ("found last month",
+  "bought 14 months ago");
+- `stated_not_pre_existing` reads the plain statement of the "no" direction
+  ("which I never had before taking the policy").
+
+"For years" and "when I was a child" have no number to compare, and nothing
+read the "yes" direction. So the check handed the model a question it could
+not answer reliably.
+
+## Attempt 2: settle "yes" in code first
+
+The obvious repair: read the "yes" direction from the person's words, as the
+"no" direction already is, so that only real unknowns reach the check.
+
+```python
+_ILLNESS_GAP = r"(?:(?!\b(?:polic|cover|insur|premium))[^.;]){0,40}?"
+_CHILDHOOD = r"(?:a\s+)?(?:child|kid|baby|boy|girl|teenager)"
+_STATED_PRE_EXISTING = re.compile(
+    r"\b(?:had|have\s+had|has\s+had|suffered\s+from|suffering\s+from|lived\s+with|living\s+with)\b"
+    + _ILLNESS_GAP + r"\bfor\s+(?:many\s+|several\s+|some\s+)?(?:years|decades)\b"
+    r"|\b(?:since|from)\s+(?:childhood|birth|I\s+was\s+" + _CHILDHOOD + r")\b"
+    r"|\bwhen\s+I\s+was\s+" + _CHILDHOOD + r"\b"
+    r"|\b(?:started|began|begun|developed|diagnosed|had)\b" + _ILLNESS_GAP
+    + r"\b(?:well\s+|long\s+)?before\s+" + _START,
+    re.IGNORECASE,
+)
+```
+
+It was guarded: the gap refuses to cross a policy word ("I have had this
+policy for years"); the "no" reading runs first, so "never had it before
+taking the policy" stays "no"; and it fills only an "unknown". Run over all
+114 eval questions, it matched four, all correctly. Each guard had a test that
+failed without it.
+
+It worked on what it was written for:
+
+| | Re-asked (stored answers) | diabetes, 5 fresh | asthma, 5 fresh |
+|---|---|---|---|
+| Attempt 1 alone | 2 of 114 | covered, 0/5 right | 3.2 cited 0/5 |
+| Attempt 1 + 2 | 0 of 114 | not_covered 5/5, cites 3.2 | not_covered 5/5, cites 3.2 |
+
+## Failure 119: a question nobody had written
+
+Writing the "predict" question for this entry raised a case no eval question
+covers: an old illness *mentioned*, a new injury *claimed*. Asked of the
+synthetic policy, 3 fresh samples each:
+
+> "I have had diabetes for years. I took out this policy last month and was
+> admitted for a broken arm after a fall."
+
+| Code | Facts: pre-existing | Answer |
+|---|---|---|
+| Neither attempt (the committed code) | unknown | **not_covered, 6 of 6**, citing 3.2 (wrong) |
+| Attempt 1 only (the re-ask) | unknown | **covered, 3 of 3**, citing 2.1 (right) |
+| Attempts 1 + 2 | yes | **not_covered, 3 of 3**, citing 3.2 (wrong) |
+
+With both attempts, the pattern found "had diabetes for years", settled the
+question as pre-existing, and the PED line then told the model the wait
+"still applies and blocks this claim". A broken arm after a fall was refused
+under a diabetes rule.
+
+**A correction, kept visible.** As first written, this table had two rows,
+and the "covered, 3 of 3" row was labelled "without the 'yes' reading" and
+described as what the current code does. It was not. That run switched off
+only attempt 2 (by replacing `stated_pre_existing` with a function returning
+False) while attempt 1, the re-ask, was still in the code. The re-ask is what
+turned the refusal into covered. The committed code, with both attempts
+reverted, was measured afterwards when the question was added to the eval set:
+not_covered, 1 stored answer and 5 fresh samples, all citing only 3.2. Its
+facts, the same as without attempt 2: `condition: "diabetes"`,
+`pre_existing_condition: "unknown"`, the broken arm only in the free-text
+notes. Its reasoning: "The claim for treatment related to diabetes is not
+covered because the policy has a pre-existing disease waiting period of 36
+months". The lesson is the same one this entry teaches about checks, turned
+on the measurement itself: a baseline is the committed code, run as
+committed, not the experimental code with one piece switched off.
+
+**Why it cannot be narrowed.** The obvious narrowing was to settle "yes" only
+when the old illness is the one being claimed, using the facts step's own
+`condition` field. But for this question the facts step records
+`condition: "diabetes"`, not the broken arm. The facts hold one condition per
+question, and here the facts step picked the old one. Code cannot tell "the old
+illness is the claim" from "an old illness is mentioned" with facts that make
+no such distinction. Fixing that means changing the facts schema to carry the
+claimed condition separately from the person's history, a redesign with its
+own re-measurement.
+
+## The decision: revert both
+
+- What attempt 1 was for, the five HDFC refusals, M50 already fixed.
+- No version gets all three questions right:
+
+  | Code | diabetes | asthma | broken arm |
+  |---|---|---|---|
+  | Neither attempt | right | right | wrong |
+  | Attempt 1 only | wrong | right verdict, no reason | right |
+  | Attempts 1 + 2 | right | right | wrong |
+
+- Attempt 1's one measured benefit, the broken arm, comes at the price of two
+  eval answers that were right; attempt 2 buys those back and loses the broken
+  arm again.
+
+So both were removed. The code quoted above is the record of what was tried.
+The broken arm is wrong on the committed code: a known failure, and the case
+for the "per-illness facts" redesign below. (As first written, this section
+said neither attempt's benefit was ever measured; the corrected table above
+shows attempt 1 had one.)
+
+## What this taught
+
+1. **A check that hands a judgement back to the model is only as good as the
+   model's judgement on the cases it reaches.** Measure which cases those are
+   before measuring anything else; the replay against stored answers did that
+   in a minute, with no model.
+2. **Settle in code what can be settled, but only what the facts can carry.**
+   "Pre-existing" is a property of an illness, and the facts hold it per
+   question. A rule that writes per-question facts from per-illness evidence
+   will be right only while a question names one illness.
+3. **The eval set is not the world.** Every eval question passed. The question
+   that failed was written in one line, by asking what a person might say that
+   the pattern would misread. When a rule can refuse a claim, write its
+   adversarial questions before trusting it.
+
+## Left open
+
+- **The broken-arm question** has joined the eval set, after this entry was
+  first written: case 41 of `evals/golden/scenarios.json`,
+  `ped-mentioned-accident-claimed`, expected covered, `must_cite: ["2.1"]`,
+  `must_not_cite: ["3.2"]`. It is in the main (tuning) set, not a held-out
+  one, because it has already decided a change. On the committed code it is a
+  known failure (not_covered, 6 of 6), so the main set scores 40/41 at best
+  until the facts can tell the claimed condition from the person's history.
+- **Per-illness facts**: the facts schema carrying the claimed condition
+  separately from the person's medical history. That is the design change
+  that would make both attempts safe, and it touches the facts prompt, whose
+  every change rewords the facts of every question (M21).
+
+## Check it yourself
+
+Nothing from this entry is in the code. To see the weakness it found, ask the
+running app, against the synthetic policy, "I have had diabetes for years. I
+took out this policy last month and was admitted for a broken arm after a
+fall." The right answer is covered; the committed code answers not_covered,
+citing the pre-existing-disease wait.
+
+**Predict before you look:** the PED wait's prompt line for an unknown says
+"Unless the description says this one had begun by then, it is not the reason
+for this claim." Attempt 1 asked the model to apply that exact sentence to
+"diabetes for years", and it answered covered. Is the model's reading of the
+sentence actually wrong?
+
+<details>
+<summary>Answer</summary>
+
+Not by the letter. "For years" does not say the diabetes began before the
+policy: the person could have held the policy for longer than they have had
+diabetes. Only the question's other half, "hospitalised 8 months after buying
+this policy", makes it certain, and that takes combining two statements. The
+model read one sentence literally and missed the inference. That is the kind of
+judgement this project keeps out of the model, which is why settling it in code
+looked right, and why it failed once the code's evidence was coarser than the
+question.
+</details>

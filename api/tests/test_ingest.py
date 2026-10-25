@@ -198,3 +198,60 @@ def test_page_starts_align_with_pages(golden_pdf: Path):
         first = next((l for l in result.lines if l.page == page_no), None)
         if first is not None:
             assert first.char_start >= start
+
+
+def _numbered_line_pdf(tmp_path: Path, words_font: str) -> Path:
+    """A bold "1.", then a space set in a font of its own, then the words.
+
+    The layout Word produces and HDFC and ICICI use: the gap after a list number
+    is a span holding a single space.
+    """
+    import fitz
+
+    doc = fitz.open()
+    page = doc.new_page()
+    writer = fitz.TextWriter(page.rect)
+    writer.append((72, 100), "1.", font=fitz.Font("hebo"), fontsize=11)
+    writer.append(writer.last_point, " ", font=fitz.Font("tibo"), fontsize=11)
+    writer.append(writer.last_point, "Pre-Existing Diseases", font=fitz.Font(words_font), fontsize=11)
+    writer.write_text(page)
+    pdf = tmp_path / "numbered.pdf"
+    doc.save(pdf)
+    doc.close()
+    return pdf
+
+
+def test_a_space_set_as_its_own_span_is_kept(tmp_path: Path):
+    """Dropped, "1. Pre-Existing" read "1.Pre-Existing": no longer a clause
+    number, so the clause merged into the one above. 355 places in HDFC."""
+    line = ingest(_numbered_line_pdf(tmp_path, "helv")).lines[0]
+    assert line.text == "1. Pre-Existing Diseases"
+
+
+def test_words_bold_reads_the_words_not_the_number(tmp_path: Path):
+    plain = ingest(_numbered_line_pdf(tmp_path, "helv")).lines[0]
+    assert plain.bold and not plain.words_bold
+    bold = ingest(_numbered_line_pdf(tmp_path, "hebo")).lines[0]
+    assert bold.bold and bold.words_bold
+
+
+def test_a_page_number_below_a_tall_letterhead_is_not_text(tmp_path: Path):
+    """ICICI prints its page number 17% down the page, under the letterhead and
+    outside the margin band, so all 111 sat inside clause text. A number in the
+    body that does not repeat its place, like a table cell, stays."""
+    import fitz
+
+    path = tmp_path / "letterhead.pdf"
+    doc = fitz.open()
+    for n in range(1, 5):
+        page = doc.new_page()  # 595 x 842 points; 17% down is y = 143
+        page.insert_text((290, 150), str(n), fontsize=9)
+        page.insert_textbox(fitz.Rect(60, 200, 530, 760),
+                            "Body text.\n" * n + str(n * 7), fontsize=9)  # a new height each page
+    doc.save(path)
+    doc.close()
+
+    lines = [l.text.strip() for l in ingest(path).lines]
+
+    assert "1" not in lines and "4" not in lines
+    assert "7" in lines and "28" in lines
