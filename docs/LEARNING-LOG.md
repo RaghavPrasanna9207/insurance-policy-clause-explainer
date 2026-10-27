@@ -20307,3 +20307,25 @@ requests.
 **Check it yourself.** `python evals/run_all.py` from the repo root
 regenerates `evals/REPORT.md` from the cache in about a second; the stamp in
 its header names the commit and prompt version.
+
+**The app, used once more in a browser (2026-10-27).** API from this code, web
+app unchanged since M39. The synthetic policy's clause map listed 40 clauses,
+ranked, every severity shown with a number and a label. Three questions with
+known answers, typed word for word as in the eval so their stored answers
+replayed:
+
+| Question | Shown | |
+|---|---|---|
+| hit by a car ten days into the policy | Likely covered, citing 3.1's accident exception | right |
+| injured while arrested for shoplifting | Not covered, citing 4.3 (hazardous sports) | right verdict, wrong clause: the eval's stored answer cites 4.3 too, and the report counts it as a missed citation |
+| car stolen from the hospital car park | Your policy doesn't settle this | right verdict; the explanation still says "not covered", a contradiction inside the prose |
+
+The "not legal or financial advice" notice was on every screen. HDFC's
+clause map showed the group heading "1 Waiting Periods" as an entry of its
+own, as M50 intended. No console errors on either policy.
+
+One slip of the tester's, recorded because it looked like a bug: the question
+box keeps its text after an answer, so typing a second question without
+clearing it sends both glued together. The stored scenario runs
+(`scenariorun` in `data/app.db`) showed exactly what had been sent, which is
+how it was told apart from the app answering the wrong question.
