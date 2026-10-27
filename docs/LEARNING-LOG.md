@@ -19481,3 +19481,829 @@ judgement this project keeps out of the model, which is why settling it in code
 looked right, and why it failed once the code's evidence was coarser than the
 question.
 </details>
+
+---
+
+# M53 — The claim, apart from the person's history
+
+
+Written 2026-10-24 and 2026-10-25, on branch `m53-claimed-condition`.
+**Measured together with M55 and not merged**: the full run and the reasons
+are at the end of M55 (Failure 121). A "yes" rule that was part of the
+first version was dropped after a code review; the section "Settling yes in
+code: built, reviewed, dropped" says why.
+
+## The problem
+
+Indian health policies refuse an illness the person already had when the
+policy began until a waiting period has passed: 36 months in the synthetic
+policy (clause 3.2), 36 at HDFC (Excl01). This is the pre-existing-disease
+(PED) wait. It concerns only such illnesses. A broken arm from a fall last week
+is not one, whatever else the person has suffered from.
+
+Before the scenario pipeline reasons about a question, a first model call
+(stage 5a, `extract_facts` in `api/app/pipeline/scenario.py`) turns the
+question into structured facts under a JSON schema, `FACTS_SCHEMA`. Until M53
+two of those facts were:
+
+```python
+"condition": {"type": ["string", "null"]},
+...
+"pre_existing_condition": {"type": "string", "enum": ["yes", "no", "unknown"]},
+```
+
+One condition per question. That is fine while a question names one illness.
+This one names two:
+
+> "I have had diabetes for years. I took out this policy last month and was
+> admitted for a broken arm after a fall."
+
+It is eval case 41, `ped-mentioned-accident-claimed` (expected: covered,
+citing 2.1, never 3.2). On the code before M53 the facts step wrote
+`condition: "diabetes"`, left `pre_existing_condition: "unknown"`, and put the
+broken arm only in the free-text `notes`. The reasoning step then answered:
+
+> "The claim for treatment related to diabetes is not covered because the
+> policy has a pre-existing disease waiting period of 36 months"
+
+not_covered, 1 stored answer and 5 fresh samples, all citing only 3.2. The
+model was told the condition was diabetes, so it judged a diabetes claim.
+
+M51 met the same weakness from the other side. It tried to settle "yes" in
+code by reading phrases such as "had diabetes for years" and "since I was a
+child" (so that two right refusals, `ped-waiting-not-served` and
+`ho4-asthma-since-childhood`, could not be talked out of their reason). On
+case 41 that reading found "had diabetes for years", wrote
+`pre_existing_condition: "yes"`, and the PED line told the model the wait
+"still applies and blocks this claim": refused 3 of 3. M51 reverted it and
+named the missing piece: **"pre-existing" is a property of one illness, and
+the facts held it per question.** With one `condition`, code cannot tell "the
+old illness is the claim" from "an old illness is mentioned".
+
+## Concept 65: a fact belongs to the thing it describes
+
+A schema is a set of slots. When a question contains two things of a kind and
+the schema has one slot for that kind, the model must choose which one to
+keep, and nothing downstream can know which it chose or that a choice was
+made. Every fact that hangs off the slot ("how long has it been known", "did
+it predate the policy") silently inherits the choice.
+
+The repair is not a better instruction about which one to choose. It is to
+give each **role** its own slot, so no choice is needed: the thing the claim
+is for, and everything else. The test for a schema field is: *could a
+sentence a person might say contain two different answers to this field?* If
+yes, the field is attached to the wrong thing.
+
+The project had met the same shape before with ages: `age` and
+`age_at_policy_start` are two slots because one sentence can hold both, and a
+senior-citizen co-payment keys on only one of them.
+
+## Why the facts prompt is changed so rarely
+
+Changing `FACTS_SYSTEM` (`api/app/llm/prompts.py`) is expensive in a way that
+is easy to miss. The facts step also writes `notes`, a free-text summary, and
+the notes are shown to the reasoning step. Any wording change in the prompt
+rewords the notes of *every* question, including questions the change has
+nothing to do with, and M21 measured that costing four unrelated answers
+(Concept 52, *a free-text field is a side channel*). So M21, M22, M24 and M51
+all chose to read the person's words with code instead of touching the prompt.
+
+M53 cannot avoid it: the problem is which illness the model writes into the
+one slot, and only the schema and its prompt decide that. So this change is
+paid for with a full re-measurement of every eval question (the plan is at
+the end).
+
+## The designs considered
+
+**A. Code only, no prompt change.** Find "admitted for X" / "hospitalised
+for it" in the question with a pattern and compare X with the history phrase.
+Rejected: it is parsing free English with regular expressions, it works for
+the phrasings it was written against and no others (a rule that works for
+one input layout is a defect, not a design), and it still cannot repair a
+fact the model has already filled with the wrong illness, because the
+reasoning step reads the facts, not the pattern.
+
+**B. Redefine the one field.** Keep `condition`, but tell the prompt it means
+"the condition this claim is for". Smallest prompt change. Rejected as the
+whole answer: the history still has nowhere to go but `notes` or the one
+slot, and this project has measured (renaming `policy_age_value`, which the model read
+as "age at the policy", fixed ages landing in it) that the field *name* is the
+last instruction the model reads
+before writing the value. A slot called `condition` invites the most
+condition-like thing in the sentence.
+
+**C. A list of illnesses, each with its own role and dating.** For example
+`conditions: [{name, is_claimed, began: before_policy|after_policy|unknown}]`.
+The most general. Rejected: it hands the model a per-illness judgement
+("began before the policy?") that M51 showed it makes unreliably when the
+answer needs two statements combined ("for years" + "eight months after
+buying"), it rewrites every consumer of the facts, and nothing in the
+pipeline needs more than "the claimed one" and "the rest".
+
+**D. Chosen: two slots by role, and code settles "yes" only for the claimed
+one.** B's redefinition, plus a renamed key and a slot for the rest:
+
+```python
+# api/app/pipeline/scenario.py, FACTS_SCHEMA
+"claimed_condition": {"type": ["string", "null"]},
+"other_conditions": {"type": "array", "items": {"type": "string"}},
+```
+
+`pre_existing_condition` keeps its enum (`yes` / `no` / `unknown`); its
+meaning narrows to "the CLAIMED condition began before the policy", and so
+does `condition_known_for`. Neither new field is categorical, so neither
+needs an enum: they are names of illnesses, which no fixed list could hold.
+
+## What changed in the prompt
+
+`PROMPT_VERSION` went from `v66-true-exceptions` to `v67-claimed-condition`.
+One new section in `FACTS_SYSTEM`:
+
+```text
+WHICH CONDITION THE CLAIM IS FOR. claimed_condition is the illness or injury
+this claim is for: what the person was admitted, treated or operated for. If
+the description names only one illness, that is the claimed_condition, even
+when no treatment is described. Any OTHER illness the person mentions -
+usually their medical history - goes in other_conditions, never in
+claimed_condition.
+
+- "I have had arthritis for years and was admitted after a road accident"
+     -> claimed_condition: road accident injuries, other_conditions: ["arthritis"]
+- "My kidney disease began years ago and I was hospitalised for it last week"
+     -> claimed_condition: kidney disease, other_conditions: []
+- "I have epilepsy and need my gallbladder removed"
+     -> claimed_condition: gallbladder removal, other_conditions: ["epilepsy"]
+
+Everything below about a condition - when it was found, and whether it is
+pre-existing - is about the claimed_condition only. An illness in
+other_conditions never makes pre_existing_condition "yes".
+```
+
+and the last line now reads "For pre_existing_condition - whether the
+claimed_condition began before the policy - answer "unknown" unless ...".
+
+Two choices in it:
+
+- **The examples use illnesses no eval question uses** (arthritis, kidney
+  disease, epilepsy), so a right answer on case 41 is not the model copying
+  an example.
+- **"If the description names only one illness, that is the
+  claimed_condition."** Several fact-check sentences describe an illness with
+  no claim at all ("I was diagnosed with diabetes three years ago and have
+  held this policy for eight months"). Without this line, a careful model
+  could file that diabetes as history and leave the claim empty, and the
+  duration comparison in `derive_pre_existing` would lose its input.
+
+The narrowing of `condition_known_for` should also prevent a bug nobody had
+hit: "I was diagnosed with a heart condition ten years ago ... held this
+policy a year ... admitted with typhoid" could have dated the heart condition,
+and `derive_pre_existing` would have compared ten years with one and settled
+the typhoid claim as pre-existing. Only the prompt asks the model to date the
+claim and not the history; no code checks it. A fact-check sentence covers
+it, and it is unmeasured.
+
+## Where `other_conditions` goes
+
+The reasoning prompt lists every fact the person stated. `other_conditions`
+is left out of it, in `reasoning_request`:
+
+```python
+known = {k: v for k, v in facts.items() if stated(v) and k != "other_conditions"}
+```
+
+The field exists to give the history a slot that is not the claim's. The
+question already says "diabetes" once; a facts line saying it again, right
+above the PED wait's line, would only add weight to the wrong reading. The
+two places that matched clause words against "the procedure or condition the
+person named" (`named_in_question` in `scenario.py`, `_named_in` in
+`reduction.py`) now read `claimed_condition`, so an old illness no longer
+names clauses either.
+
+**It is not kept out of everything.** A code review found three other places
+it reaches: the clause-PICK prompt (`render_pick_request` in `prompts.py`
+lists the facts, `other_conditions` included), the API response, and the
+stored scenario run. And the facts step's free-text `notes`, which the
+reasoning prompt does show, can repeat the history in the model's own words.
+For case 41 it wrote: "The person has diabetes but it is not clear if it is
+pre-existing for the broken arm claim." Whether either side channel is why
+case 41 still fails is the next thing to measure.
+
+## Settling "yes" in code: built, reviewed, dropped
+
+The first version of this branch also brought back M51's reading of the "yes"
+direction ("had diabetes for years", "since childhood", "well before this
+policy" read as pre-existing), narrowed by the new field: it counted only when
+the part of the sentence holding the phrase named the claimed condition, with
+no negation, the policy age stated, and "for years" only for a policy held
+under two years. Its code is in this branch's history (commit `bf0eac6`,
+`stated_pre_existing` in `scenario.py`).
+
+A code review then called it directly, without the model, and found wrong
+"yes" answers, each of which refuses a claim that should be paid:
+
+| Question (policy held 6 months) | Claimed | Why it matched |
+|---|---|---|
+| "I have had kidney stones for years. Now admitted for kidney infection." | kidney infection | one shared word, "kidney" |
+| "I have had chronic back pain for years. Admitted for chronic kidney disease." | chronic kidney disease | one shared word, "chronic" |
+| "My father has had diabetes for years and I was admitted for diabetes." | diabetes | nothing checked whose illness it was |
+
+"Names the claimed condition" had been implemented as "shares any word of
+five letters or more with it", and words like "kidney", "chronic", "severe" or
+"infection" are shared by unrelated illnesses. Requiring every word to match
+would have broken the case it was written for ("asthma attack" against "my
+asthma started ..."). And a relative's history is common in health questions.
+
+So it was dropped. Nothing reads "yes" from the person's words; "unknown"
+stays "unknown", which is what the pipeline did before M53, and the two
+questions it was written for (`ped-waiting-not-served`,
+`ho4-asthma-since-childhood`) were answered right on "unknown" before. The
+lesson is M51's again, one level down: a rule that can refuse a claim needs
+its adversarial questions written before it is trusted, and "the same
+illness" is not "a shared word".
+
+**Not re-added: M51's re-ask check** (ask again when a refusal rests only on
+an unconfirmed PED wait). It broke the two right answers in M51 because they
+were "unknown", and without the "yes" rule they still are, so it stays out.
+
+## Tests (no model)
+
+In `api/tests/test_scenario.py`, a fake `client.complete_json` returns the
+facts the model would, and `extract_facts` runs the real code on them:
+
+| Test | Question shape | `pre_existing_condition` |
+|---|---|---|
+| `test_an_old_illness_mentioned_does_not_make_the_claim_pre_existing` | case 41, claim "broken arm" | unknown |
+| `test_never_had_it_before_the_policy_stays_no` | kidney stone "never had before taking the policy" | no |
+| `test_case_41_reaches_the_reasoning_step_as_an_injury` | case 41, through `reasoning_request` | prompt lists `claimed_condition: broken arm`, and "diabetes" appears once: in the person's own sentence |
+| `test_other_conditions_are_kept_out_of_the_reasoning_prompt` | | no `diabetes` in the prompt |
+
+The tests written for the dropped "yes" rule (a comma between claim and
+history, a negated history, the age limits, and the two "yes" cases) were
+removed with it. The first test above stays: any future "yes" rule has to
+pass it.
+
+## New eval material, written before any model run
+
+- `evals/golden/scenarios-heldout-5.json`, four questions, each with a medical
+  history: appendicitis with childhood asthma (covered), blood pressure "for
+  years" that IS the claim (not_covered, 3.2), dengue with a thyroid problem
+  "long before this policy" (covered), and pneumonia with migraines "for
+  years" in the same sentence (covered). Written after the code, so not fully
+  independent; never to be tuned on.
+- `evals/check_fact_extraction.py`: four sentences. Case 41 and a held-out
+  "heart condition ten years ago ... admitted with typhoid" must not come back
+  "yes" (a tuple now means "any of these"); the diabetes and asthma eval
+  sentences accept "yes" or "unknown", since no code reads "yes" from the words.
+
+## Checking the new fields
+
+The fact check (`evals/check_fact_extraction.py`) at first checked only
+`pre_existing_condition` and the durations on the M53 sentences, so a run
+could pass while the history still sat in `claimed_condition`: the very
+failure M53 exists to fix. It now checks the two new fields too.
+
+They are free text, and a 7B model names one injury "broken arm", "fractured
+arm" or "arm fracture", so an exact match would fail right answers. What
+matters is *which* illness landed in the field, and a word stem says that.
+The rule, `text(...)` in the script:
+
+```python
+claimed_condition=text(("arm", "fractur", "broke"), never=("diabet",)),
+other_conditions=text("diabet", never=("arm", "fractur", "broke")),
+```
+
+The value, lower-cased, must contain every required stem (a tuple means any
+one of its stems) and none of the `never` stems; a list is checked as all its
+items together. `never` is the half that catches the history written in as
+the claim. A value can also still be an exact value or a tuple of acceptable
+values, as before; `wrong_fields` decides all three, and
+`api/tests/test_fact_check.py` pins it down on fake facts.
+
+The limit, accepted: a stem is a substring, so a wrong answer that happens to
+contain it passes ("chest" accepts "chest pain" for a chest infection). The
+stems are chosen to tell the claim from the history in that sentence, which
+is all the check is for.
+
+Checks added:
+
+- **The M53 sentences**: case 41 (claim names the arm and not diabetes;
+  history names diabetes and not the arm), heart condition ten years ago with
+  typhoid claimed (claim typhoid, history heart), and the diabetes and asthma
+  claims (the illness is the claim; the history list does not repeat it).
+- **Older sentences whose claimed illness is plain**: a `claimed_condition`
+  stem on 26 of them (dengue, typhoid, pneumonia, stroke, hernia and so on), and
+  for `non-disclosure` the thyroid must be history, not the claim.
+  Procedure-only questions ("knee surgery", "nose job", "tonsils removed")
+  are left alone: whether the model files those under `procedure` or
+  `claimed_condition` is not a mistake either way.
+- **Four held-out sentences, written before any model run**:
+
+| Label | Sentence | Expected |
+|---|---|---|
+| `father-diabetes-me-dengue` | "My father has had diabetes for years; I was admitted with dengue." | claim dengue, not diabetes; not pre-existing "yes" |
+| `two-histories-hernia` | "I have asthma and high blood pressure, and I had a hernia operation three years into my policy." | claim hernia; history holds both asthma and blood pressure |
+| `no-illness-room-rent` | "I want to know if room rent is capped." | no claim (null or empty), empty history |
+| `history-after-claim` | "I was admitted with pneumonia last week. I have also had psoriasis since I was a teenager." | claim pneumonia, history psoriasis; not "yes" |
+
+Result, 2026-10-27, on M53 + M55: the four sentences above passed. Of the
+M53 sentences, the asthma claim put its own asthma in `other_conditions`, and
+`history-dated-claim-new` came back "yes". On the older sentences, three
+that `main` reads right came back wrong, all durations or ages (Failure 121).
+
+## Measured
+
+**Case 41, 2026-10-25** (5 fresh samples, Ollama 0.35.1, on the first version
+of this branch; the dropped "yes" rule could not fire here, since the claim is
+not the diabetes):
+
+- **Facts: right.** `claimed_condition: "broken arm"`, `other_conditions:
+  ["diabetes"]`, `pre_existing_condition: "unknown"`, policy held 1 month. On
+  the code before M53 the facts step had written `condition: "diabetes"`.
+- **Answer: still wrong.** not_covered 5 of 5, citing 3.2 (the PED wait) with
+  effect "requires": "The claim for treatment of a broken arm is not covered
+  because the policy has only been held for 1 month, which is less than the
+  36-month continuous coverage required by clause 3.2 ... since this condition
+  applies to the broken arm, the claim is not covered."
+- **Tried and reverted:** naming the claim in the PED line ("Unless the
+  description says the broken arm had begun by then", instead of "this one"):
+  still not_covered 5 of 5.
+
+So separating the claim from the history fixed the facts and not the answer.
+The history was still reaching the model by two other routes: the facts
+`notes`, and the clause-pick prompt. Closing those is M55, the next entry,
+which also records a third attempt (settling "pre-existing: no" in code) that
+made case 41 worse. M53 was never measured on the full question sets on its
+own: it was run together with M55, and the full run of both is at the end of
+M55, with the reasons neither was merged.
+
+**Why that run had to ask every question again.** The cache stores each model
+answer under a hash of the exact request (Concept 30, *a version label is not
+a cache key*). M53 changes the facts prompt, which is the first call every
+question makes, and the facts feed both the clause pick and the reasoning
+prompt. So no stored answer for any question matched any more.
+
+## Check it yourself
+
+From `api/`, with no model needed:
+
+```bash
+python -m pytest -q tests/test_scenario.py -k "pre_existing or claim or case_41"
+```
+
+**Predict before you look:** the first version of this branch had a rule
+that settled "pre-existing: yes" when a phrase like "for years" sat in the
+same part of a sentence as a word of the claimed condition. For "I have had
+kidney stones for years. Now admitted for kidney infection.", with the claim
+"kidney infection", what did it answer, and why was that a reason to drop it
+rather than to fix it?
+
+<details>
+<summary>Answer</summary>
+
+It answered "yes": "kidney" is in both. Fixing that by requiring every word of
+the claim to match breaks the case it was written for ("asthma attack" against
+"my asthma started when I was a child"), and no rule over words can tell "the
+same illness" from "a shared word" or "my father's illness" from "mine" in
+general. A wrong "yes" refuses a payable claim, a missed one leaves the model
+its own reading. When the safe direction is "do nothing", a rule that cannot be
+made safe is dropped, not patched.
+</details>
+
+---
+
+# M55 — Closing the other ways the history reached the model
+
+
+Written 2026-10-25 and 2026-10-27, on branch `m55-no-history-side-channels`
+(built on M53). **Measured together with M53 and not merged** (end of this
+entry, Failure 121). This entry also records branch
+`m54-accident-injury`, tried for the same question and not merged
+(Failure 120).
+
+## The problem
+
+Indian health policies refuse an illness the person already had when the
+policy began until a waiting period has passed: 36 months in the synthetic
+eval policy (clause 3.2). This is the pre-existing-disease (PED) wait. It
+concerns only such illnesses; an injury from a fall last week is not one.
+
+Eval case 41, `ped-mentioned-accident-claimed`, asks:
+
+> "I have had diabetes for years. I took out this policy last month and was
+> admitted for a broken arm after a fall."
+
+Expected: **covered**, citing the in-patient cover (2.1), never the PED wait
+(3.2).
+
+The scenario pipeline (`api/app/pipeline/scenario.py`) answers a question in
+three model calls:
+
+1. **Facts** (`extract_facts`): the question is turned into structured facts
+   under a JSON schema. One of them, `notes`, is free text.
+2. **Clause pick** (`pick_clauses`, prompt from `render_pick_request` in
+   `api/app/llm/prompts.py`): the model is shown the question, the facts and
+   one group of clauses at a time, and names the clauses that bear on it.
+3. **Reasoning** (`reasoning_request` / `render_reasoning_request`): the model
+   is shown the question, the facts, computed lines (waiting periods and so
+   on) and the chosen clauses, and answers covered / not_covered /
+   conditional / insufficient_information with citations. The two retries
+   ("nudges") resend this same prompt with one extra message, so they see
+   exactly what it sees.
+
+M53 split the facts' single `condition` into `claimed_condition` (what the
+claim is for) and `other_conditions` (the person's history), and kept
+`other_conditions` out of the reasoning prompt:
+
+```python
+# api/app/pipeline/scenario.py, reasoning_request
+known = {k: v for k, v in facts.items() if stated(v) and k != "other_conditions"}
+```
+
+On case 41 the facts came out right: `claimed_condition: "broken arm"`,
+`other_conditions: ["diabetes"]`, `pre_existing_condition: "unknown"`. The
+answer did not: not_covered, 5 samples of 5, citing 3.2, "since this condition
+applies to the broken arm".
+
+So the history was still reaching the model by two other routes:
+
+- **The note.** The facts step wrote, for case 41:
+  `notes: "The person has diabetes but it is not clear if it is pre-existing for the broken arm claim."`
+  That sentence went into the reasoning prompt under FACTS UNDERSTOOD, right
+  beside the PED wait's line. It is not something the person said. It is the
+  facts step guessing at the very question the reasoning step has to decide.
+- **The pick prompt.** `render_pick_request` lists every stated fact, so it
+  showed `- other_conditions: ['diabetes']` while the model chose which clauses
+  the reasoning step would see.
+
+(The API response and the stored scenario run also carry `other_conditions`;
+neither is shown to a model, so neither matters here.)
+
+## What `notes` actually carries
+
+Before deciding anything about `notes`, it was read, without the model. The
+LLM cache (`data/llm_cache.db`) stores every answer under a hash of the full
+request (model, messages, schema, options, KV precision, Ollama version; see
+`api/app/llm/cache.py`). The request itself is not stored, so a stored answer
+cannot be read back as "the facts for question X". It can be found the other
+way round: rebuild the facts request for every eval question, hash it the way
+`cache.make_key` does, and look the hash up. Opened read-only.
+
+Under the previous facts prompt (v66, on `main`), 115 of the 119 eval
+questions had stored facts; under M53's prompt (v67), only case 41. Reading
+the 116 notes:
+
+| What the note held | Count | Examples |
+|---|---:|---|
+| The question, copied or condensed | about 99 | "Hospitalised for diabetes 8 months after buying the policy"; case 41 under v66 was the whole question, word for word |
+| ... of which, something no structured field holds | ~25 | "It is my first health insurance" (9 HDFC/Star questions), "for the same condition", "the hospital claim has been accepted", "after drinking heavily", "not government-run" |
+| A remark about what is missing | 10 | "no specific details about expenses or hospitalization are provided"; "no specific procedure or condition is mentioned" (for teeth whitening, which is a procedure) |
+| The model's own conclusion, not said | 7 | "not due to a pre-existing condition" (two nose-job questions); "age at policy start is 50" (the person is 50 now); "The policy will cover expenses related to the kidney infection after the five months..."; case 41's v67 note |
+
+Two things follow.
+
+**Nothing in a note is information the reasoning step lacks.** The facts step
+is shown only the question, so every true thing a note says is in the
+question, and the question is printed verbatim at the top of both prompts.
+"It is my first health insurance" is valuable, but it is valuable in the
+person's sentence, which stays.
+
+**But dropping notes is not free.** The project measured it twice. M10 removed
+`notes` from the reasoning prompt entirely: one case fixed, three broken, and
+citation recall down from 0.774 to 0.677, because the condensed restatements
+had been helping a 7B model find the right clause (the alcohol exclusion for
+an intoxication injury, the disclosure condition for an undisclosed thyroid
+condition). M21 held the facts fixed and swapped only the note:
+`no-preauth-cashless` was right 3 of 3 with its note and 0 of 3 without. A
+note is a second statement of the situation in the model's own vocabulary,
+and the reasoning step leans on it.
+
+(One aside, not changed here: the existing filter for notes that invent
+coverage, `_invents_coverage` in `prompts.py`, lists "will be covered" but
+not "will cover", so the kidney-infection note above, "The policy will cover
+expenses...", passes it.)
+
+## The designs considered
+
+**(a) Drop `notes` from the reasoning prompt entirely.** Closes this side
+channel and every future one. Rejected: it changes the reasoning prompt of
+every question, and the one time it was measured it was net negative (M10).
+It is the M10 experiment again, with no reason to expect a different result.
+
+**(b) Drop a note only when it is speculation.** Rejected: "speculation" has
+no test code can run. A list of hedging words ("not clear if", "may be")
+would be a rule written against one note.
+
+**(c) Tell the facts step to keep notes to what was stated.** Rejected: a
+change to the facts prompt rewords the note of *every* question (Concept 52,
+*a free-text field is a side channel*), which M21 measured costing four
+unrelated answers. And it only discourages the guess; the model can still
+write one.
+
+**(d) Drop a note only when it names something in `other_conditions`.**
+Chosen. M53 already decided that the history is not shown to the reasoning
+step as a fact; a note that names it is the same content on a different path,
+so this does not make a new decision, it finishes the old one. It is checked
+against the facts step's own list, not against any phrasing: both come from
+the same model answer, so the note and the list use the same word for the
+illness. It touches only questions that have a history the claim is not for,
+which in the eval sets is a handful, not 119.
+
+**And separately: `other_conditions` out of the pick prompt.** No real
+alternative: the pick prompt already drops `notes` (since M49, because a note
+"sometimes answers the question instead of describing it"), and M53's reason
+for keeping the history out of the reasoning prompt applies word for word.
+
+## The change
+
+`api/app/llm/prompts.py`, in `render_pick_request`:
+
+```python
+known.pop("notes", None)
+# Kept out for the reason the reasoning prompt keeps it out (M53, M55): an
+# old illness the claim is not for, listed as a fact, puts the history
+# before the model a second time. The person's own words above still say it.
+known.pop("other_conditions", None)
+```
+
+`api/app/pipeline/scenario.py`, in `reasoning_request`, after the line that
+leaves `other_conditions` out:
+
+```python
+history = _stems(" ".join(facts.get("other_conditions") or []))
+if history.keys() & _stems(str(known.get("notes", ""))).keys():
+    del known["notes"]
+```
+
+`_stems` is the comparison the project already uses for "does this clause use
+a word from the question": the first six letters of every word of five
+letters or more, minus a short list of function words. Six letters so that
+"diabetes" meets "diabetic". A note naming any history word is dropped whole,
+not edited: a note with a word cut out of it is a sentence nobody wrote.
+
+`PROMPT_VERSION` is now `v68-no-history-side-channels`. It is a label for
+eval reports; the cache is keyed on the prompt text, so only requests whose
+text actually changed are regenerated.
+
+## What it can lose
+
+- **`non-disclosure`** ("I did not mention my thyroid condition on the
+  proposal form. I am now claiming for something unrelated...") is the case to
+  watch. M53 puts its thyroid in `other_conditions`, so its note ("Did not
+  mention thyroid condition on the proposal form...", under v66) is now
+  dropped. M10's lost citation was exactly this one: the disclosure condition,
+  for this question. Here the history *is* the subject of the question, and
+  the rule cannot tell.
+- A note that names the history and also says something useful loses both.
+- A synonym slips through: `other_conditions: ["high blood pressure"]` and a
+  note saying "hypertension" share no stem, so that note stays.
+
+## Measured: case 41
+
+All runs 2026-10-25, Ollama 0.35.1, fresh samples, from the main folder so
+every clause analysis replayed from the cache and only the scenario calls ran.
+
+| Code | Pre-existing fact | Covered | Cited 3.2 |
+|---|---|---:|---:|
+| M53 alone | unknown (from the model) | 0 of 5 | 5 of 5 |
+| M53 + M54, "no" forced on top | no | 0 of 3 | 3 of 3 |
+| **M53 + M55** | unknown | **4 of 5** | 1 of 5 |
+| M53 + M55 + M54 | no (set by M54's rule) | 0 of 5 | 5 of 5 |
+
+M55 is the change that moved case 41: from refused every time to covered in
+four of five. The fifth sample still cited 3.2 and missed 2.1, so the question
+is better, not settled. Five samples cannot tell 4 of 5 from 5 of 5 apart.
+
+## Failure 120: telling the model "this wait does not concern this claim" made it cite the wait
+
+**The setup.** A third branch, `m54-accident-injury`, was built alongside M55
+to fix case 41 another way. Its rule, `accident_injury()` in
+`api/app/pipeline/scenario.py`, changes `pre_existing_condition` from
+"unknown" to "no" when the claim is an injury and one sentence names an
+accident ("fall", "crash"), the injury and an admission, with no past-time
+word, no negation and no other person. "No" switches the PED line the
+reasoning prompt shows (`waiting.py`, `concerns_nothing_here`) from the hedge
+
+```text
+clause 3.2 (Pre-existing Disease Waiting Period): concerns ONLY an illness the
+person already had when the policy began. Unless the description says this one
+had begun by then, it is not the reason for this claim. (Requires 36 months;
+policy held 1 month, so not yet served.)
+```
+
+to the firmest wording the project has:
+
+```text
+clause 3.2 (Pre-existing Disease Waiting Period): concerns ONLY an illness the
+person already had when the policy began. This one began after the policy did,
+so this waiting period does not concern this claim
+```
+
+M22 had measured that firm line fixing a refused kidney stone, so the
+expectation was that it would fix the broken arm too.
+
+**What happened.** It did the opposite, twice. Forced "no" on M53's code:
+refused 3 of 3, each citing 3.2. M54's rule together with M55: refused 5 of 5,
+each citing 3.2, where M55 without it was covered 4 of 5. The model's reasons
+still quoted a "36-month continuous coverage" requirement, a number the firm
+line no longer states, so it was reading the clause text itself.
+
+**Why: not established.** The eval does not show which part of the prompt the
+model acted on, and no ablation was run (the project's deadline came first).
+What can be said: with the hedge, the line ends on "it is not the reason for
+this claim"; with "no", the clause is still listed, still named, and nothing
+in the line says what *is* the reason. That is a hypothesis, not a finding.
+What is established is narrower and still useful: the firm line is not a
+general fix for "a wait cited that should not be", and a rule's effect on one
+question can reverse when another change is made beside it.
+
+**What was done.** M54 was not merged; its branch is kept for the record. The
+lesson is Concept 64's (*change one input, in both directions*) seen from
+outside: M54 was tested on M53 and on M53 + M55, and the two answers agreed,
+which is the only reason dropping it is safe.
+
+## Measured: every question set, and why M53 + M55 were not merged
+
+**The full run.** Every question set, one sample each, on M53 + M55 together
+(branch `m56-final`), 2026-10-25, Ollama 0.35.1. One sample, not the usual
+majority of three, to fit the time left; a single sample can flip by chance,
+so every difference below was then re-asked three times on both codes.
+
+| Set | M53 + M55, one sample | Last full run (M38, majority of 3) |
+|---|---:|---:|
+| main (41) | 38/41 | 39/40 |
+| held-out 1 (16) | 13/16 | 14/16 |
+| held-out 2 (13) | 13/13 | 12/13 |
+| held-out 3 (3) | 1/3 | 1/3 |
+| held-out 4 (6) | 3/6 | 4/6 |
+| held-out 5 (4, new) | 2/4 | - |
+| HDFC (14) | 13/14 | 14/14 |
+| Star (10) | 10/10 | 10/10 |
+| Star, treatment abroad (7) | 7/7 | 6/7 |
+| Star, maternity (5) | 2/5 | not in that run |
+| **total** | **102/119** | |
+
+The comparison with M38 is not a comparison of M53 + M55 alone: `main` had
+gained M47-M50 since M38, and the synthetic and held-out sets had not been
+run on them. So each changed answer was re-asked, three fresh samples, on
+`m56-final` and on `main` in the same server session (2026-10-27):
+
+| Question | main | M53 + M55 | Verdict |
+|---|---|---|---|
+| `ped-mentioned-accident-claimed` (case 41) | refused 6/6 (M51) | covered 4/5 | fixed |
+| `ho5-asthma-history-appendicitis` | refused 3/3 | covered 2/3 | fixed |
+| `ho5-thyroid-history-dengue` | refused 3/3 | covered (one sample) | fixed |
+| `ho5-migraine-history-pneumonia` | refused 3/3 | refused 3/3 | still wrong |
+| `ho-dental-accident` | covered 3/3 | refused 3/3 | **broken** |
+| `hdfc-medicines-seven-months-after` | refused 3/3 | wrong 2/3 | **broken** |
+| `ho4-before-buying-checked-cover` | covered 3/3 | covered 2/3 | chance |
+| `day-care-not-listed` | wrong 3/3 | wrong 2/3 | already wrong on `main` (from M47-M50) |
+
+And the fact check (`evals/check_fact_extraction.py`, every sentence a fresh
+call): three sentences `main` reads right came back wrong, all about how long
+the policy had been held ("I'm 63 and I've had the policy for eleven years"
+gave an age at the start of 52; "we bought it in 2019" gave 0), and one that
+`main` reads wrong came back right.
+
+## Failure 121: a new section in the facts prompt changed fields it never mentioned
+
+**The setup.** M53 added one section to the facts prompt, about which illness
+the claim is for, placed after the rules for durations and before the rule
+for how long a condition has been known. Nothing in it mentions treatments,
+expense timing or policy ages.
+
+**What happened.** Both broken answers were traced to the facts, from the
+stored answers and without new model calls, by printing what each code
+extracted and the full prompt the answering step was shown:
+
+- `hdfc-medicines-seven-months-after` ("discharged after a hospital stay for
+  pneumonia seven months ago ... Can I claim the physiotherapy I am having
+  now?"). On `main` the facts held `procedure: "physiotherapy"` and expense
+  timing 7 months after discharge, and the answer was a refusal under
+  clause 1.6's 180-day window. On M53 the facts held
+  `claimed_condition: "pneumonia"`, no procedure and no timing, and the
+  answer was insufficient_information: the deciding numbers were gone.
+- `ho-dental-accident` ("I broke two teeth in a road accident and was
+  admitted to hospital for dental surgery"). On `main`, `procedure` held the
+  whole phrase. On M53, `procedure: "dental surgery"` and the claim the broken
+  teeth. "Dental" is a rare word that clause 4.6 (the dental exclusion) uses,
+  so the word-lookup hint (`named_in_question` in
+  `api/app/pipeline/scenario.py`) now named 4.6 to the model. That is the
+  right clause; the model then misread its exception: "The claim does not
+  meet this exception, as the dental surgery was not necessitated by an
+  Accident and did not require hospitalisation", against facts saying
+  `hospitalised: true` and a road accident.
+
+**Why.** This is Concept 52 (*a free-text field is a side channel*) at the
+scale of the whole prompt: a 7B model reads the facts prompt as one piece, and
+a new paragraph shifts how it fills fields the paragraph never names. Every
+question makes this call first, so the shift reaches every question.
+
+**A repair tried and reverted.** Moving the new section to the end of the
+prompt, next to the pre-existing rule it serves, wording unchanged: the fact
+check got worse, 13 sentences wrong instead of 9, and the HDFC timing was
+still lost. Position was not the cause, or not the only one.
+
+**The decision.** Fixed 3, broke 2, plus three misread durations: the
+project's rule is that a change earns its place with numbers, and this does
+not. M53 and M55 were **not merged**; `main` ships without them, and case 41
+and held-out 5 stay in the eval as known failures.
+
+**What would be tried next.** Leave the facts prompt byte-identical to
+`main` and ask the claim-or-history question in a second, separate model call
+whose answer only corrects the facts when they named a history illness as the
+claim. Every question with no history would then send exactly the requests it
+sends today, so it could not move, and the re-measurement would shrink to the
+handful of questions that mention a history. Not built.
+
+## Check it yourself
+
+From `api/`, no model needed:
+
+```bash
+python -m pytest -q tests/test_scenario.py -k "case_41 or note"
+```
+
+`test_case_41_history_reaches_no_prompt_except_in_the_persons_words` replaces
+the model with a fake that returns case 41's real stored facts and note, runs
+the clause pick and builds the reasoning prompt, and asserts that "diabetes"
+appears in each exactly once: in the question.
+
+**Predict before you look:** with this change, for the question "I have had
+asthma since childhood and was admitted with an asthma attack", the facts step
+might put "asthma attack" in `claimed_condition` and "asthma" in
+`other_conditions`. What happens to a note reading "Admitted with an asthma
+attack; asthma since childhood"? Is that a problem?
+
+<details>
+<summary>Answer</summary>
+
+It is dropped: "asthma" is a history word and the note contains it. That
+loses only a restatement, since the question still says both things, and the
+pre-existing reading does not depend on the note. The real problem in that
+case is upstream: if the facts step files the claimed illness's own history
+under `other_conditions`, the reasoning prompt no longer lists it as a fact
+either. That is M53's rule (the history is for "an illness the claim is not
+for"), and it is why `ho4-asthma-since-childhood` is in step 2 of the plan.
+</details>
+
+---
+
+# Final run — the shipped code, measured
+
+Written 2026-10-27. The project was closed with `main` at M50 plus two eval
+changes: held-out batch 5 (five questions, each mentioning an old illness
+while claiming for another) and the HDFC fix to stale `must_not_cite` ids
+(`1.5#2`/`1.6#2` had come to name "Multiple Policies" and "Moratorium" after
+M47/M48 re-cut the clauses; the plan-chart rows they meant are `1.5#4`/`1.6#4`).
+M53 and M55 were not merged (Failure 121).
+
+**How it was measured.** Every question was answered once: 120 questions,
+all served from answers this exact code had stored in earlier sessions (the
+cache key is the exact request, Concept 30, so a stored answer is what the
+code sends and gets today). The five answers that differed from M38's
+full run were then asked three fresh times each and scored by majority. This
+is weaker than M38's method (three samples for every question), chosen to fit
+the time left, and the README says so.
+
+| Set | Score |
+|---|---:|
+| main (41) | 38/41 |
+| held-out 1 (16) | 14/16 |
+| held-out 2 (13) | 12/13 |
+| held-out 3 (3) | 1/3 |
+| held-out 4 (6) | 4/6 |
+| held-out 5 (5) | 1/5 |
+| HDFC (14) | 13/14 |
+| Star (10) | 9/10 |
+| Star, treatment abroad (7) | 6/7 |
+| Star, maternity (5) | 3/5 |
+| **total** | **101/120** |
+
+**Four answers right at M38 are wrong now**, each confirmed on three fresh
+samples:
+
+| Question | Expected | Now |
+|---|---|---|
+| `day-care-not-listed` | insufficient_information | covered 3/3 |
+| `ho-icu-within-cap` | covered | conditional 2/3 |
+| `star-gallstones-no-timing` | insufficient_information | conditional 2/3 |
+| `hdfc-hernia-14-months` | not_covered | covered 3/3 |
+
+They broke somewhere in M47-M50, which changed how real policies are split
+into clauses and how clauses are picked for a question. Nobody saw it because
+M47-M50 were measured on HDFC and Star only, never on the synthetic sets. The
+hernia question is the one Failure 115 traced (wrong on M47 and M48, right on
+M49 and M50 in that session); three fresh samples now refuse to agree with
+that session, which is Failure 94's lesson again: agreement inside one run is
+not proof an answer is stable.
+
+**The lesson, for whoever continues this.** A change measured on only the
+sets it was aimed at is not measured. Every milestone from M47 on should have
+ended with the full run, and the cost that made it tempting to skip (two to
+three hours on this laptop) is exactly what Failure 121's second-call design
+would cut, by making the questions a change cannot reach send byte-identical
+requests.
+
+**Check it yourself.** `python evals/run_all.py` from the repo root
+regenerates `evals/REPORT.md` from the cache in about a second; the stamp in
+its header names the commit and prompt version.

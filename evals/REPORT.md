@@ -10,8 +10,8 @@ one run against the code and settings stated here.
 | Prompt version | `v66-true-exceptions` |
 | Decoding | num_ctx 28672, num_predict 1600, temperature 0.0, KV cache q8_0 |
 | Analysis batch size | 1 |
-| Commit | `3a6149a` |
-| Generated | 2026-10-13 15:25 UTC |
+| Commit | `b0812f3-dirty` |
+| Generated | 2026-10-27 12:54 UTC |
 | Total wall time | 1s (served from cache; a cold run takes several minutes) |
 
 The golden set is a 39-clause synthetic IRDAI-style policy authored for
@@ -26,13 +26,14 @@ cannot drift apart. No real insurer wording is used.
 |---|---:|---|
 | Clause classification (macro-F1) | **0.973** | quality |
 | Risk ranking expectations | **8/9** | quality |
-| Scenario verdict accuracy | **0.925** | quality |
+| Scenario verdict accuracy | **0.902** | quality |
 | Scenario verdict accuracy, held-out batch 1 (16 cases, read while diagnosing M14 failures - no longer clean) | **0.875** | quality |
 | Scenario verdict accuracy, held-out batch 2 (13 cases, written before running; one case read while diagnosing) | **0.923** | quality |
 | Scenario verdict accuracy, held-out batch 3 (3 cases, written for M21 before its code and before any run) | **0.333** | quality |
 | Scenario verdict accuracy, held-out batch 4 (6 cases, written for M22 before its code and before any run) | **0.667** | quality |
-| Scenario citation recall | **0.844** | quality |
-| Scenario false citation rate | **0.000** | quality |
+| Scenario verdict accuracy, held-out batch 5 (5 cases, written for M53 after its code, before any model run) | **0.200** | quality |
+| Scenario citation recall | **0.818** | quality |
+| Scenario false citation rate | **0.167** | quality |
 | Quote fabrication rate | **0.000** | quality |
 | **Citation detection integrity** | **1.000** | **guarantee** |
 
@@ -102,7 +103,7 @@ inspected, so the metric tests the system rather than rationalising it.
 
 ## 3. Scenario simulator
 
-**Verdict accuracy 0.925** (37/40) · citation recall 0.844 · detection integrity 1.000
+**Verdict accuracy 0.902** (37/41) · citation recall 0.818 · detection integrity 1.000
 
 | Case | Expected | Got | Cited | Quotes verified |
 |---|---|---|---|---|
@@ -146,6 +147,7 @@ inspected, so the metric tests the system rather than rationalising it.
 | `ambulance-admissible` | covered | covered | 3.1, 3.2 (missing 2.5) | yes |
 | `day-care-not-listed` | insufficient_information | covered ⚠ | 2.1, 3.1, 3.2 | yes |
 | `dependant-not-addressed` | insufficient_information | insufficient_information | 3.1 | yes |
+| `ped-mentioned-accident-claimed` | covered | not_covered ⚠ | 3.2 (missing 2.1) | yes |
 
 ### What the misses actually need
 
@@ -154,6 +156,7 @@ These are not random. Read them together:
 - **`copay-applies-emergency`** — expected `conditional`, got `insufficient_information`. 70 at inception is over 60, so the 20% co-payment applies to the whole admissible claim. Two years held clears the 30-day initial waiting period, and pneumonia is not in the specified-disease list.
 - **`oral-chemo-limit`** — expected `conditional`, got `covered`. Oral chemotherapy is named in the modern treatment limit, restricted to 50% of sum insured per policy year.
 - **`day-care-not-listed`** — expected `insufficient_information`, got `covered`. In-patient cover needs more than twenty four consecutive hours, so 2.1 does not apply. Day care cover applies only to treatments listed in Annexure II, and this document does not contain that annexure - so whether a six-hour drip qualifies cannot be answered from what is here.
+- **`ped-mentioned-accident-claimed`** — expected `covered`, got `not_covered`. The claim is a broken arm from a fall, an Injury that 2.1 covers. The diabetes is history, not the claim, so the pre-existing-disease wait (3.2) cannot refuse it. The 30-day initial wait (3.1) may still be running, but it excepts claims arising out of an Accident, so citing it is fine and not required. Nothing reduces the claim.
 
 Most require either date arithmetic (is 5 years more than 36 months?)
 or following an exception inside a clause ("unless necessitated by an
@@ -161,7 +164,7 @@ Accident"). That is multi-hop reasoning over interacting rules, which
 is where a 7B model is weakest.
 
 Single-clause classification scores macro-F1 0.973. Combining three interacting rules
-scores 0.925. **The gap between those two
+scores 0.902. **The gap between those two
 numbers is the finding**, and it is the case for measuring a hosted
 frontier model on this same set before assuming a bigger model is or
 is not worth it.
@@ -192,6 +195,12 @@ the majority-of-three figures.
 **Batch 4** (written for M22 before its code and before any run): verdict accuracy 0.667 (4/6), citation recall 0.600, detection integrity 1.000
 - `ho4-thyroid-after-cover`: expected `covered`, got `conditional`
 - `ho4-back-trouble-on-and-off`: expected `insufficient_information`, got `not_covered`
+
+**Batch 5** (written for M53 after its code, before any model run): verdict accuracy 0.200 (1/5), citation recall 0.200, detection integrity 1.000
+- `ho5-diabetes-history-broken-arm`: expected `covered`, got `not_covered`
+- `ho5-asthma-history-appendicitis`: expected `covered`, got `not_covered`
+- `ho5-thyroid-history-dengue`: expected `covered`, got `not_covered`
+- `ho5-migraine-history-pneumonia`: expected `covered`, got `not_covered`
 
 
 ---

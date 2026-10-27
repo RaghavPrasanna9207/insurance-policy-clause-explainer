@@ -459,6 +459,19 @@ No code from this entry is in the repository. A check that re-asked a refusal re
 - **Failure 118: the check reached two right answers, and broke both** - "diabetes for years" paid 5 of 5; asthma refused without its reason.
 - **Failure 119: a question nobody had written** - an old illness mentioned, a broken arm claimed: refused 3 of 3 under the diabetes rule. The facts hold one condition per question, so the rule cannot be narrowed without a schema change.
 
+### M53 - The claim, apart from the person's history (not merged)
+The facts held one `condition` per question, so "diabetes for years ... admitted for a broken arm" was judged as a diabetes claim. Now `claimed_condition` and `other_conditions` are separate slots, and only the claim is dated. Read it for how a schema slot forces a hidden choice on the model, and for a code rule that was dropped after a review found it refusing payable claims.
+- **Concept 65: a fact belongs to the thing it describes** - if one sentence can hold two answers to a field, the field is attached to the wrong thing.
+- Settling "pre-existing: yes" from the person's words: built, reviewed, dropped ("kidney stones" and "kidney infection" share a word; a father's diabetes is not yours).
+
+### M55 - Closing the other ways the history reached the model (not merged)
+The facts were right after M53, and the broken arm was still refused: the history reached the model through the facts `notes` and the clause-pick prompt. Both are now closed, and case 41 went from 0 of 5 to 4 of 5 covered. Read it for how the notes were audited from the cache without the model, and for why dropping all notes was rejected (M10 measured it net negative).
+- **Failure 120: telling the model "this wait does not concern this claim" made it cite the wait** - a third branch (M54) settled "not pre-existing" in code and turned 4 of 5 into 0 of 5; not merged, cause not established.
+- **Failure 121: a new section in the facts prompt changed fields it never mentioned** - fixed 3 history questions, broke 2 others and three policy durations; not merged. Ends with the design to try next.
+
+### Final run - the shipped code, measured
+101 of 120 on M50's code. Read it for four answers that broke during M47-M50 without anyone noticing, and why a change measured only on the sets it targets is not measured.
+
 ---
 
 ## Related documents
