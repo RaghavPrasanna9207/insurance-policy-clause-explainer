@@ -10,8 +10,8 @@ one run against the code and settings stated here.
 | Prompt version | `v66-true-exceptions` |
 | Decoding | num_ctx 28672, num_predict 1600, temperature 0.0, KV cache q8_0 |
 | Analysis batch size | 1 |
-| Commit | `b0812f3-dirty` |
-| Generated | 2026-10-27 12:54 UTC |
+| Commit | `49bb588` |
+| Generated | 2026-10-27 12:57 UTC |
 | Total wall time | 1s (served from cache; a cold run takes several minutes) |
 
 The golden set is a 39-clause synthetic IRDAI-style policy authored for
