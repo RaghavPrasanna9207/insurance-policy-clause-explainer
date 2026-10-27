@@ -1,0 +1,61 @@
+{
+  "_why": [
+    "FIFTH held-out batch. Never used to choose or tune a change.",
+    "",
+    "M53 was measured and NOT merged (see M53 and M55 in the learning log),",
+    "so on the shipped code these questions are a record of a known gap.",
+    "",
+    "Written for M53, after its code but before any model run of it. M53",
+    "splits the facts' one `condition` into the condition the claim is for",
+    "(`claimed_condition`) and any other the person mentions",
+    "(`other_conditions`), and lets code settle 'pre-existing: yes' only when",
+    "the person's words date the CLAIMED condition. Every case here mentions a",
+    "medical history; in some the claim is for that history, in others for",
+    "something new. The first case is the question from M51 (Failure 119)",
+    "that a 'yes' rule refused under the diabetes wait.",
+    "",
+    "Same synthetic policy and conventions as scenarios.json. Same author as",
+    "the fix, so not fully independent."
+  ],
+  "cases": [
+    {
+      "id": "ho5-diabetes-history-broken-arm",
+      "scenario": "I have had diabetes for years. I took out this policy last month and was admitted for a broken arm after a fall.",
+      "expected_verdict": "covered",
+      "must_cite": ["2.1"],
+      "must_not_cite": ["3.2"],
+      "why": "The claim is for an injury from a fall, not for the diabetes. The pre-existing disease wait concerns only the diabetes, and the initial 30-day wait excepts accidents."
+    },
+    {
+      "id": "ho5-asthma-history-appendicitis",
+      "scenario": "I have had asthma since I was a child. I have held this policy for a year and was admitted for appendicitis.",
+      "expected_verdict": "covered",
+      "must_cite": ["2.1"],
+      "must_not_cite": ["3.2"],
+      "why": "Appendicitis is the claim and nothing dates it before the policy; the childhood asthma is history the claim is not for. A year clears the initial wait."
+    },
+    {
+      "id": "ho5-blood-pressure-claimed",
+      "scenario": "I have suffered from high blood pressure for years, and eight months after I bought this policy I was admitted because of it.",
+      "expected_verdict": "not_covered",
+      "must_cite": ["3.2"],
+      "why": "The claim is for the blood pressure itself, which the person has had for years - longer than eight months of cover - so it predates the policy, and eight months is short of the 36-month pre-existing disease wait."
+    },
+    {
+      "id": "ho5-thyroid-history-dengue",
+      "scenario": "My thyroid problem began long before I took out this policy. I have held it for 14 months and was admitted with dengue fever.",
+      "expected_verdict": "covered",
+      "must_cite": ["2.1"],
+      "must_not_cite": ["3.2"],
+      "why": "Dengue is the claim, caught under cover; the thyroid problem is history the claim is not for."
+    },
+    {
+      "id": "ho5-migraine-history-pneumonia",
+      "scenario": "I have suffered from migraines for years and was admitted for pneumonia six months after buying this policy.",
+      "expected_verdict": "covered",
+      "must_cite": ["2.1"],
+      "must_not_cite": ["3.2"],
+      "why": "History and claim in one sentence: the migraines are old, the pneumonia is the claim and is not described as existing before the policy."
+    }
+  ]
+}
